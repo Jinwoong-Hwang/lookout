@@ -20,7 +20,7 @@ if [ "$BEHIND" = "0" ]; then
   echo "✓ 이미 최신 ($(git rev-parse --short HEAD))"
   exit 0
 fi
-echo "  origin이 $BEHIND개 커밋 앞섬:"
+echo "  origin이 ${BEHIND}개 커밋 앞섬:"
 git --no-pager log --oneline "HEAD..$UPSTREAM" | sed 's/^/    /'
 
 if [ "${1:-}" = "--check" ]; then
