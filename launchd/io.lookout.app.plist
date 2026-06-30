@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>io.lookout.app</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__APPBIN__</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>__HERMES_HOME__/logs/app.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HERMES_HOME__/logs/app.err.log</string>
+</dict>
+</plist>

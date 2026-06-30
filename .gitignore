@@ -1,0 +1,21 @@
+# 런타임 상태·시크릿 — 절대 커밋 X
+config.json
+db/
+worktrees/
+repos/
+logs/
+
+# 빌드 산출물
+macapp/Lookout.app/
+macapp/*.app/
+macapp/Lookout.iconset/
+macapp/gen_icon
+macapp/Lookout.icns
+
+# python
+__pycache__/
+*.pyc
+
+# misc
+.DS_Store
+*.lock

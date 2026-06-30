@@ -1,0 +1,50 @@
+{
+  "_comment": "Lookout PR Auto-Review config. ./setup.sh가 이 파일을 config.json으로 복사하고 webhook_secret을 발급합니다. allowlist/watch_authors만 본인 것으로 편집하세요.",
+  "db_path": "db/kanban.sqlite",
+
+  "receiver_host": "127.0.0.1",
+  "receiver_port": 8787,
+  "receiver_path": "/webhook",
+  "webhook_secret": "",
+
+  "_slack": "(선택) Slack 멘션 catch-up. 안 쓰면 비워둠.",
+  "slack_path": "/slack",
+  "slack_signing_secret": "",
+  "slack_bot_token": "",
+  "slack_user_id": "",
+  "slack_workspace": "",
+
+  "_allowlist": "리뷰 대상 repo (owner/repo). 본인이 gh로 접근 가능한 repo만.",
+  "allowlist": [
+    "your-org/your-repo"
+  ],
+  "_watch_authors": "추적할 PR 작성자(깃 로그인). 비우면 전체. 이들 PR이 triage에 쌓임.",
+  "watch_authors": [
+    "your-github-login"
+  ],
+  "_auto_review_authors": "triage 없이 곧바로 자동 리뷰할 작성자. 비우면 전부 수동 선택.",
+  "auto_review_authors": [],
+
+  "events": ["pull_request", "push", "pull_request_review", "issue_comment"],
+
+  "gh_bin": "gh",
+  "claude_bin": "claude",
+  "claude_model": "claude-opus-4-8",
+  "claude_effort": "xhigh",
+  "codex_bin": "codex",
+  "codex_model": null,
+
+  "worktree_dir": "worktrees",
+  "repo_cache_dir": "repos",
+
+  "poller_interval_minutes": 5,
+  "gc_interval_minutes": 30,
+
+  "_dry_run": "true면 GitHub에 게시/승인 안 하고 로그/미리보기만. 처음엔 true 권장.",
+  "dry_run_comments": true,
+  "dry_run_approve": true,
+
+  "max_findings_per_review": 8,
+  "min_confidence": "medium",
+  "max_concurrent_reviews": 3
+}

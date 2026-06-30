@@ -1,0 +1,33 @@
+# Slack 앱 manifest — https://api.slack.com/apps → Create New App → "From a manifest"
+# request_url 은 Hookdeck Slack Source URL 로 교체할 것.
+display_information:
+  name: Hermes Mentions
+  description: 내 Slack 멘션을 Hermes 대시보드로 catch-up
+  background_color: "#0c0e14"
+features:
+  bot_user:
+    display_name: hermes-mentions
+    always_online: true
+oauth_config:
+  scopes:
+    bot:
+      # 멘션을 채널에서 받기 위한 history scope (봇이 멤버인 채널만 수신됨)
+      - channels:history
+      - groups:history
+      - im:history
+      - mpim:history
+      # id -> 이름 해석용
+      - users:read
+      - channels:read
+      - groups:read
+settings:
+  event_subscriptions:
+    request_url: https://YOUR-HOOKDECK-SOURCE-URL   # ← Hookdeck Slack Source URL
+    bot_events:
+      - message.channels
+      - message.groups
+      - message.im
+      - message.mpim
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+  token_rotation_enabled: false

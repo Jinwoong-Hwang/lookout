@@ -1,0 +1,10 @@
+#!/bin/bash
+# Convenience wrapper. Usage: ./hermes <status|list|findings|logs|unblock|tick|receiver>
+cd "$(dirname "$0")" || exit 1
+if [ "$1" = "receiver" ]; then
+  exec python3 -m src.receiver
+fi
+if [ "$1" = "dashboard" ]; then
+  exec python3 -m src.dashboard
+fi
+exec python3 -m src.cli "$@"
