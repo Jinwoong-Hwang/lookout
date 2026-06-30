@@ -15,6 +15,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     var webView: WKWebView?
     var timer: Timer?
 
+    var appVersion: String {
+        (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "?"
+    }
+
     func applicationDidFinishLaunching(_ note: Notification) {
         ensureBackend()
         buildMainMenu()
@@ -41,7 +45,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
         let appItem = NSMenuItem(); main.addItem(appItem)
         let appMenu = NSMenu(); appItem.submenu = appMenu
-        appMenu.addItem(withTitle: "Lookout", action: nil, keyEquivalent: "")
+        appMenu.addItem(withTitle: "Lookout v\(appVersion)", action: nil, keyEquivalent: "")
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "백엔드 재시작", action: #selector(restartBackend), keyEquivalent: "")
         appMenu.addItem(withTitle: "업데이트 확인…", action: #selector(checkForUpdates), keyEquivalent: "u")
