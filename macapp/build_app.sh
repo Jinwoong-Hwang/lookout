@@ -2,6 +2,7 @@
 # Lookout.app 빌드 (한 번만 실행하면 됨). 이후엔 더블클릭/Dock으로 실행.
 set -euo pipefail
 cd "$(dirname "$0")"
+REPO_DIR="$(cd .. && pwd)"   # update.sh가 있는 lookout repo 경로 (앱에 기록)
 APP="Lookout.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
@@ -31,6 +32,9 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>NSAppTransportSecurity</key><dict><key>NSAllowsLocalNetworking</key><true/></dict>
 </dict></plist>
 PLIST
+
+# 앱이 update.sh를 찾을 수 있도록 repo 경로 기록
+/usr/libexec/PlistBuddy -c "Add :LookoutRepoDir string $REPO_DIR" "$APP/Contents/Info.plist"
 
 echo "→ ad-hoc 코드서명…"
 codesign --force --deep --sign - "$APP" 2>/dev/null || echo "  (codesign 생략 — 실행엔 지장 없음)"
