@@ -159,14 +159,16 @@ HTML = """<!DOCTYPE html><html lang="ko"><head><meta charset="utf-8">
 :root{--bg:#11151c;--panel:#1b212b;--panel2:#232b38;--line:#333d4d;--ink:#f1f5fb;
 --muted:#9fabbe;--dim:#6b7688;--accent:#2dd4bf;--purple:#a78bfa;--good:#4ade80;--warn:#fbbf24;--bad:#fb7185;}
 *{box-sizing:border-box}
+html,body{height:100%}
 body{margin:0;background:var(--bg);color:var(--ink);font-size:14px;line-height:1.5;
-font-family:-apple-system,BlinkMacSystemFont,"Pretendard",Roboto,sans-serif;-webkit-font-smoothing:antialiased}
+font-family:-apple-system,BlinkMacSystemFont,"Pretendard",Roboto,sans-serif;-webkit-font-smoothing:antialiased;
+display:flex;flex-direction:column;overflow:hidden}
 header{position:sticky;top:0;z-index:20;padding:13px 22px;display:flex;align-items:center;gap:12px;
 background:rgba(11,13,19,.86);backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
 h1{font-size:17px;margin:0;font-weight:750;letter-spacing:-.01em}
 .sub{color:var(--muted);font-size:12.5px}
-.board{display:flex;gap:12px;padding:18px;overflow-x:auto;align-items:flex-start}
-.board.stack{display:block}
+.board{flex:1 1 auto;min-height:0;display:flex;gap:12px;padding:18px;overflow-x:auto;overflow-y:hidden;align-items:stretch}
+.board.stack{display:block;overflow-y:auto;overflow-x:hidden}
 .toggle{display:flex;gap:6px;margin-left:6px}
 .toggle button.active{background:var(--accent);color:#06101f;border-color:var(--accent);font-weight:650}
 .sec{margin:0 0 16px}
@@ -174,11 +176,12 @@ h1{font-size:17px;margin:0;font-weight:750;letter-spacing:-.01em}
 .sec .cards{display:flex;flex-direction:row;flex-wrap:wrap;gap:10px;padding:0}
 .sec .card{width:262px}
 .statuspill{font-size:11px;font-weight:650;padding:2px 9px;border-radius:20px;white-space:nowrap}
-.col{background:var(--panel);border:1px solid var(--line);border-radius:14px;min-width:272px;max-width:300px;flex:0 0 auto}
-.col h2{font-size:12.5px;font-weight:700;margin:0;padding:13px 15px;border-bottom:1px solid var(--line);color:var(--ink);display:flex;justify-content:space-between;align-items:center;gap:8px}
+.col{background:var(--panel);border:1px solid var(--line);border-radius:14px;min-width:272px;max-width:300px;flex:0 0 auto;display:flex;flex-direction:column;max-height:100%}
+.col h2{flex:0 0 auto;font-size:12.5px;font-weight:700;margin:0;padding:13px 15px;border-bottom:1px solid var(--line);color:var(--ink);display:flex;justify-content:space-between;align-items:center;gap:8px}
 .col h2 .lh{display:flex;align-items:center;gap:8px}
 .col .n{background:var(--panel2);border-radius:20px;padding:1px 9px;color:var(--muted);font-size:11.5px}
 .cards{padding:11px;display:flex;flex-direction:column;gap:11px;min-height:30px}
+.col .cards{flex:1 1 auto;overflow-y:auto;min-height:0}
 .card{position:relative;background:var(--panel2);border:1px solid var(--line);border-left:4px solid var(--dim);border-radius:11px;padding:13px;cursor:pointer;transition:border-color .14s,transform .08s,box-shadow .14s}
 .card:hover{border-color:var(--accent);transform:translateY(-1px);box-shadow:0 6px 18px rgba(0,0,0,.28)}
 .pr{font-size:13px;font-weight:700;color:var(--ink);display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:7px}
