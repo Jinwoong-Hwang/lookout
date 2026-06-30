@@ -221,24 +221,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
     @objc func checkForUpdates() {
         guard let dir = repoDir() else {
-            showAlert("업데이트 위치를 찾을 수 없음",
-                      "lookout repo를 찾지 못했습니다. build_app.sh로 앱을 다시 빌드하면 경로가 기록됩니다.")
+            showAlert("업데이트 위치를 찾을 수 없음", "앱을 다시 설치한 뒤 시도해 주세요.")
             return
         }
         runScript(dir: dir, args: ["--check"], timeout: 60) { code, out in
             if code != 0 {
                 self.showAlert("업데이트 확인 실패",
-                               out.isEmpty ? "git fetch 실패 — 네트워크/인증을 확인하세요." : self.tail(out))
+                               out.isEmpty ? "네트워크 연결을 확인해 주세요." : self.tail(out))
                 return
             }
             if out.contains("이미 최신") {
-                self.showAlert("최신 버전입니다 ✓", "추가 업데이트가 없습니다.")
+                self.showAlert("최신 버전입니다", "")
                 return
             }
             let a = NSAlert()
             a.messageText = "업데이트가 있습니다"
-            a.informativeText = self.commitSummary(out)
-                + "\n\n지금 업데이트할까요?\n(코드 받기 · 데몬 재시작 · 필요 시 앱 재빌드 포함)"
+            let log = self.commitSummary(out)
+            a.informativeText = log.isEmpty ? "지금 업데이트할까요?" : log + "\n\n지금 업데이트할까요?"
             a.addButton(withTitle: "업데이트")
             a.addButton(withTitle: "나중에")
             if a.runModal() == .alertFirstButtonReturn { self.applyUpdate(dir: dir) }
@@ -251,15 +250,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             self.hideProgress()
             if code != 0 { self.showAlert("업데이트 실패", self.tail(out)); return }
             self.webView?.reload()                       // 새 대시보드 HTML/JS 반영
-            if out.contains("재빌드") {                    // 앱 자체가 갱신됨 → 재실행 권유
+            if out.contains("재빌드") {                    // 새 버전 적용에 재실행 필요
                 let a = NSAlert()
-                a.messageText = "업데이트 완료 — 재실행 필요"
-                a.informativeText = "앱 자체가 갱신되었습니다. 지금 재실행할까요?"
+                a.messageText = "업데이트 완료"
+                a.informativeText = "지금 재실행할까요?"
                 a.addButton(withTitle: "재실행")
                 a.addButton(withTitle: "나중에")
                 if a.runModal() == .alertFirstButtonReturn { self.relaunch() }
             } else {
-                self.showAlert("업데이트 완료 ✓", "최신 버전으로 갱신되었습니다.")
+                self.showAlert("업데이트 완료", "")
             }
         }
     }
@@ -338,12 +337,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         a.runModal()
     }
 
-    /// --check 출력에서 "N개 커밋 앞섬" 줄 + 들여쓴 커밋 목록만 추려 보여줌.
+    /// --check 출력의 들여쓴 커밋 줄에서 해시를 떼고 제목만 불릿으로.
     func commitSummary(_ out: String) -> String {
-        let lines = out.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-        let picked = lines.filter { $0.contains("앞섬") || $0.hasPrefix("    ") }
-        let joined = picked.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-        return joined.isEmpty ? "새 버전이 있습니다." : joined
+        out.split(separator: "\n").map(String.init)
+            .filter { $0.hasPrefix("    ") }
+            .map { line -> String in
+                let t = line.trimmingCharacters(in: .whitespaces)   // "<hash> <subject>"
+                if let sp = t.firstIndex(of: " ") { return "• " + String(t[t.index(after: sp)...]) }
+                return "• " + t
+            }
+            .joined(separator: "\n")
     }
 
     func tail(_ s: String, _ n: Int = 14) -> String {
