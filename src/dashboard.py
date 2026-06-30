@@ -240,7 +240,7 @@ background:transparent;border:none;padding:3px 5px;border-radius:6px;opacity:.4}
 .xbtn:hover{opacity:1;color:var(--bad);background:var(--panel)}
 .empty{color:var(--muted);font-size:11px;text-align:center;padding:8px 0}
 /* modal */
-.ov{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;padding:24px}
+.ov{position:fixed;inset:0;z-index:1000;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;padding:24px}
 .ov.show{display:flex}
 .modal{background:var(--panel);border:1px solid var(--line);border-radius:14px;max-width:720px;width:100%;max-height:86vh;overflow:auto;padding:22px}
 .modal h3{margin:0 0 6px;font-size:18px}
