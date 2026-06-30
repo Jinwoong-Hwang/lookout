@@ -9,7 +9,7 @@ import os
 import subprocess
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import db, poller, worktree
+from . import db, engines, poller, worktree
 
 
 def kick_tick():
@@ -94,6 +94,9 @@ def do_action(action, card_id, engine="claude"):
         if not card:
             return False
         if action == "start" and card["kind"] == "review" and card["status"] == "triage":
+            if not engines.is_ready(engine):  # 로그인/설치 안 된 엔진으로 시작 차단
+                db.log_event(c, "operator_start_blocked", card["key"], {"engine": engine})
+                return False
             db.set_engine(c, card["id"], engine)
             db.set_status(c, card["id"], "intake")
             db.log_event(c, "operator_start", card["key"], {"engine": engine})
@@ -189,6 +192,10 @@ display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hi
 .btns{display:flex;gap:7px;margin-top:11px}
 .rev{display:flex;gap:7px;margin-top:11px}
 .rev button{flex:1}
+.rev button:disabled{background:var(--panel);border-color:var(--line);color:var(--dim);filter:none;cursor:not-allowed}
+.engnote{margin-top:11px;font-size:11.5px;color:var(--warn);line-height:1.45;
+  background:rgba(251,191,36,.08);border:1px solid rgba(251,191,36,.32);border-radius:9px;padding:8px 10px}
+.engnote code{background:var(--bg);padding:1px 5px;border-radius:5px;color:var(--warn)}
 button{font:inherit;font-size:12.5px;font-weight:600;border:1px solid var(--line);background:var(--panel2);
 color:var(--ink);border-radius:9px;padding:7px 12px;cursor:pointer;transition:filter .12s,transform .05s}
 button:hover{filter:brightness(1.13)}
@@ -266,14 +273,25 @@ background:transparent;border:none;padding:3px 5px;border-radius:6px;opacity:.4}
 <div class="toggle"><button id="tLane" class="active" onclick="setView('lane')">레인별</button><button id="tAuthor" onclick="setView('author')">사람별</button></div>
 <button id="refreshBtn" onclick="refresh()">🔄 PR 가져오기</button>
 <span class="sub" id="sub">로딩…</span>
+<span class="sub" id="engStat" style="margin-left:14px"></span>
 <span class="sub" style="margin-left:auto">5초마다 자동 새로고침</span></header>
 <div class="filterbar" id="filterbar"></div>
-<section class="mentions" id="mentions"></section>
+<section class="mentions" id="mentions" style="display:none"></section>
 <div class="board" id="board"></div>
 <div class="ov" id="ov"><div class="modal" id="modal"></div></div>
 <script>
 const LANES=__LANES__;
+// Slack 미연동 — 멘션 섹션 숨김. Slack 연결 시 true 로 바꾸면 부활.
+const SHOW_MENTIONS=false;
 let DATA=[];let VIEW='lane';let REPO='all';
+// 엔진 가용성 — 초기엔 낙관적(true)으로 두고 /api/engines 응답으로 갱신
+let ENGINES={claude:{installed:true,logged_in:true,ready:true},codex:{installed:true,logged_in:true,ready:true}};
+function engReady(e){return !!(ENGINES&&ENGINES[e]&&ENGINES[e].ready);}
+function engReason(e){const s=ENGINES&&ENGINES[e];
+  if(!s)return '상태 확인 중';
+  if(!s.installed)return e+' CLI 미설치';
+  if(!s.logged_in)return e+' 로그인 필요';
+  return '';}
 const STATUS_META={
   triage:{c:'#2dd4bf',ko:'대기'}, intake:{c:'#6b7688',ko:'시작됨'},
   reviewing:{c:'#fbbf24',ko:'리뷰중'}, verifying:{c:'#fbbf24',ko:'검증중'},
@@ -301,15 +319,38 @@ function setView(v){VIEW=v;
   document.getElementById('tAuthor').classList.toggle('active',v==='author');
   render();}
 async function load(){
-  const r=await fetch('/api/board');DATA=await r.json();
+  const [rb,re]=await Promise.all([fetch('/api/board'),fetch('/api/engines')]);
+  DATA=await rb.json();
+  try{ENGINES=await re.json();}catch(e){}
   document.getElementById('sub').textContent=DATA.length+'개 카드';
+  renderEngStat();
   renderFilter();
   render();
-  loadMentions();
+  if(SHOW_MENTIONS)loadMentions();
+}
+function renderEngStat(){
+  const el=document.getElementById('engStat');if(!el)return;
+  const parts=[['claude','Claude'],['codex','Codex']].map(([e,n])=>{
+    const r=engReady(e);
+    return `<span title="${r?(n+' 사용 가능'):engReason(e)}" style="color:${r?'var(--good)':'var(--dim)'}">${n} ${r?'✓':'✗'}</span>`;
+  });
+  el.innerHTML='⚙️ '+parts.join(' · ');
+}
+function reviewButtons(id){
+  const defs=[['claude','리뷰 (Claude)'],['codex','리뷰 (Codex)']];
+  if(!defs.some(([e])=>engReady(e)))
+    return `<div class="engnote">⚠️ 리뷰 엔진 미설정 — <code>claude</code> 또는 <code>codex</code> CLI 로그인이 필요합니다.</div>`;
+  let h='<div class="rev">';
+  defs.forEach(([e,label])=>{
+    h+= engReady(e)
+      ? `<button class="${e}" onclick="act(event,'start',${id},'${e}')">${label}</button>`
+      : `<button class="${e}" disabled title="${engReason(e)}">${label}</button>`;
+  });
+  return h+'</div>';
 }
 async function loadMentions(){
   const r=await fetch('/api/mentions');const M=await r.json();
-  const wrap=document.getElementById('mentions');
+  const wrap=document.getElementById('mentions');wrap.style.display='';
   const unread=M.filter(m=>m.status==='unread').length;
   let h=`<h2>📢 멘션 / 확인요청 ${unread?`<span class="pill">안읽음 ${unread}</span>`:''}</h2>`;
   if(!M.length){wrap.innerHTML=h+'<div class="mempty">아직 멘션 없음</div>';return;}
@@ -362,9 +403,7 @@ function tile(c){
   const dots=c.findings.map(f=>`<span class="dot ${f.severity||'low'}"></span>`).join('');
   let btns='', xbtn='';
   if(c.status==='triage'){
-    btns=`<div class="rev">
-      <button class="claude" onclick="act(event,'start',${c.id},'claude')">리뷰 (Claude)</button>
-      <button class="codex" onclick="act(event,'start',${c.id},'codex')">리뷰 (Codex)</button></div>`;
+    btns=reviewButtons(c.id);
     xbtn=`<button class="xbtn" title="목록에서 제외" onclick="ignoreCard(event,${c.id})">✕</button>`;
   }
   if(c.status==='approve_blocked')btns=`<div class="btns"><button class="go" onclick="act(event,'unblock',${c.id})">🔓 승인(Unblock)</button></div>`;
@@ -417,7 +456,10 @@ document.getElementById('ov').onclick=e=>{if(e.target.id==='ov')closeM()};
 const ACT_MSG={start:'리뷰 시작 — 곧 분석을 시작합니다 ⏳',unblock:'승인 진행 중 🔓',ignore:'목록에서 제외됨',stop:'리뷰 중지됨 🛑'};
 async function act(e,action,id,engine){e.stopPropagation();
   showToast(ACT_MSG[action]||'처리됨', action!=='ignore');
-  await fetch('/api/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,card_id:id,engine:engine||'claude'})});
+  let j={};
+  try{const r=await fetch('/api/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,card_id:id,engine:engine||'claude'})});j=await r.json();}catch(err){}
+  if(action==='start'&&j&&j.ok===false)
+    showToast('시작할 수 없습니다 — '+(engine?engReason(engine)||'엔진 상태 확인':'엔진 상태 확인'),false);
   load();}
 function showToast(msg,spin){
   let t=document.getElementById('toast');
@@ -462,6 +504,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, json.dumps(build_board(), ensure_ascii=False))
         elif self.path == "/api/mentions":
             self._send(200, json.dumps(build_mentions(), ensure_ascii=False))
+        elif self.path == "/api/engines":
+            self._send(200, json.dumps(engines.availability(), ensure_ascii=False))
         else:
             self._send(404, "{}")
 
