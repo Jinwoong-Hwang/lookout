@@ -162,9 +162,10 @@ document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
 :root{--bg:#11151c;--panel:#1b212b;--panel2:#232b38;--line:#333d4d;--ink:#f1f5fb;
 --muted:#9fabbe;--dim:#6b7688;--accent:#2dd4bf;--purple:#a78bfa;--good:#4ade80;--warn:#fbbf24;--bad:#fb7185;
 --header-bg:rgba(17,21,28,.86);--shadow:rgba(0,0,0,.28);}
-:root[data-theme="light"]{--bg:#eef1f6;--panel:#ffffff;--panel2:#f6f8fb;--line:#d7dde7;--ink:#1a2230;
---muted:#5a6573;--dim:#8e97a4;--accent:#0d9488;--purple:#7c3aed;--good:#16a34a;--warn:#c2740a;--bad:#e11d48;
---header-bg:rgba(255,255,255,.9);--shadow:rgba(20,30,50,.12);}
+:root[data-theme="light"]{--bg:#e8eaef;--panel:#f3f4f7;--panel2:#ffffff;--line:#dde1e8;--ink:#1b2531;
+--muted:#586374;--dim:#949cab;--accent:#0d9488;--purple:#7c3aed;--good:#15a34a;--warn:#c2740a;--bad:#e11d48;
+--header-bg:rgba(243,244,247,.9);--shadow:rgba(23,33,55,.10);}
+:root[data-theme="light"] .card{box-shadow:0 1px 2px var(--shadow)}
 *{box-sizing:border-box}
 html,body{height:100%}
 body{margin:0;background:var(--bg);color:var(--ink);font-size:14px;line-height:1.5;
@@ -300,10 +301,20 @@ const THEME_ORDER=['auto','light','dark'];
 const THEME_LABEL={auto:'🖥 시스템',light:'☀️ 라이트',dark:'🌙 다크'};
 function themePref(){return localStorage.getItem(THEME_KEY)||'auto';}
 function resolveTheme(p){return p==='auto'?(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'):p;}
+function isLight(){return resolveTheme(themePref())==='light';}
 function renderThemeBtn(){const b=document.getElementById('themeBtn');if(b)b.textContent=THEME_LABEL[themePref()];}
 function applyTheme(){document.documentElement.setAttribute('data-theme',resolveTheme(themePref()));renderThemeBtn();}
-function cycleTheme(){const o=THEME_ORDER;localStorage.setItem(THEME_KEY,o[(o.indexOf(themePref())+1)%o.length]);applyTheme();}
-matchMedia('(prefers-color-scheme: dark)').addEventListener('change',()=>{if(themePref()==='auto')applyTheme();});
+function repaintBoard(){try{render();}catch(e){}}
+function cycleTheme(){const o=THEME_ORDER;localStorage.setItem(THEME_KEY,o[(o.indexOf(themePref())+1)%o.length]);applyTheme();repaintBoard();}
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change',()=>{if(themePref()==='auto'){applyTheme();repaintBoard();}});
+// 색 hex를 비율만큼 어둡게 (라이트모드에서 연한 pill 글자색을 진하게)
+function darken(hex,f){const h=hex.replace('#','');const n=parseInt(h.length===3?h.split('').map(x=>x+x).join(''):h,16);
+  return '#'+[(n>>16)&255,(n>>8)&255,n&255].map(x=>Math.round(x*f).toString(16).padStart(2,'0')).join('');}
+// 상태/심각도/repo 색 pill 인라인 스타일 — 라이트모드는 글자색을 어둡게
+function pill(c){return isLight()
+  ? `background:${c}22;color:${darken(c,.5)};border:1px solid ${c}66`
+  : `background:${c}22;color:${c};border:1px solid ${c}55`;}
+function stripe(c){return isLight()?darken(c,.72):c;}  // 카드/finding 좌측 컬러 스트라이프
 applyTheme();
 let DATA=[];let VIEW='lane';let REPO='all';
 // 엔진 가용성 — 초기엔 낙관적(true)으로 두고 /api/engines 응답으로 갱신
@@ -432,12 +443,12 @@ function tile(c){
   if(['intake','reviewing','verifying','commenting'].includes(c.status))
     btns=`<div class="btns"><button class="stop" onclick="stopReview(event,${c.id})">🛑 리뷰 중지</button></div>`;
   const sm=smeta(c.status);
-  el.style.borderLeftColor=sm.c;
-  const statusPill=`<span class="statuspill" style="background:${sm.c}22;color:${sm.c};border:1px solid ${sm.c}55">${sm.ko}</span>`;
+  el.style.borderLeftColor=stripe(sm.c);
+  const statusPill=`<span class="statuspill" style="${pill(sm.c)}">${sm.ko}</span>`;
   const enginePill=(c.status!=='triage')?`<span class="pill">${c.engine}</span>`:'';
   const clo=c.closure&&(c.closure.resolved||c.closure.unresolved)?`<span class="pill">✅${c.closure.resolved} ⚠️${c.closure.unresolved}</span>`:'';
   const rc=repoColor(c.repo);
-  const repoPill=`<span class="repopill" style="background:${rc}1f;color:${rc};border-color:${rc}66"><span class="rdot" style="background:${rc}"></span>${esc(repoShort(c.repo))}</span>`;
+  const repoPill=`<span class="repopill" style="${pill(rc)}"><span class="rdot" style="background:${rc}"></span>${esc(repoShort(c.repo))}</span>`;
   el.innerHTML=`${xbtn}<div class="pr">${repoPill} <span class="num">#${c.pr}</span></div>
     <div class="title">${esc(c.title)||'(제목없음)'}</div>
     <div class="row">${statusPill}<span class="pill">${esc(c.author)}</span>${enginePill}</div>
@@ -451,16 +462,16 @@ function openModal(c){
   let html=`<span class="close" onclick="closeM()">✕ 닫기</span>
     <h3>#${c.pr} ${esc(c.title)}</h3>
     <div class="msub">${esc(c.repo)} · @${esc(c.author)} · <code>${c.head}</code>
-      <span class="statuspill" style="background:${sm.c}22;color:${sm.c};border:1px solid ${sm.c}55">${sm.ko}</span></div>`;
+      <span class="statuspill" style="${pill(sm.c)}">${sm.ko}</span></div>`;
   if(c.url)html+=`<div class="mlink"><a href="${c.url}" target="_blank">GitHub에서 열기 ↗</a></div>`;
   if(c.closure&&(c.closure.resolved||c.closure.unresolved))
     html+=`<div class="lbl">이전 지적 추적</div><div class="pre">✅ ${c.closure.resolved} 해결 · ⚠️ ${c.closure.unresolved} 미해결</div>`;
   if(c.findings.length){html+=`<div class="lbl">리뷰 결과 · ${c.findings.length}건</div>`;
     c.findings.forEach(f=>{const sc=SEVC[f.severity]||'#6b7688';
-      html+=`<div class="finding" style="border-left-color:${sc}">
+      html+=`<div class="finding" style="border-left-color:${stripe(sc)}">
         <div class="ft">${esc(f.title)}</div>
         <div class="meta">
-          <span class="sevtag" style="background:${sc}22;color:${sc};border:1px solid ${sc}55">${esc(f.severity||'?')}</span>
+          <span class="sevtag" style="${pill(sc)}">${esc(f.severity||'?')}</span>
           <span>확신도 ${esc(f.confidence||'?')}</span><span>·</span>
           <code>${esc(f.file||'')}${f.line?(':'+esc(f.line)):''}</code>
           <span class="fstatus">${esc(f.status)}</span>
