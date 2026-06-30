@@ -42,14 +42,17 @@ codesign --force --deep --sign - "$APP" 2>/dev/null || echo "  (codesign 생략 
 # 기존 Hermes.app 잔재 제거
 rm -rf "/Applications/Hermes.app" "$HOME/Applications/Hermes.app" 2>/dev/null || true
 
-# 설치: /Applications 시도, 실패하면 ~/Applications
+# 설치: /Applications 시도, 실패하면 ~/Applications.
+# 기존 설치본을 먼저 제거(cp -R 중첩 방지) 후 복사.
 DEST="/Applications"
+rm -rf "$DEST/$APP" 2>/dev/null
 if cp -R "$APP" "$DEST/" 2>/dev/null; then
   echo "✅ 설치: $DEST/$APP"
 else
-  mkdir -p "$HOME/Applications"
-  cp -R "$APP" "$HOME/Applications/"
-  DEST="$HOME/Applications"
+  DEST="$HOME/Applications"; mkdir -p "$DEST"
+  rm -rf "$DEST/$APP"
+  cp -R "$APP" "$DEST/"
   echo "✅ 설치: $DEST/$APP (/Applications 권한 없어 사용자 폴더에 설치)"
 fi
+rm -rf "$APP"   # 로컬 빌드 산출물 제거 — Launchpad/Spotlight 중복 표시 방지
 echo "→ 실행: open \"$DEST/$APP\"  (또는 Spotlight에서 'Lookout')"
