@@ -8,6 +8,18 @@ from .config import CFG
 
 ACTIONABLE_CONF = {"high"} if CFG.get("min_confidence") == "high" else {"high", "medium"}
 
+# Claude(Opus)는 보수적 지침을 곧이곧대로 지켜 lgtm 비율이 높음 → recall 보강.
+# Codex엔 미적용(이미 충분히 surfacing). 리뷰 프롬프트에만 append(closure엔 X).
+CLAUDE_RECALL_NOTE = """
+
+## 추가 지침 (재현율 — 위 출력 형식은 그대로)
+- `lgtm: true`는 변경이 작고 **명백히** 안전할 때만. 의심 신호가 하나라도 있으면 묻어두지 말 것.
+- 확신이 100%가 아니어도 머지 전 확인할 가치가 있으면 **medium confidence로 보고**하고,
+  evidence로 실제 코드 줄을 인용해 **사람이 판단하게** 하라. (놓치는 것보다 약한 신호라도 올리는 게 낫다)
+- 단, evidence(실제 코드 줄)로 가리킬 수 없는 **순수 추측**은 여전히 금지.
+- 출력은 위 §5 JSON 스키마만. 다른 텍스트 금지.
+"""
+
 
 def _is_stale(card) -> bool:
     info = ghclient.pr_view(card["repo"], card["pr_number"])
@@ -60,6 +72,8 @@ def process(c, card):
             AUTHOR=meta.get("author", ""), HEAD=head, DIFF=diff[:120000],
             CONVERSATION=conversation, MAX_FINDINGS=CFG["max_findings_per_review"],
         )
+        if engine == "claude":
+            prompt += CLAUDE_RECALL_NOTE
         result = engines.run_json(prompt, engine=engine, cwd=wt, add_dir=wt)
         _run_closure(c, card, priors, diff, conversation, engine, wt)
     finally:
