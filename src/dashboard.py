@@ -155,16 +155,23 @@ def do_mention_action(action, mention_id):
 HTML = """<!DOCTYPE html><html lang="ko"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Lookout</title>
+<script>(function(){try{var p=localStorage.getItem('lookout_theme')||'auto';
+var t=p==='auto'?(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'):p;
+document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
 <style>
 :root{--bg:#11151c;--panel:#1b212b;--panel2:#232b38;--line:#333d4d;--ink:#f1f5fb;
---muted:#9fabbe;--dim:#6b7688;--accent:#2dd4bf;--purple:#a78bfa;--good:#4ade80;--warn:#fbbf24;--bad:#fb7185;}
+--muted:#9fabbe;--dim:#6b7688;--accent:#2dd4bf;--purple:#a78bfa;--good:#4ade80;--warn:#fbbf24;--bad:#fb7185;
+--header-bg:rgba(17,21,28,.86);--shadow:rgba(0,0,0,.28);}
+:root[data-theme="light"]{--bg:#eef1f6;--panel:#ffffff;--panel2:#f6f8fb;--line:#d7dde7;--ink:#1a2230;
+--muted:#5a6573;--dim:#8e97a4;--accent:#0d9488;--purple:#7c3aed;--good:#16a34a;--warn:#c2740a;--bad:#e11d48;
+--header-bg:rgba(255,255,255,.9);--shadow:rgba(20,30,50,.12);}
 *{box-sizing:border-box}
 html,body{height:100%}
 body{margin:0;background:var(--bg);color:var(--ink);font-size:14px;line-height:1.5;
 font-family:-apple-system,BlinkMacSystemFont,"Pretendard",Roboto,sans-serif;-webkit-font-smoothing:antialiased;
 display:flex;flex-direction:column;overflow:hidden}
 header{position:sticky;top:0;z-index:20;padding:13px 22px;display:flex;align-items:center;gap:12px;
-background:rgba(11,13,19,.86);backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+background:var(--header-bg);backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
 h1{font-size:17px;margin:0;font-weight:750;letter-spacing:-.01em}
 .sub{color:var(--muted);font-size:12.5px}
 .board{flex:1 1 auto;min-height:0;display:flex;gap:12px;padding:18px;overflow-x:auto;overflow-y:hidden;align-items:stretch}
@@ -183,7 +190,7 @@ h1{font-size:17px;margin:0;font-weight:750;letter-spacing:-.01em}
 .cards{padding:11px;display:flex;flex-direction:column;gap:11px;min-height:30px}
 .col .cards{flex:1 1 auto;overflow-y:auto;min-height:0}
 .card{position:relative;background:var(--panel2);border:1px solid var(--line);border-left:4px solid var(--dim);border-radius:11px;padding:13px;cursor:pointer;transition:border-color .14s,transform .08s,box-shadow .14s}
-.card:hover{border-color:var(--accent);transform:translateY(-1px);box-shadow:0 6px 18px rgba(0,0,0,.28)}
+.card:hover{border-color:var(--accent);transform:translateY(-1px);box-shadow:0 6px 18px var(--shadow)}
 .pr{font-size:13px;font-weight:700;color:var(--ink);display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:7px}
 .pr .num{font-size:14.5px}
 .pr a{color:var(--ink);text-decoration:none}
@@ -210,7 +217,7 @@ button.codex{background:var(--purple);border-color:var(--purple);color:#0a0612;f
 button.stop{background:transparent;border-color:var(--bad);color:var(--bad)}
 button.stop:hover{background:var(--bad);color:#1a0608}
 .filterbar{display:flex;gap:7px;flex-wrap:wrap;padding:11px 22px;border-bottom:1px solid var(--line);
-  position:sticky;top:51px;z-index:15;background:rgba(11,13,19,.86);backdrop-filter:blur(8px)}
+  position:sticky;top:51px;z-index:15;background:var(--header-bg);backdrop-filter:blur(8px)}
 .chip{font-size:12px;font-weight:600;border:1px solid var(--line);background:var(--panel2);color:var(--muted);
   border-radius:20px;padding:5px 12px;cursor:pointer;display:flex;align-items:center;gap:6px}
 .chip:hover{filter:brightness(1.12)}
@@ -277,7 +284,8 @@ background:transparent;border:none;padding:3px 5px;border-radius:6px;opacity:.4}
 <button id="refreshBtn" onclick="refresh()">🔄 PR 가져오기</button>
 <span class="sub" id="sub">로딩…</span>
 <span class="sub" id="engStat" style="margin-left:14px"></span>
-<span class="sub" style="margin-left:auto">5초마다 자동 새로고침</span></header>
+<button id="themeBtn" onclick="cycleTheme()" title="테마 전환 (시스템 · 라이트 · 다크)" style="margin-left:auto">🖥 시스템</button>
+<span class="sub" style="margin-left:12px">5초마다 자동 새로고침</span></header>
 <div class="filterbar" id="filterbar"></div>
 <section class="mentions" id="mentions" style="display:none"></section>
 <div class="board" id="board"></div>
@@ -286,6 +294,17 @@ background:transparent;border:none;padding:3px 5px;border-radius:6px;opacity:.4}
 const LANES=__LANES__;
 // Slack 미연동 — 멘션 섹션 숨김. Slack 연결 시 true 로 바꾸면 부활.
 const SHOW_MENTIONS=false;
+// ── 테마 (시스템/라이트/다크) — 클릭 순환, localStorage 저장 ──
+const THEME_KEY='lookout_theme';
+const THEME_ORDER=['auto','light','dark'];
+const THEME_LABEL={auto:'🖥 시스템',light:'☀️ 라이트',dark:'🌙 다크'};
+function themePref(){return localStorage.getItem(THEME_KEY)||'auto';}
+function resolveTheme(p){return p==='auto'?(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'):p;}
+function renderThemeBtn(){const b=document.getElementById('themeBtn');if(b)b.textContent=THEME_LABEL[themePref()];}
+function applyTheme(){document.documentElement.setAttribute('data-theme',resolveTheme(themePref()));renderThemeBtn();}
+function cycleTheme(){const o=THEME_ORDER;localStorage.setItem(THEME_KEY,o[(o.indexOf(themePref())+1)%o.length]);applyTheme();}
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change',()=>{if(themePref()==='auto')applyTheme();});
+applyTheme();
 let DATA=[];let VIEW='lane';let REPO='all';
 // 엔진 가용성 — 초기엔 낙관적(true)으로 두고 /api/engines 응답으로 갱신
 let ENGINES={claude:{installed:true,logged_in:true,ready:true},codex:{installed:true,logged_in:true,ready:true}};
