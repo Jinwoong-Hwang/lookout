@@ -335,6 +335,26 @@ def set_mention_status(c, mention_id: int, status: str):
     c.execute("UPDATE mentions SET status=? WHERE id=?", (status, mention_id))
 
 
+def purge_old(c, days: int = 14) -> dict:
+    """N일 지난 종료(archived) 카드 + 거기 묶인 findings/events 삭제.
+
+    살아있는(non-archived) 카드의 데이터는 절대 건드리지 않음. findings/events를
+    먼저 지우고(아직 카드 존재) 카드를 지운다. 카드가 이미 사라진 고아 이벤트도 정리."""
+    cutoff = now() - days * 86400
+    sub = "(SELECT id FROM cards WHERE status='archived' AND updated_at < ?)"
+    subk = "(SELECT key FROM cards WHERE status='archived' AND updated_at < ?)"
+    findings = c.execute(f"DELETE FROM findings WHERE card_id IN {sub}", (cutoff,)).rowcount
+    events = c.execute(f"DELETE FROM events WHERE key IN {subk}", (cutoff,)).rowcount
+    cards = c.execute(
+        "DELETE FROM cards WHERE status='archived' AND updated_at < ?", (cutoff,)
+    ).rowcount
+    events += c.execute(
+        "DELETE FROM events WHERE ts < ? AND key IS NOT NULL "
+        "AND key NOT IN (SELECT key FROM cards)", (cutoff,)
+    ).rowcount
+    return {"cards": cards, "findings": findings, "events": events}
+
+
 def get_slack_name(c, sid: str):
     row = c.execute("SELECT name FROM slack_names WHERE id=?", (sid,)).fetchone()
     return row["name"] if row else None

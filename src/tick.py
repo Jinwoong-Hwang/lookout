@@ -157,8 +157,17 @@ def run_once():
 
 
 def gc():
-    """Periodic workspace cleanup (worktree prune)."""
+    """Periodic workspace cleanup (worktree prune) — 가벼움, gc_interval마다."""
     worktree.gc_worktrees()
+
+
+def deep_gc():
+    """무거운 일일 청소 — run_once 종료 후(진행 중 리뷰 없음)에만 호출.
+    ① 캐시 repo object store gc(누적 PR-fetch 객체 회수) ② 오래된 archived 카드/이벤트 purge."""
+    worktree.gc_repos()
+    with db.connect() as c:
+        stats = db.purge_old(c, days=CFG.get("purge_days", 14))
+    print(f"[tick] deep_gc: repos gc'd, db purged {stats}")
 
 
 def main():
@@ -175,6 +184,13 @@ def main():
             gc()
             with db.connect() as c:
                 db.set_meta(c, "last_gc", str(time.time()))
+        # 무거운 청소는 하루 1회 (run_once가 끝나 진행 중 리뷰가 없는 시점)
+        with db.connect() as c:
+            last_deep = float(db.get_meta(c, "last_deep_gc", "0"))
+        if time.time() - last_deep > 24 * 3600:
+            deep_gc()
+            with db.connect() as c:
+                db.set_meta(c, "last_deep_gc", str(time.time()))
         print("[tick] done")
     finally:
         fcntl.flock(lock, fcntl.LOCK_UN)

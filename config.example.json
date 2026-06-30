@@ -39,6 +39,8 @@
 
   "poller_interval_minutes": 5,
   "gc_interval_minutes": 30,
+  "_purge_days": "deep_gc(하루 1회)에서 N일 지난 archived 카드/이벤트 삭제. 기본 14.",
+  "purge_days": 14,
 
   "_dry_run": "true면 GitHub에 게시/승인 안 하고 로그/미리보기만. 처음엔 true 권장.",
   "dry_run_comments": true,

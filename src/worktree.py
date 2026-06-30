@@ -98,3 +98,28 @@ def gc_worktrees():
         rd = os.path.join(base, slug)
         if os.path.isdir(os.path.join(rd, ".git")):
             _git(rd, "worktree", "prune", check=False)
+
+
+def gc_repos():
+    """캐시 repo의 누적 객체 회수 (제거된 워크트리의 옛 PR-head 객체 등).
+
+    안전성: ① per-repo 락으로 진행 중 fetch/worktree-add와 직렬화,
+    ② git gc는 모든 워크트리 HEAD를 루트로 보존하므로 진행 중 리뷰가 체크아웃한
+    head_sha 객체는 prune 대상이 아님. worktree prune 먼저 → 제거된 트리 등록을
+    정리해 그 객체가 회수 가능해진 뒤 gc."""
+    base = config.path(CFG["repo_cache_dir"])
+    if not os.path.isdir(base):
+        return
+    for slug in os.listdir(base):
+        rd = os.path.join(base, slug)
+        if not os.path.isdir(os.path.join(rd, ".git")):
+            continue
+        repo = slug.replace("__", "/")  # make_worktree와 동일한 락 키
+        with _repo_lock(repo):
+            _git(rd, "worktree", "prune", check=False)
+            # 진행 중 리뷰의 워크트리가 남아있으면 이번 주기는 건너뜀(다음에 회수).
+            # 같은 프로세스 밖의 리뷰 fetch와도 충돌하지 않도록 하는 안전장치.
+            wl = _git(rd, "worktree", "list", "--porcelain", check=False)
+            if wl.stdout.count("worktree ") > 1:
+                continue
+            _git(rd, "gc", "--prune=now", "--quiet", check=False, timeout=1200)
