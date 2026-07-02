@@ -22,6 +22,7 @@ pkill -f "src.receiver" 2>/dev/null || true
 pkill -f "src.dashboard" 2>/dev/null || true
 if [ -n "$HOOKDECK" ]; then
   pkill -f "hookdeck listen 8787 lookout" 2>/dev/null || true
+  pkill -f "hookdeck listen 8787 github-pr-auto-review" 2>/dev/null || true
 fi
 sleep 1
 

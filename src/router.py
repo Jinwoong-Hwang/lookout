@@ -7,7 +7,7 @@ Drains the inbox and turns webhook events into Kanban cards:
   - ALWAYS re-resolves the authoritative head via `gh pr view` (never trusts
     the webhook payload head)
 """
-from . import config, db, ghclient, keys, slack_names
+from . import config, db, engines, ghclient, keys, slack_names
 
 CFG = config.CFG
 ALLOWLIST = set(CFG["allowlist"])
@@ -55,14 +55,17 @@ def ensure_pr_cards(c, repo: str, pr: int, source: str = "webhook"):
     vkey = keys.review_key(repo, pr, head)
     if db.get_card(c, vkey) is None:
         status = _initial_status(author)
-        db.upsert_card(
+        engine = engines.default_engine()
+        review_id = db.upsert_card(
             c, vkey, "review", repo, pr, status=status, head_sha=head,
             base_sha=info.get("baseRefName"),
             payload={"title": info.get("title"), "url": info.get("url"),
                      "author": author, "source": source},
         )
+        db.set_engine(c, review_id, engine)
         db.log_event(c, "review_card_created", vkey,
-                     {"head": head, "source": source, "status": status})
+                     {"head": head, "source": source, "status": status,
+                      "engine": engine})
     db.mark_seen_head(c, repo, pr, head)
     return root_id
 

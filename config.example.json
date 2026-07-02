@@ -40,6 +40,7 @@
   "claude_effort": "xhigh",
   "codex_bin": "codex",
   "codex_model": null,
+  "default_review_engine": "codex",
 
   "worktree_dir": "worktrees",
   "repo_cache_dir": "repos",

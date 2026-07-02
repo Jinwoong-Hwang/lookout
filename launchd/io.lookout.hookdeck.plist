@@ -9,7 +9,7 @@
     <string>__HOOKDECK__</string>
     <string>listen</string>
     <string>8787</string>
-    <string>lookout</string>
+    <string>github-pr-auto-review</string>
     <string>--path</string>
     <string>/webhook</string>
     <string>--output</string>
