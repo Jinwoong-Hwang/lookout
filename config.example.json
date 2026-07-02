@@ -7,6 +7,10 @@
   "receiver_path": "/webhook",
   "webhook_secret": "",
 
+  "_dashboard": "대시보드 바인딩. 내부망에서 보려면 dashboard_host를 0.0.0.0으로 설정.",
+  "dashboard_host": "127.0.0.1",
+  "dashboard_port": 8788,
+
   "_slack": "(선택) Slack 멘션 catch-up. 안 쓰면 비워둠.",
   "slack_path": "/slack",
   "slack_signing_secret": "",

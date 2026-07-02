@@ -10,6 +10,7 @@ import subprocess
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import db, engines, poller, worktree
+from .config import CFG
 
 
 def kick_tick():
@@ -23,7 +24,8 @@ def kick_tick():
     except Exception:  # noqa: BLE001
         pass
 
-PORT = 8788
+DASHBOARD_HOST = CFG.get("dashboard_host", "127.0.0.1")
+PORT = int(CFG.get("dashboard_port", 8788))
 
 LANES = [
     ("triage", "📥 Triage (리뷰 대기)"),
@@ -566,8 +568,8 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     db.init()
-    server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
-    print(f"[dashboard] http://127.0.0.1:{PORT}")
+    server = ThreadingHTTPServer((DASHBOARD_HOST, PORT), Handler)
+    print(f"[dashboard] http://{DASHBOARD_HOST}:{PORT}")
     server.serve_forever()
 
 
