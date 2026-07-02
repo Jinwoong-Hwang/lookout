@@ -134,3 +134,41 @@ def process(c, card):
         db.log_event(c, "comment_posted", card["key"], {"fps": fps, "url": out})
 
     db.set_status(c, card["id"], "commented")
+
+
+def publish_dryrun(c, card) -> bool:
+    """Operator override: publish a previously rendered dry-run bundle."""
+    repo, pr = card["repo"], card["pr_number"]
+    policy = profiles.policy_from_card(card)
+    meta = json.loads(card["payload"]) if card["payload"] else {}
+    author = meta.get("author", "")
+    intro = meta.get("intro", "")
+    dry = c.execute(
+        "SELECT * FROM findings WHERE card_id=? AND comment_id='DRYRUN' ORDER BY id",
+        (card["id"],),
+    ).fetchall()
+    if not dry:
+        return False
+
+    existing = ghclient.list_review_comments(repo, pr)
+    posted_bodies = [com["body"] for com in existing if com.get("body")]
+    already = any("hermes:fp" in b for b in posted_bodies)
+    fresh = []
+    for f in dry:
+        if any(_marker(f["fp"]) in b for b in posted_bodies):
+            db.set_finding_status(c, f["id"], "posted", comment_id="exists")
+        else:
+            fresh.append(f)
+    if not fresh:
+        db.set_status(c, card["id"], "commented")
+        return True
+
+    subject = "문서" if policy.get("profile_type") == "doc" else "코드"
+    body = render_bundle(author, fresh, mention=not already, intro=intro, subject=subject)
+    out = ghclient.pr_comment(repo, pr, body)
+    for f in fresh:
+        db.set_finding_status(c, f["id"], "posted", comment_id=out or "posted")
+    db.log_event(c, "comment_dryrun_published", card["key"],
+                 {"fps": [f["fp"] for f in fresh], "url": out, "body": body})
+    db.set_status(c, card["id"], "commented")
+    return True

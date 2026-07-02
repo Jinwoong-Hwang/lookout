@@ -124,9 +124,13 @@ def drain(c):
     for row in rows:
         try:
             payload = json.loads(row["raw"])
+        except Exception as e:  # noqa: BLE001 - malformed payload cannot recover
+            db.log_event(c, "router_bad_payload", detail={"inbox_id": row["id"], "error": str(e)})
+            db.mark_inbox_done(c, row["id"])
+            continue
+        try:
             process_event(c, row["event_type"], payload)
+            db.mark_inbox_done(c, row["id"])
         except Exception as e:  # noqa: BLE001 - keep draining; record failure
             db.log_event(c, "router_error", detail={"inbox_id": row["id"], "error": str(e)})
-        finally:
-            db.mark_inbox_done(c, row["id"])
     return len(rows)

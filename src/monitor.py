@@ -32,6 +32,16 @@ def process_commented(c, card):
                      {"old": card["head_sha"], "new": info.get("headRefOid")})
 
 
+def process_active_stale(c, card):
+    """Archive in-flight review cards that belong to an older PR head."""
+    info = ghclient.pr_view(card["repo"], card["pr_number"])
+    if info.get("state") != "OPEN" or info["headRefOid"] != card["head_sha"]:
+        db.set_status(c, card["id"], "archived")
+        db.log_event(c, "review_superseded", card["key"],
+                     {"old": card["head_sha"], "new": info.get("headRefOid"),
+                      "state": info.get("state"), "status": card["status"]})
+
+
 def process_approve_stale(c, card):
     """승인대기(approve_blocked) 카드가 옛 head면 정리 — 그 사이 새 head로 재리뷰
     중인 카드가 따로 있으므로 유령 게이트를 archive. (현재 head 게이트는 그대로 둠)"""

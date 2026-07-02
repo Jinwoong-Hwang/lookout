@@ -141,6 +141,7 @@ def run_once():
 
     # 1) 빠른 정리/진행 먼저 — 느린 리뷰에 막히지 않게 (머지·stale 즉시 archive)
     _monitor_roots()                                                  # 머지/닫힘 PR archive
+    _stage(["reviewing", "verifying", "commenting"], monitor.process_active_stale, "monitor_active_stale")
     _stage(["commented"], monitor.process_commented, "monitor_commented")
     _stage(["triage"], monitor.process_triage, "monitor_triage")
     _stage(["approve_blocked"], monitor.process_approve_stale, "monitor_approve_stale")

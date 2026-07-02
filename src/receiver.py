@@ -9,6 +9,8 @@ Run: python -m src.receiver
 import hashlib
 import hmac
 import json
+import os
+import subprocess
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import config, db
@@ -18,6 +20,20 @@ SECRET = CFG["webhook_secret"].encode()
 PATH = CFG["receiver_path"]
 SLACK_PATH = CFG.get("slack_path", "/slack")
 SLACK_SECRET = CFG.get("slack_signing_secret", "").encode()
+
+
+def _kick_tick():
+    """Wake the serialized tick loop after accepting fresh webhook work."""
+    try:
+        subprocess.Popen(
+            [os.sys.executable, "-m", "src.tick"],
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception:  # noqa: BLE001 - receiver must still return 202 quickly
+        pass
 
 
 def _valid_signature(body: bytes, sig_header: str) -> bool:
@@ -82,6 +98,8 @@ class Handler(BaseHTTPRequestHandler):
         with db.connect() as c:
             fresh = db.enqueue_inbox(c, delivery or f"nodelivery:{hash(body)}", event_type, body.decode("utf-8", "replace"))
             db.log_event(c, "webhook_received", detail={"event": event_type, "delivery": delivery, "fresh": fresh})
+        if fresh:
+            _kick_tick()
         self._reply(202, "accepted")
 
     def _handle_slack(self, body: bytes):
@@ -104,6 +122,8 @@ class Handler(BaseHTTPRequestHandler):
         with db.connect() as c:
             fresh = db.enqueue_inbox(c, f"slack:{event_id}", "slack", body.decode("utf-8", "replace"))
             db.log_event(c, "slack_received", detail={"event_id": event_id, "fresh": fresh, "verified": bool(sig)})
+        if fresh:
+            _kick_tick()
         self._reply(202, "accepted")
 
 

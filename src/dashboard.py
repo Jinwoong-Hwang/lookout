@@ -9,7 +9,7 @@ import os
 import subprocess
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import db, engines, poller, worktree
+from . import commenter, db, engines, poller, worktree
 from .config import CFG
 
 
@@ -61,13 +61,17 @@ def build_board():
                     "fix": detail.get("fix", ""),
                 })
             ev = c.execute(
-                "SELECT type, detail FROM events WHERE key=? AND type IN ('comment_dryrun','comment_posted') ORDER BY id",
+                "SELECT type, detail FROM events WHERE key=? AND type IN ('comment_dryrun','comment_posted','comment_dryrun_published') ORDER BY id",
                 (card["key"],),
             ).fetchall()
             comments = []
             for e in ev:
                 d = json.loads(e["detail"]) if e["detail"] else {}
                 comments.append({"type": e["type"], "body": d.get("body", ""), "url": d.get("url", "")})
+            dryrun_pending = c.execute(
+                "SELECT 1 FROM findings WHERE card_id=? AND comment_id='DRYRUN' LIMIT 1",
+                (card["id"],),
+            ).fetchone() is not None
             clo = db.closure_counts(c, card["repo"], card["pr_number"])
             out.append({
                 "id": card["id"], "kind": card["kind"], "status": card["status"],
@@ -77,6 +81,7 @@ def build_board():
                 "title": meta.get("title", ""), "url": meta.get("url", ""),
                 "author": meta.get("author", ""),
                 "findings": findings, "comments": comments,
+                "dryrun_pending": dryrun_pending,
                 "closure": {"resolved": clo.get("resolved", 0),
                             "unresolved": clo.get("unresolved", 0)},
             })
@@ -110,6 +115,9 @@ def do_action(action, card_id, engine="claude"):
             db.set_status(c, card["id"], "approving", blocked=0)
             db.log_event(c, "operator_unblock", card["key"])
             kick = True
+        elif action == "publish_dryrun" and card["kind"] == "review":
+            if not commenter.publish_dryrun(c, card):
+                return False
         elif action == "stop" and card["status"] in ACTIVE_REVIEW:
             db.set_status(c, card["id"], "archived")  # terminal → 워커가 되살리지 않음
             db.log_event(c, "review_stopped", card["key"], {"from": card["status"]})
@@ -449,6 +457,8 @@ function tile(c){
   if(c.status==='approve_blocked')btns=`<div class="btns"><button class="go" onclick="act(event,'unblock',${c.id})">🔓 승인(Unblock)</button></div>`;
   if(['intake','reviewing','verifying','commenting'].includes(c.status))
     btns=`<div class="btns"><button class="stop" onclick="stopReview(event,${c.id})">🛑 리뷰 중지</button></div>`;
+  if(c.dryrun_pending)
+    btns+=`<div class="btns"><button class="go" onclick="publishDryRun(event,${c.id})">💬 dry-run 댓글 게시</button></div>`;
   const sm=smeta(c.status);
   el.style.borderLeftColor=stripe(sm.c);
   const statusPill=`<span class="statuspill" style="${pill(sm.c)}">${sm.ko}</span>`;
@@ -488,7 +498,10 @@ function openModal(c){
       </div>`});
   }else html+='<p class="sub">아직 finding 없음</p>';
   if(c.comments.length){html+='<div class="lbl">게시된 / 게시될 댓글</div>';
-    c.comments.forEach(cm=>{html+=`<div class="cmt">${esc(cm.body)}</div>${cm.url?`<div class="msub"><a href="${cm.url}" target="_blank">${esc(cm.url)}</a></div>`:'<div class="msub">(dry-run · 미게시)</div>'}`})}
+    c.comments.forEach(cm=>{const pending=(cm.type==='comment_dryrun'&&c.dryrun_pending);
+      html+=`<div class="cmt">${esc(cm.body)}</div>${cm.url?`<div class="msub"><a href="${cm.url}" target="_blank">${esc(cm.url)}</a></div>`:`<div class="msub">${pending?'(dry-run · 미게시)':'(dry-run preview)'}</div>`}`});
+    if(c.dryrun_pending)
+      html+=`<div class="btns"><button class="go" onclick="publishDryRun(event,${c.id})">💬 dry-run 댓글 게시</button></div>`;}
   m.innerHTML=html;document.getElementById('ov').classList.add('show');
 }
 function closeM(){document.getElementById('ov').classList.remove('show')}
@@ -512,6 +525,8 @@ function stopReview(e,id){e.stopPropagation();
   if(confirm('이 리뷰를 강제 중지할까요? (진행 중인 분석을 종료하고 목록에서 제외)'))act(e,'stop',id);}
 function ignoreCard(e,id){e.stopPropagation();
   if(confirm('이 PR을 목록에서 제외할까요? (리뷰하지 않음)'))act(e,'ignore',id);}
+function publishDryRun(e,id){e.stopPropagation();
+  if(confirm('dry-run 댓글을 실제 GitHub PR 댓글로 게시할까요?'))act(e,'publish_dryrun',id);}
 async function refresh(){
   const b=document.getElementById('refreshBtn');const old=b.textContent;
   b.textContent='가져오는 중…';b.disabled=true;
