@@ -29,7 +29,7 @@
   "watch_authors": [
     "your-github-login"
   ],
-  "_auto_review_authors": "triage 없이 곧바로 자동 리뷰할 작성자. 비우면 전부 수동 선택.",
+  "_auto_review_authors": "triage 없이 곧바로 자동 리뷰할 작성자. 비우면 전부 수동 선택. 전체 자동 리뷰는 [\"*\"] 또는 [\"all\"].",
   "auto_review_authors": [],
 
   "events": ["pull_request", "push", "pull_request_review", "issue_comment"],

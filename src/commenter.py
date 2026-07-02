@@ -9,6 +9,8 @@ import json
 from . import db, ghclient
 from .config import CFG
 
+BOT_PREFIX = "🤖 "
+
 
 def _marker(fp: str) -> str:
     return f"<!-- hermes:fp={fp} -->"
@@ -65,7 +67,7 @@ def _block(idx: int, f, numbered: bool) -> str:
 
 def render_bundle(author: str, findings, mention: bool = True, intro: str = "") -> str:
     numbered = len(findings) > 1  # 단일이면 번호 생략 (인트로가 이미 '한 가지')
-    blocks = [_intro(author, len(findings), mention, intro), ""]
+    blocks = [BOT_PREFIX + _intro(author, len(findings), mention, intro), ""]
     for i, f in enumerate(findings, 1):
         blocks.append(_block(i, f, numbered))
         blocks.append("")

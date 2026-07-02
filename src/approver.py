@@ -83,7 +83,7 @@ def process_gate(c, card):
         db.log_event(c, "approve_checks_failing_proceed", card["key"],
                      {"note": "CI 실패하지만 사람이 승인 결정 → 진행"})
 
-    body = "LGTM — Hermes 자동 리뷰 통과 후 검수자 승인."
+    body = "🤖 LGTM — Lookout 자동 리뷰 통과 후 검수자 승인."
     if CFG["dry_run_approve"]:
         db.log_event(c, "approve_dryrun", card["key"], {"would_approve": True})
     else:

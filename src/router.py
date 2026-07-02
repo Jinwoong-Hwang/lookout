@@ -13,6 +13,7 @@ CFG = config.CFG
 ALLOWLIST = set(CFG["allowlist"])
 WATCH_AUTHORS = set(CFG.get("watch_authors") or [])
 AUTO_REVIEW_AUTHORS = set(CFG.get("auto_review_authors") or [])
+AUTO_REVIEW_ALL = bool(AUTO_REVIEW_AUTHORS & {"*", "all"})
 MY_SLACK = CFG.get("slack_user_id", "")
 SLACK_WORKSPACE = CFG.get("slack_workspace", "")
 
@@ -28,7 +29,7 @@ def _author_ok(login: str) -> bool:
 
 def _initial_status(login: str) -> str:
     """Auto-review authors skip triage; everyone else waits for manual start."""
-    return "intake" if login in AUTO_REVIEW_AUTHORS else "triage"
+    return "intake" if AUTO_REVIEW_ALL or login in AUTO_REVIEW_AUTHORS else "triage"
 
 
 def ensure_pr_cards(c, repo: str, pr: int, source: str = "webhook"):
