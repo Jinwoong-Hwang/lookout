@@ -409,7 +409,15 @@ async function mAct(id,action){
   await fetch('/api/mention-action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,mention_id:id})});
   loadMentions();
 }
-function render(){VIEW==='author'?renderByAuthor():renderLanes();}
+function render(){
+  // 5초 자동 새로고침이 DOM을 다시 그려 스크롤이 최상단으로 튀는 문제 → 위치 보존
+  const board=document.getElementById('board');
+  const sx=board.scrollLeft, sy=board.scrollTop, cols={};
+  board.querySelectorAll('.cards[data-lane]').forEach(el=>{cols[el.dataset.lane]=el.scrollTop;});
+  VIEW==='author'?renderByAuthor():renderLanes();
+  board.scrollLeft=sx; board.scrollTop=sy;
+  board.querySelectorAll('.cards[data-lane]').forEach(el=>{const v=cols[el.dataset.lane]; if(v)el.scrollTop=v;});
+}
 function renderLanes(){
   const byLane={};LANES.forEach(([k])=>byLane[k]=[]);
   viewData().forEach(c=>{if(byLane[c.status])byLane[c.status].push(c)});
@@ -418,7 +426,7 @@ function renderLanes(){
     const list=byLane[key]||[];
     const col=document.createElement('div');col.className='col';
     col.innerHTML=`<h2><span class="lh"><span class="dot" style="background:${smeta(key).c}"></span>${label}</span><span class="n">${list.length}</span></h2>`;
-    const cc=document.createElement('div');cc.className='cards';
+    const cc=document.createElement('div');cc.className='cards';cc.dataset.lane=key;
     if(!list.length)cc.innerHTML='<div class="empty">—</div>';
     list.forEach(c=>cc.appendChild(tile(c)));
     col.appendChild(cc);board.appendChild(col);
