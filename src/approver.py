@@ -4,7 +4,7 @@ An approve card is created BLOCKED. It does nothing until the operator unblocks
 it (`hermes unblock <id>`), which flips it to 'approving'. Even then, approval
 only fires after re-resolving head + checks. Approval is NEVER automatic.
 """
-from . import db, ghclient, keys, router
+from . import db, ghclient, keys, profiles, router
 from .config import CFG
 
 
@@ -13,6 +13,12 @@ def create_gate(c, review_card):
     머지/닫힘 또는 stale head면 게이트를 만들지 않고 그냥 archive."""
     import json
     repo, pr, head = review_card["repo"], review_card["pr_number"], review_card["head_sha"]
+    policy = profiles.policy_from_card(review_card)
+    if not policy.get("approval_allowed"):
+        db.set_status(c, review_card["id"], "done")
+        db.log_event(c, "approve_gate_skipped_policy", review_card["key"],
+                     {"profile_type": policy.get("profile_type"), "mode": policy.get("mode")})
+        return
     info = ghclient.pr_view(repo, pr)
     if info.get("state") != "OPEN" or info.get("headRefOid") != head:
         db.set_status(c, review_card["id"], "archived")
@@ -60,6 +66,12 @@ def _checks_ok(info) -> bool:
 def process_gate(c, card):
     """Only runs once operator unblocked the card (status='approving')."""
     repo, pr, head = card["repo"], card["pr_number"], card["head_sha"]
+    policy = profiles.policy_from_card(card)
+    if not policy.get("approval_allowed"):
+        db.set_status(c, card["id"], "done")
+        db.log_event(c, "approve_skipped_policy", card["key"],
+                     {"profile_type": policy.get("profile_type"), "mode": policy.get("mode")})
+        return
     info = ghclient.pr_view(repo, pr)
 
     # ADR-007: stale head -> supersede instead of repeat-unblock

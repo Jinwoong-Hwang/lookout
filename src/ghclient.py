@@ -40,6 +40,11 @@ def pr_diff(repo: str, pr: int) -> str:
     return proc.stdout
 
 
+def pr_changed_files(repo: str, pr: int) -> list[str]:
+    proc = _run(["pr", "diff", str(pr), "--repo", repo, "--name-only"])
+    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+
+
 def pr_comment(repo: str, pr: int, body: str) -> str:
     proc = _run(["pr", "comment", str(pr), "--repo", repo, "--body", body])
     return proc.stdout.strip()

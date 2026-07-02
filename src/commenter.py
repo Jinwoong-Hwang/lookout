@@ -6,7 +6,7 @@ Ethan 봇 스타일 — 이모지/severity 데코 없이, 시니어 동료의 �
 """
 import json
 
-from . import db, ghclient
+from . import db, ghclient, profiles
 from .config import CFG
 
 BOT_PREFIX = "🤖 "
@@ -16,15 +16,15 @@ def _marker(fp: str) -> str:
     return f"<!-- hermes:fp={fp} -->"
 
 
-def _intro(author: str, n: int, mention: bool, custom: str = "") -> str:
+def _intro(author: str, n: int, mention: bool, custom: str = "", subject: str = "코드") -> str:
     who = f"@{author} " if mention and author else ""
     custom = (custom or "").strip()
     if custom:  # LLM이 PR마다 쓴 인트로 사용
         return who + custom
     # fallback (LLM 인트로 없을 때)
     if n == 1:
-        return f"{who}코드 확인하다가 아래 한 가지는 머지 전에 한 번 더 보면 좋을 것 같아 코멘트 남깁니다."
-    return f"{who}코드 확인하다가 아래 {n}가지는 머지 전에 한 번 더 보완하면 좋아 보여 코멘트 남깁니다."
+        return f"{who}{subject} 확인하다가 아래 한 가지는 머지 전에 한 번 더 보면 좋을 것 같아 코멘트 남깁니다."
+    return f"{who}{subject} 확인하다가 아래 {n}가지는 머지 전에 한 번 더 보완하면 좋아 보여 코멘트 남깁니다."
 
 
 def _lang(path: str) -> str:
@@ -61,13 +61,19 @@ def _block(idx: int, f, numbered: bool) -> str:
     fix = (detail.get("fix") or "").strip()
     if fix:
         parts += ["", "**제안**", fix]
+    impact = (detail.get("impact") or "").strip()
+    if impact:
+        parts += ["", "**영향**", impact]
+    decision = (detail.get("required_decision") or "").strip()
+    if decision:
+        parts += ["", "**결정 필요**", decision]
     parts += ["", _marker(f["fp"])]
     return "\n".join(parts)
 
 
-def render_bundle(author: str, findings, mention: bool = True, intro: str = "") -> str:
+def render_bundle(author: str, findings, mention: bool = True, intro: str = "", subject: str = "코드") -> str:
     numbered = len(findings) > 1  # 단일이면 번호 생략 (인트로가 이미 '한 가지')
-    blocks = [BOT_PREFIX + _intro(author, len(findings), mention, intro), ""]
+    blocks = [BOT_PREFIX + _intro(author, len(findings), mention, intro, subject), ""]
     for i, f in enumerate(findings, 1):
         blocks.append(_block(i, f, numbered))
         blocks.append("")
@@ -76,15 +82,22 @@ def render_bundle(author: str, findings, mention: bool = True, intro: str = "") 
 
 def process(c, card):
     repo, pr = card["repo"], card["pr_number"]
+    policy = profiles.policy_from_card(card)
     meta = json.loads(card["payload"]) if card["payload"] else {}
     author = meta.get("author", "")
     intro = meta.get("intro", "")
     force = bool(meta.get("force_post"))  # 미해결 리마인드 — 기존 댓글 있어도 다시 게시
     confirmed = db.findings_for_card(c, card["id"], status="confirmed")
+    comment_policy = policy.get("comment_policy", "global")
+    effective_dry_run = bool(CFG["dry_run_comments"]) or comment_policy == "dry_run"
+    silent = comment_policy == "silent"
 
-    existing = ghclient.list_review_comments(repo, pr)
-    posted_bodies = [com["body"] for com in existing if com.get("body")]
-    already = any("hermes:fp" in b for b in posted_bodies)
+    posted_bodies = []
+    already = False
+    if not (effective_dry_run or silent):
+        existing = ghclient.list_review_comments(repo, pr)
+        posted_bodies = [com["body"] for com in existing if com.get("body")]
+        already = any("hermes:fp" in b for b in posted_bodies)
 
     # force면 마커 중복 무시하고 전부 게시, 아니면 아직 안 올라간 것만
     fresh = []
@@ -103,9 +116,14 @@ def process(c, card):
         db.set_status(c, card["id"], "commented")
         return
 
-    body = render_bundle(author, fresh, mention=force or not already, intro=intro)
+    subject = "문서" if policy.get("profile_type") == "doc" else "코드"
+    body = render_bundle(author, fresh, mention=force or not already, intro=intro, subject=subject)
     fps = [f["fp"] for f in fresh]
-    if CFG["dry_run_comments"]:
+    if silent:
+        for f in fresh:
+            db.set_finding_status(c, f["id"], "posted", comment_id="SILENT")
+        db.log_event(c, "comment_silent", card["key"], {"fps": fps, "body": body})
+    elif effective_dry_run:
         for f in fresh:
             db.set_finding_status(c, f["id"], "posted", comment_id="DRYRUN")
         db.log_event(c, "comment_dryrun", card["key"], {"fps": fps, "body": body})

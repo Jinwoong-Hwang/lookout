@@ -4,14 +4,16 @@ Only verifier-confirmed findings advance to commenting.
 """
 import json
 
-from . import db, engines, ghclient, prompt_tpl, worktree
+from . import db, engines, ghclient, profiles, prompt_tpl, worktree
 
 
 def process(c, card):
     repo, pr, head = card["repo"], card["pr_number"], card["head_sha"]
+    policy = profiles.policy_from_card(card)
     pending = db.findings_for_card(c, card["id"], status="pending_verify")
     if not pending:
-        db.set_status(c, card["id"], "commenting")
+        terminal = policy["no_confirmed_terminal"] if policy.get("profile_type") == "doc" else "commenting"
+        db.set_status(c, card["id"], terminal)
         return
 
     diff = ghclient.pr_diff(repo, pr)
@@ -23,10 +25,13 @@ def process(c, card):
         for f in pending:
             detail = json.loads(f["body"]) if f["body"] else {}
             prompt = prompt_tpl.render(
-                "verify.md", REPO=repo, PR=pr, HEAD=head,
+                profiles.prompt_name(policy, "verify"), REPO=repo, PR=pr, HEAD=head,
                 FILE=f["file"], LINE=f["line"], TITLE=f["title"],
                 PROBLEM=detail.get("problem", ""), FIX=detail.get("fix", ""),
                 DIFF=diff[:40000], CONVERSATION=conversation,
+                CATEGORY=detail.get("category", ""),
+                IMPACT=detail.get("impact", ""),
+                REQUIRED_DECISION=detail.get("required_decision", ""),
             )
             try:
                 verdict = engines.run_json(prompt, engine=engine, cwd=wt, add_dir=wt)
@@ -42,4 +47,4 @@ def process(c, card):
             worktree.remove_worktree(repo, wt)
 
     confirmed = db.findings_for_card(c, card["id"], status="confirmed")
-    db.set_status(c, card["id"], "commenting" if confirmed else "lgtm")
+    db.set_status(c, card["id"], "commenting" if confirmed else policy["no_confirmed_terminal"])
