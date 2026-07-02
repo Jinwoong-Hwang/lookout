@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>io.lookout.hookdeck</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__HOOKDECK__</string>
+    <string>listen</string>
+    <string>8787</string>
+    <string>lookout</string>
+    <string>--path</string>
+    <string>/webhook</string>
+    <string>--output</string>
+    <string>compact</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>__USER_HOME__</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>__LOG_DIR__/hookdeck.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>__LOG_DIR__/hookdeck.err.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>__USER_HOME__</string>
+    <key>PATH</key>
+    <string>__USER_HOME__/.local/share/mise/shims:__USER_HOME__/.local/share/mise/installs/node/22.22.0/bin:__USER_HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+</dict>
+</plist>
