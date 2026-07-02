@@ -11,6 +11,9 @@
   "dashboard_host": "127.0.0.1",
   "dashboard_port": 8788,
 
+  "_env_file": "선택: launchd/Codex에서 gh 인증이 안 될 때 GH_TOKEN 등을 읽을 private env 파일.",
+  "env_file": "~/.config/lookout/env",
+
   "_slack": "(선택) Slack 멘션 catch-up. 안 쓰면 비워둠.",
   "slack_path": "/slack",
   "slack_signing_secret": "",
