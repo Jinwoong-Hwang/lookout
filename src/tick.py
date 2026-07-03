@@ -13,7 +13,7 @@ import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 
-from . import (approver, commenter, config, db, monitor, poller, reviewer,
+from . import (approver, commenter, config, db, feedback, monitor, poller, reviewer,
                router, verifier, worktree)
 
 CFG = config.CFG
@@ -192,6 +192,13 @@ def main():
             deep_gc()
             with db.connect() as c:
                 db.set_meta(c, "last_deep_gc", str(time.time()))
+        with db.connect() as c:
+            last_feedback = float(db.get_meta(c, "last_feedback_weekly", "0"))
+        if time.time() - last_feedback > feedback.WEEKLY_INTERVAL_SECONDS:
+            with db.connect() as c:
+                n = feedback.weekly_open(c)
+                db.set_meta(c, "last_feedback_weekly", str(time.time()))
+            print(f"[tick] feedback_weekly: {n} snapshots")
         print("[tick] done")
     finally:
         fcntl.flock(lock, fcntl.LOCK_UN)

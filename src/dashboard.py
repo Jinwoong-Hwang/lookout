@@ -9,7 +9,7 @@ import os
 import subprocess
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import commenter, db, engines, poller, worktree
+from . import commenter, db, engines, feedback, poller, worktree
 from .config import CFG
 
 
@@ -82,6 +82,7 @@ def build_board():
                 "author": meta.get("author", ""),
                 "findings": findings, "comments": comments,
                 "dryrun_pending": dryrun_pending,
+                "feedback": feedback.latest_for_card(c, card["id"]),
                 "closure": {"resolved": clo.get("resolved", 0),
                             "unresolved": clo.get("unresolved", 0)},
             })
@@ -150,6 +151,36 @@ def build_mentions():
             "text": r["text"], "ts": r["ts"],
             "permalink": r["permalink"], "status": r["status"],
         } for r in rows]
+
+
+def build_feedback():
+    with db.connect() as c:
+        rows = c.execute(
+            """SELECT s.*, c.payload, c.status
+               FROM review_feedback_snapshots s
+               LEFT JOIN cards c ON c.id=s.card_id
+               ORDER BY s.created_at DESC, s.id DESC
+               LIMIT 25"""
+        ).fetchall()
+        out = []
+        for r in rows:
+            reactions = json.loads(r["reactions"]) if r["reactions"] else {}
+            replies = json.loads(r["author_replies"]) if r["author_replies"] else []
+            payload = json.loads(r["payload"]) if r["payload"] else {}
+            if isinstance(payload, str):
+                payload = json.loads(payload)
+            out.append({
+                "id": r["id"], "repo": r["repo"], "pr": r["pr_number"],
+                "card_id": r["card_id"], "profile": r["profile_type"],
+                "snapshot_type": r["snapshot_type"], "status": r["status"] or "archived",
+                "title": payload.get("title", ""), "comment_url": r["comment_url"],
+                "up": int(reactions.get("+1") or 0),
+                "down": int(reactions.get("-1") or 0),
+                "confused": int(reactions.get("confused") or 0),
+                "replies": len(replies),
+                "needs_inspection": bool(int(reactions.get("-1") or 0) or int(reactions.get("confused") or 0) or replies),
+            })
+        return out
 
 
 def do_mention_action(action, mention_id):
@@ -302,6 +333,7 @@ background:transparent;border:none;padding:3px 5px;border-radius:6px;opacity:.4}
 <button id="themeBtn" onclick="cycleTheme()" title="테마 전환 (시스템 · 라이트 · 다크)" style="margin-left:auto">🖥 시스템</button>
 <span class="sub" style="margin-left:12px">5초마다 자동 새로고침</span></header>
 <div class="filterbar" id="filterbar"></div>
+<section class="mentions" id="feedback" style="display:none"></section>
 <section class="mentions" id="mentions" style="display:none"></section>
 <div class="board" id="board"></div>
 <div class="ov" id="ov"><div class="modal" id="modal"></div></div>
@@ -367,13 +399,14 @@ function setView(v){VIEW=v;
   document.getElementById('tAuthor').classList.toggle('active',v==='author');
   render();}
 async function load(){
-  const [rb,re]=await Promise.all([fetch('/api/board'),fetch('/api/engines')]);
+  const [rb,re,rf]=await Promise.all([fetch('/api/board'),fetch('/api/engines'),fetch('/api/feedback')]);
   DATA=await rb.json();
   try{ENGINES=await re.json();}catch(e){}
   document.getElementById('sub').textContent=DATA.length+'개 카드';
   renderEngStat();
   renderFilter();
   render();
+  try{renderFeedback(await rf.json());}catch(e){}
   if(SHOW_MENTIONS)loadMentions();
 }
 function renderEngStat(){
@@ -412,6 +445,22 @@ async function loadMentions(){
       <div class="acts">${open}
       ${m.status==='unread'?`<button onclick="mAct(${m.id},'read')">읽음</button>`:''}
       <button onclick="mAct(${m.id},'archive')">✕</button></div></div>`;
+  });
+  wrap.innerHTML=h+'</div>';
+}
+function renderFeedback(F){
+  const wrap=document.getElementById('feedback');
+  if(!F||!F.length){wrap.style.display='none';return;}
+  wrap.style.display='';
+  const inspect=F.filter(f=>f.needs_inspection).length;
+  let h=`<h2>🧭 리뷰 피드백 ${inspect?`<span class="pill">확인 ${inspect}</span>`:''}</h2><div class="mlist">`;
+  F.slice(0,8).forEach(f=>{
+    const rc=repoColor(f.repo);const open=f.comment_url?`<a class="open" href="${f.comment_url}" target="_blank"><button>댓글↗</button></a>`:'';
+    h+=`<div class="m ${f.needs_inspection?'':'read'}"><span class="rdot" style="background:${rc};margin-top:5px"></span>
+      <div class="body"><div class="meta"><b>${esc(repoShort(f.repo))}#${f.pr}</b> · ${esc(f.profile)} · ${esc(f.snapshot_type)} · ${esc(f.status)}</div>
+      <div class="txt">${esc(f.title||'(제목없음)')}</div>
+      <div class="meta">👍 ${f.up||0} · 👎 ${f.down||0} · 😕 ${f.confused||0} · 💬 ${f.replies||0}</div></div>
+      <div class="acts">${open}</div></div>`;
   });
   wrap.innerHTML=h+'</div>';
 }
@@ -464,12 +513,15 @@ function tile(c){
   const statusPill=`<span class="statuspill" style="${pill(sm.c)}">${sm.ko}</span>`;
   const enginePill=(c.status!=='triage')?`<span class="pill">${c.engine}</span>`:'';
   const clo=c.closure&&(c.closure.resolved||c.closure.unresolved)?`<span class="pill">✅${c.closure.resolved} ⚠️${c.closure.unresolved}</span>`:'';
+  const fb=c.feedback&&(c.feedback.up||c.feedback.down||c.feedback.confused||c.feedback.replies)
+    ?`<span class="pill" title="리뷰 피드백 스냅샷">👍${c.feedback.up||0} 👎${c.feedback.down||0} 💬${c.feedback.replies||0}</span>`:'';
+  const inspect=c.feedback&&c.feedback.needs_inspection?`<span class="pill" style="${pill('#fbbf24')}">피드백 확인</span>`:'';
   const rc=repoColor(c.repo);
   const repoPill=`<span class="repopill" style="${pill(rc)}"><span class="rdot" style="background:${rc}"></span>${esc(repoShort(c.repo))}</span>`;
   el.innerHTML=`${xbtn}<div class="pr">${repoPill} <span class="num">#${c.pr}</span></div>
     <div class="title">${esc(c.title)||'(제목없음)'}</div>
-    <div class="row">${statusPill}<span class="pill">${esc(c.author)}</span>${enginePill}</div>
-    <div class="row"><span>@${c.head}</span>${dots?`<span class="row">${dots} ${c.findings.length}건</span>`:''}${clo}</div>${btns}`;
+    <div class="row">${statusPill}<span class="pill">${esc(c.author)}</span>${enginePill}${inspect}</div>
+    <div class="row"><span>@${c.head}</span>${dots?`<span class="row">${dots} ${c.findings.length}건</span>`:''}${clo}${fb}</div>${btns}`;
   el.onclick=()=>openModal(c);
   return el;
 }
@@ -483,6 +535,9 @@ function openModal(c){
   if(c.url)html+=`<div class="mlink"><a href="${c.url}" target="_blank">GitHub에서 열기 ↗</a></div>`;
   if(c.closure&&(c.closure.resolved||c.closure.unresolved))
     html+=`<div class="lbl">이전 지적 추적</div><div class="pre">✅ ${c.closure.resolved} 해결 · ⚠️ ${c.closure.unresolved} 미해결</div>`;
+  if(c.feedback&&(c.feedback.up||c.feedback.down||c.feedback.confused||c.feedback.replies)){
+    html+=`<div class="lbl">리뷰 피드백</div><div class="pre">👍 ${c.feedback.up||0} · 👎 ${c.feedback.down||0} · 😕 ${c.feedback.confused||0} · 💬 ${c.feedback.replies||0}${c.feedback.needs_inspection?' · 확인 필요':''}</div>`;
+  }
   if(c.findings.length){html+=`<div class="lbl">리뷰 결과 · ${c.findings.length}건</div>`;
     c.findings.forEach(f=>{const sc=SEVC[f.severity]||'#6b7688';
       html+=`<div class="finding" style="border-left-color:${stripe(sc)}">
@@ -559,6 +614,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, json.dumps(build_board(), ensure_ascii=False))
         elif self.path == "/api/mentions":
             self._send(200, json.dumps(build_mentions(), ensure_ascii=False))
+        elif self.path == "/api/feedback":
+            self._send(200, json.dumps(build_feedback(), ensure_ascii=False))
         elif self.path == "/api/engines":
             self._send(200, json.dumps(engines.availability(), ensure_ascii=False))
         else:

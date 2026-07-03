@@ -4,12 +4,13 @@ Head-change re-review is primarily driven by webhooks/poller (which create a new
 review card for the new head). Monitor is the deterministic fallback + cleanup:
 closed/merged PRs are archived, stale commented cards are superseded.
 """
-from . import db, ghclient
+from . import db, feedback, ghclient
 
 
 def process_root(c, card):
     info = ghclient.pr_view(card["repo"], card["pr_number"])
     if info.get("state") != "OPEN":
+        feedback.snapshot_pr(c, card["repo"], card["pr_number"], "pr_closed", pr_info=info)
         # PR 머지/닫힘 → 그 PR의 모든 카드 archive (done 포함 — 머지됐으니 목록서 제거)
         rows = c.execute(
             "SELECT id FROM cards WHERE repo=? AND pr_number=? AND status != 'archived'",
@@ -26,7 +27,14 @@ def process_root(c, card):
 
 def process_commented(c, card):
     info = ghclient.pr_view(card["repo"], card["pr_number"])
-    if info.get("state") != "OPEN" or info["headRefOid"] != card["head_sha"]:
+    if info.get("state") != "OPEN":
+        feedback.snapshot_pr(c, card["repo"], card["pr_number"], "pr_closed", pr_info=info)
+        db.set_status(c, card["id"], "archived")
+        db.log_event(c, "review_superseded", card["key"],
+                     {"old": card["head_sha"], "new": info.get("headRefOid"),
+                      "state": info.get("state")})
+        return
+    if info["headRefOid"] != card["head_sha"]:
         db.set_status(c, card["id"], "archived")
         db.log_event(c, "review_superseded", card["key"],
                      {"old": card["head_sha"], "new": info.get("headRefOid")})
@@ -35,7 +43,14 @@ def process_commented(c, card):
 def process_active_stale(c, card):
     """Archive in-flight review cards that belong to an older PR head."""
     info = ghclient.pr_view(card["repo"], card["pr_number"])
-    if info.get("state") != "OPEN" or info["headRefOid"] != card["head_sha"]:
+    if info.get("state") != "OPEN":
+        feedback.snapshot_pr(c, card["repo"], card["pr_number"], "pr_closed", pr_info=info)
+        db.set_status(c, card["id"], "archived")
+        db.log_event(c, "review_superseded", card["key"],
+                     {"old": card["head_sha"], "new": info.get("headRefOid"),
+                      "state": info.get("state"), "status": card["status"]})
+        return
+    if info["headRefOid"] != card["head_sha"]:
         db.set_status(c, card["id"], "archived")
         db.log_event(c, "review_superseded", card["key"],
                      {"old": card["head_sha"], "new": info.get("headRefOid"),

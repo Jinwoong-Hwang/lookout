@@ -57,7 +57,11 @@ def my_login() -> str:
     global _MY_LOGIN
     if _MY_LOGIN is None:
         proc = _run(["api", "user", "-q", ".login"], check=False)
-        _MY_LOGIN = proc.stdout.strip() if proc.returncode == 0 else ""
+        login = proc.stdout.strip() if proc.returncode == 0 else ""
+        if login:
+            _MY_LOGIN = login
+            return login
+        return ""
     return _MY_LOGIN
 
 
@@ -150,3 +154,36 @@ def list_review_comments(repo: str, pr: int) -> list:
         if line:
             out.append(json.loads(line))
     return out
+
+
+def issue_comments(repo: str, pr: int) -> list:
+    """Issue comments for feedback snapshots."""
+    proc = _run([
+        "api", f"repos/{repo}/issues/{pr}/comments",
+        "--paginate",
+        "-H", "Accept: application/vnd.github+json",
+        "-q", ".[] | {id, html_url, body, created_at, user: .user.login}",
+    ])
+    out = []
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if line:
+            out.append(json.loads(line))
+    return out
+
+
+def comment_reactions(repo: str, comment_id: str) -> dict:
+    """Count reactions on one issue comment."""
+    proc = _run([
+        "api", f"repos/{repo}/issues/comments/{comment_id}/reactions",
+        "--paginate",
+        "-H", "Accept: application/vnd.github+json",
+        "-q", ".[].content",
+    ])
+    counts = {"+1": 0, "-1": 0, "confused": 0, "total_count": 0}
+    for line in proc.stdout.splitlines():
+        content = line.strip()
+        if content in counts:
+            counts[content] += 1
+        counts["total_count"] += 1
+    return counts

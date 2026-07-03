@@ -74,6 +74,23 @@ CREATE TABLE IF NOT EXISTS events (
   detail TEXT
 );
 
+CREATE TABLE IF NOT EXISTS review_feedback_snapshots (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  card_id        INTEGER NOT NULL,
+  repo           TEXT NOT NULL,
+  pr_number      INTEGER NOT NULL,
+  head_sha       TEXT,
+  profile_type   TEXT,
+  snapshot_type  TEXT NOT NULL,          -- pr_closed | weekly_open | manual
+  comment_id     TEXT NOT NULL,
+  comment_url    TEXT,
+  reactions      TEXT,                   -- JSON: +1/-1/confused/total_count
+  author_replies TEXT,                   -- JSON array of author replies after bot comment
+  outcome        TEXT,                   -- JSON: state, closure counts, etc.
+  created_at     REAL NOT NULL,
+  UNIQUE(card_id, snapshot_type, comment_id)
+);
+
 CREATE TABLE IF NOT EXISTS meta (
   k TEXT PRIMARY KEY,
   v TEXT
@@ -106,6 +123,7 @@ CREATE INDEX IF NOT EXISTS idx_cards_status ON cards(status);
 CREATE INDEX IF NOT EXISTS idx_findings_card ON findings(card_id);
 CREATE INDEX IF NOT EXISTS idx_inbox_processed ON inbox(processed);
 CREATE INDEX IF NOT EXISTS idx_mentions_status ON mentions(status);
+CREATE INDEX IF NOT EXISTS idx_feedback_card ON review_feedback_snapshots(card_id);
 """
 
 
