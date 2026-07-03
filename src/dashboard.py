@@ -7,7 +7,10 @@ Read-only view of the board + a few operator actions (start / ignore / unblock).
 import json
 import os
 import subprocess
+import csv
+import io
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
 
 from . import commenter, db, engines, feedback, poller, worktree
 from .config import CFG
@@ -153,34 +156,114 @@ def build_mentions():
         } for r in rows]
 
 
-def build_feedback():
+def _feedback_row(r, include_private=False):
+    reactions = json.loads(r["reactions"]) if r["reactions"] else {}
+    replies = json.loads(r["author_replies"]) if r["author_replies"] else []
+    outcome = json.loads(r["outcome"]) if r["outcome"] else {}
+    payload = json.loads(r["payload"]) if r["payload"] else {}
+    if isinstance(payload, str):
+        payload = json.loads(payload)
+    out = {
+        "id": r["id"], "repo": r["repo"], "pr": r["pr_number"],
+        "card_id": r["card_id"], "profile": r["profile_type"],
+        "snapshot_type": r["snapshot_type"], "status": r["status"] or "archived",
+        "title": payload.get("title", ""), "comment_url": r["comment_url"],
+        "created_at": r["created_at"],
+        "reactions": {
+            "+1": int(reactions.get("+1") or 0),
+            "-1": int(reactions.get("-1") or 0),
+            "confused": int(reactions.get("confused") or 0),
+            "total_count": int(reactions.get("total_count") or 0),
+        },
+        "up": int(reactions.get("+1") or 0),
+        "down": int(reactions.get("-1") or 0),
+        "confused": int(reactions.get("confused") or 0),
+        "replies": len(replies),
+        "needs_inspection": bool(int(reactions.get("-1") or 0) or int(reactions.get("confused") or 0) or replies),
+    }
+    if include_private:
+        out["author_replies"] = [
+            {k: reply.get(k, "") for k in ("id", "url", "created_at")}
+            for reply in replies
+        ]
+        out["outcome"] = outcome
+    return out
+
+
+def _feedback_filters(params):
+    where, vals = [], []
+    def first(name, default=""):
+        return (params.get(name) or [default])[0]
+    for col, name in (("s.repo", "repo"), ("s.profile_type", "profile"), ("s.snapshot_type", "snapshot_type")):
+        val = first(name).strip()
+        if val:
+            where.append(f"{col}=?")
+            vals.append(val)
+    pr = first("pr").strip()
+    if pr:
+        where.append("s.pr_number=?")
+        vals.append(int(pr))
+    card_id = first("card_id").strip()
+    if card_id:
+        where.append("s.card_id=?")
+        vals.append(int(card_id))
+    needs = first("needs_inspection").strip().lower()
+    if needs in ("1", "true", "yes"):
+        where.append("(json_extract(s.reactions, '$.\"-1\"') > 0 OR json_extract(s.reactions, '$.confused') > 0 OR json_array_length(s.author_replies) > 0)")
+    limit = max(1, min(int(first("limit", "25") or 25), 500))
+    return where, vals, limit
+
+
+def build_feedback(params=None, include_private=False):
+    params = params or {}
+    where, vals, limit = _feedback_filters(params)
+    clause = "WHERE " + " AND ".join(where) if where else ""
     with db.connect() as c:
         rows = c.execute(
+            f"""SELECT s.*, c.payload, c.status
+               FROM review_feedback_snapshots s
+               LEFT JOIN cards c ON c.id=s.card_id
+               {clause}
+               ORDER BY s.created_at DESC, s.id DESC
+               LIMIT ?""",
+            (*vals, limit),
+        ).fetchall()
+        return [_feedback_row(r, include_private=include_private) for r in rows]
+
+
+def build_feedback_detail(snapshot_id):
+    with db.connect() as c:
+        row = c.execute(
             """SELECT s.*, c.payload, c.status
                FROM review_feedback_snapshots s
                LEFT JOIN cards c ON c.id=s.card_id
-               ORDER BY s.created_at DESC, s.id DESC
-               LIMIT 25"""
-        ).fetchall()
-        out = []
-        for r in rows:
-            reactions = json.loads(r["reactions"]) if r["reactions"] else {}
-            replies = json.loads(r["author_replies"]) if r["author_replies"] else []
-            payload = json.loads(r["payload"]) if r["payload"] else {}
-            if isinstance(payload, str):
-                payload = json.loads(payload)
-            out.append({
-                "id": r["id"], "repo": r["repo"], "pr": r["pr_number"],
-                "card_id": r["card_id"], "profile": r["profile_type"],
-                "snapshot_type": r["snapshot_type"], "status": r["status"] or "archived",
-                "title": payload.get("title", ""), "comment_url": r["comment_url"],
-                "up": int(reactions.get("+1") or 0),
-                "down": int(reactions.get("-1") or 0),
-                "confused": int(reactions.get("confused") or 0),
-                "replies": len(replies),
-                "needs_inspection": bool(int(reactions.get("-1") or 0) or int(reactions.get("confused") or 0) or replies),
-            })
-        return out
+               WHERE s.id=?""",
+            (int(snapshot_id),),
+        ).fetchone()
+        return _feedback_row(row, include_private=True) if row else None
+
+
+def build_feedback_csv(params=None):
+    rows = build_feedback(params or {}, include_private=False)
+    out = io.StringIO()
+    writer = csv.DictWriter(out, fieldnames=[
+        "id", "repo", "pr", "card_id", "profile", "snapshot_type", "status",
+        "title", "comment_url", "created_at", "up", "down", "confused",
+        "replies", "needs_inspection",
+    ])
+    writer.writeheader()
+    for row in rows:
+        writer.writerow({k: _csv_cell(row.get(k, "")) for k in writer.fieldnames})
+    return out.getvalue()
+
+
+def _csv_cell(value):
+    if not isinstance(value, str):
+        return value
+    stripped = value.lstrip(" \t\r\n")
+    if stripped[:1] in ("=", "+", "-", "@"):
+        return "'" + value
+    return value
 
 
 def do_mention_action(action, mention_id):
@@ -607,16 +690,37 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body.encode() if isinstance(body, str) else body)
 
     def do_GET(self):
-        if self.path == "/" or self.path.startswith("/index"):
+        parsed = urlparse(self.path)
+        path = parsed.path
+        params = parse_qs(parsed.query)
+        if path == "/" or path.startswith("/index"):
             html = HTML.replace("__LANES__", json.dumps(LANES, ensure_ascii=False))
             self._send(200, html, "text/html; charset=utf-8")
-        elif self.path == "/api/board":
+        elif path == "/api/board":
             self._send(200, json.dumps(build_board(), ensure_ascii=False))
-        elif self.path == "/api/mentions":
+        elif path == "/api/mentions":
             self._send(200, json.dumps(build_mentions(), ensure_ascii=False))
-        elif self.path == "/api/feedback":
-            self._send(200, json.dumps(build_feedback(), ensure_ascii=False))
-        elif self.path == "/api/engines":
+        elif path == "/api/feedback":
+            try:
+                body = json.dumps(build_feedback(params), ensure_ascii=False)
+            except ValueError:
+                self._send(400, "{}")
+                return
+            self._send(200, body)
+        elif path == "/api/feedback/export.csv":
+            try:
+                body = build_feedback_csv(params)
+            except ValueError:
+                self._send(400, "{}")
+                return
+            self._send(200, body, "text/csv; charset=utf-8")
+        elif path.startswith("/api/feedback/"):
+            try:
+                item = build_feedback_detail(path.rsplit("/", 1)[-1])
+            except ValueError:
+                item = None
+            self._send(200 if item else 404, json.dumps(item or {}, ensure_ascii=False))
+        elif path == "/api/engines":
             self._send(200, json.dumps(engines.availability(), ensure_ascii=False))
         else:
             self._send(404, "{}")
