@@ -409,14 +409,13 @@ background:transparent;border:none;padding:3px 5px;border-radius:6px;opacity:.4}
 .unreaddot{width:8px;height:8px;border-radius:50%;background:var(--accent);flex:0 0 auto;margin-top:5px}
 </style></head><body>
 <header><h1>👁 Lookout</h1>
-<div class="toggle"><button id="tLane" class="active" onclick="setView('lane')">레인별</button><button id="tAuthor" onclick="setView('author')">사람별</button></div>
+<div class="toggle"><button id="tLane" class="active" onclick="setView('lane')">레인별</button><button id="tAuthor" onclick="setView('author')">사람별</button><button id="tFeedback" onclick="setView('feedback')">리뷰 피드백</button></div>
 <button id="refreshBtn" onclick="refresh()">🔄 PR 가져오기</button>
 <span class="sub" id="sub">로딩…</span>
 <span class="sub" id="engStat" style="margin-left:14px"></span>
 <button id="themeBtn" onclick="cycleTheme()" title="테마 전환 (시스템 · 라이트 · 다크)" style="margin-left:auto">🖥 시스템</button>
 <span class="sub" style="margin-left:12px">5초마다 자동 새로고침</span></header>
 <div class="filterbar" id="filterbar"></div>
-<section class="mentions" id="feedback" style="display:none"></section>
 <section class="mentions" id="mentions" style="display:none"></section>
 <div class="board" id="board"></div>
 <div class="ov" id="ov"><div class="modal" id="modal"></div></div>
@@ -445,7 +444,7 @@ function pill(c){return isLight()
   : `background:${c}22;color:${c};border:1px solid ${c}55`;}
 function stripe(c){return isLight()?darken(c,.72):c;}  // 카드/finding 좌측 컬러 스트라이프
 applyTheme();
-let DATA=[];let VIEW='lane';let REPO='all';
+let DATA=[];let FEEDBACK=[];let VIEW='lane';let REPO='all';
 // 엔진 가용성 — 초기엔 낙관적(true)으로 두고 /api/engines 응답으로 갱신
 let ENGINES={claude:{installed:true,logged_in:true,ready:true},codex:{installed:true,logged_in:true,ready:true}};
 function engReady(e){return !!(ENGINES&&ENGINES[e]&&ENGINES[e].ready);}
@@ -467,11 +466,16 @@ const REPO_COLORS=['#2dd4bf','#a78bfa','#fbbf24','#60a5fa','#4ade80','#fb7185'];
 function repoColor(r){let h=0;for(const ch of (r||''))h=(h*31+ch.charCodeAt(0))>>>0;return REPO_COLORS[h%REPO_COLORS.length];}
 function setRepo(r){REPO=r;renderFilter();render();}
 function viewData(){return REPO==='all'?DATA:DATA.filter(c=>c.repo===REPO);}
+function viewFeedbackData(){return REPO==='all'?FEEDBACK:FEEDBACK.filter(f=>f.repo===REPO);}
+function filterSource(){return VIEW==='feedback'?FEEDBACK:DATA;}
+function normalizeRepo(){const src=filterSource();if(REPO!=='all'&&!src.some(x=>x.repo===REPO))REPO='all';}
 function renderFilter(){
-  const repos=[...new Set(DATA.map(c=>c.repo))].sort();
+  normalizeRepo();
+  const src=filterSource();
+  const repos=[...new Set(src.map(c=>c.repo))].sort();
   const bar=document.getElementById('filterbar');
-  let h=`<button class="chip ${REPO==='all'?'on':''}" onclick="setRepo('all')">전체 <b>${DATA.length}</b></button>`;
-  repos.forEach(r=>{const n=DATA.filter(c=>c.repo===r).length;const col=repoColor(r);
+  let h=`<button class="chip ${REPO==='all'?'on':''}" onclick="setRepo('all')">전체 <b>${src.length}</b></button>`;
+  repos.forEach(r=>{const n=src.filter(c=>c.repo===r).length;const col=repoColor(r);
     const on=REPO===r;
     const onStyle=on?(isLight()?`background:${col}2e;color:${darken(col,.5)};border-color:${col}66`:`background:${col};color:#06101f;border-color:${col}`):'';
     h+=`<button class="chip ${on?'on':''}" style="${onStyle}" onclick="setRepo('${r}')"><span class="rdot" style="background:${col}"></span>${esc(repoShort(r))} <b>${n}</b></button>`;});
@@ -480,16 +484,17 @@ function renderFilter(){
 function setView(v){VIEW=v;
   document.getElementById('tLane').classList.toggle('active',v==='lane');
   document.getElementById('tAuthor').classList.toggle('active',v==='author');
-  render();}
+  document.getElementById('tFeedback').classList.toggle('active',v==='feedback');
+  renderFilter();render();}
 async function load(){
   const [rb,re,rf]=await Promise.all([fetch('/api/board'),fetch('/api/engines'),fetch('/api/feedback')]);
   DATA=await rb.json();
+  try{FEEDBACK=await rf.json();}catch(e){FEEDBACK=[];}
   try{ENGINES=await re.json();}catch(e){}
   document.getElementById('sub').textContent=DATA.length+'개 카드';
   renderEngStat();
   renderFilter();
   render();
-  try{renderFeedback(await rf.json());}catch(e){}
   if(SHOW_MENTIONS)loadMentions();
 }
 function renderEngStat(){
@@ -531,27 +536,33 @@ async function loadMentions(){
   });
   wrap.innerHTML=h+'</div>';
 }
-function renderFeedback(F){
-  const wrap=document.getElementById('feedback');
-  if(!F||!F.length){wrap.style.display='none';return;}
-  wrap.style.display='';
-  const inspect=F.filter(f=>f.needs_inspection).length;
-  let h=`<h2>🧭 리뷰 피드백 ${inspect?`<span class="pill">확인 ${inspect}</span>`:''}</h2><div class="mlist">`;
-  F.slice(0,8).forEach(f=>{
-    const rc=repoColor(f.repo);const open=f.comment_url?`<a class="open" href="${f.comment_url}" target="_blank"><button>댓글↗</button></a>`:'';
-    h+=`<div class="m ${f.needs_inspection?'':'read'}"><span class="rdot" style="background:${rc};margin-top:5px"></span>
-      <div class="body"><div class="meta"><b>${esc(repoShort(f.repo))}#${f.pr}</b> · ${esc(f.profile)} · ${esc(f.snapshot_type)} · ${esc(f.status)}</div>
-      <div class="txt">${esc(f.title||'(제목없음)')}</div>
-      <div class="meta">👍 ${f.up||0} · 👎 ${f.down||0} · 😕 ${f.confused||0} · 💬 ${f.replies||0}</div></div>
-      <div class="acts">${open}</div></div>`;
-  });
-  wrap.innerHTML=h+'</div>';
-}
 async function mAct(id,action){
   await fetch('/api/mention-action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,mention_id:id})});
   loadMentions();
 }
-function render(){VIEW==='author'?renderByAuthor():renderLanes();}
+function render(){VIEW==='feedback'?renderFeedback():VIEW==='author'?renderByAuthor():renderLanes();}
+function renderFeedback(){
+  const list=viewFeedbackData();
+  const board=document.getElementById('board');board.className='board stack';board.innerHTML='';
+  const sec=document.createElement('div');sec.className='sec';
+  const inspect=list.filter(f=>f.needs_inspection).length;
+  sec.innerHTML=`<h2>🧭 리뷰 피드백 <span class="n">${list.length}</span>${inspect?`<span class="pill">확인 ${inspect}</span>`:''}</h2>`;
+  const cc=document.createElement('div');cc.className='mlist';
+  if(!list.length)cc.innerHTML='<div class="empty">아직 수집된 피드백 없음</div>';
+  list.forEach(f=>cc.appendChild(feedbackItem(f)));
+  sec.appendChild(cc);board.appendChild(sec);
+}
+function feedbackItem(f){
+  const el=document.createElement('div');el.className=`m ${f.needs_inspection?'':'read'}`;
+  const rc=repoColor(f.repo);const open=f.comment_url?`<a class="open" href="${f.comment_url}" target="_blank" onclick="event.stopPropagation()"><button>댓글↗</button></a>`:'';
+  el.innerHTML=`<span class="rdot" style="background:${rc};margin-top:5px"></span>
+    <div class="body"><div class="meta"><b>${esc(repoShort(f.repo))}#${f.pr}</b> · ${esc(f.profile)} · ${esc(f.snapshot_type)} · ${esc(f.status)}</div>
+    <div class="txt">${esc(f.title||'(제목없음)')}</div>
+    <div class="meta">👍 ${f.up||0} · 👎 ${f.down||0} · 😕 ${f.confused||0} · 💬 ${f.replies||0}</div></div>
+    <div class="acts">${open}</div>`;
+  el.onclick=()=>openFeedbackModal(f);
+  return el;
+}
 function renderLanes(){
   const byLane={};LANES.forEach(([k])=>byLane[k]=[]);
   viewData().forEach(c=>{if(byLane[c.status])byLane[c.status].push(c)});
@@ -640,6 +651,19 @@ function openModal(c){
       html+=`<div class="cmt">${esc(cm.body)}</div>${cm.url?`<div class="msub"><a href="${cm.url}" target="_blank">${esc(cm.url)}</a></div>`:`<div class="msub">${pending?'(dry-run · 미게시)':'(dry-run preview)'}</div>`}`});
     if(c.dryrun_pending)
       html+=`<div class="btns"><button class="go" onclick="publishDryRun(event,${c.id})">💬 dry-run 댓글 게시</button></div>`;}
+  m.innerHTML=html;document.getElementById('ov').classList.add('show');
+}
+function openFeedbackModal(f){
+  const m=document.getElementById('modal');const rc=repoColor(f.repo);
+  let html=`<span class="close" onclick="closeM()">✕ 닫기</span>
+    <h3>${esc(repoShort(f.repo))}#${f.pr} 리뷰 피드백</h3>
+    <div class="msub">${esc(f.repo)} · card #${f.card_id} · snapshot #${f.id}
+      <span class="statuspill" style="${pill(f.needs_inspection?'#fbbf24':'#4ade80')}">${f.needs_inspection?'확인 필요':'수집됨'}</span></div>
+    <div class="row"><span class="repopill" style="${pill(rc)}"><span class="rdot" style="background:${rc}"></span>${esc(f.profile)}</span><span class="pill">${esc(f.snapshot_type)}</span><span class="pill">${esc(f.status)}</span></div>
+    <div class="title" style="margin-top:12px">${esc(f.title)||'(제목없음)'}</div>
+    <div class="lbl">반응</div><div class="pre">👍 ${f.up||0} · 👎 ${f.down||0} · 😕 ${f.confused||0} · 💬 ${f.replies||0}</div>`;
+  if(f.comment_url)html+=`<div class="mlink"><a href="${f.comment_url}" target="_blank">GitHub 댓글 열기 ↗</a></div>`;
+  html+=`<div class="lbl">API</div><div class="pre">/api/feedback/${f.id}</div>`;
   m.innerHTML=html;document.getElementById('ov').classList.add('show');
 }
 function closeM(){document.getElementById('ov').classList.remove('show')}

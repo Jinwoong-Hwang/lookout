@@ -71,7 +71,12 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(text.encode())
 
     def do_GET(self):
-        if self.path == "/health":
+        if self.path == "/":
+            host = self.headers.get("Host", "127.0.0.1").split(":", 1)[0]
+            self.send_response(302)
+            self.send_header("Location", f"//{host}:{CFG.get('dashboard_port', 8788)}/")
+            self.end_headers()
+        elif self.path == "/health":
             self._reply(200, "ok")
         else:
             self._reply(404, "not found")
