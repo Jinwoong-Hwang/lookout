@@ -9,7 +9,7 @@ import os
 import subprocess
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import db, engines, poller, worktree
+from . import db, engines, poller, worklog, worktree
 
 
 def kick_tick():
@@ -283,22 +283,77 @@ background:transparent;border:none;padding:3px 5px;border-radius:6px;opacity:.4}
 .m a.open{text-decoration:none}
 .mempty{color:var(--muted);font-size:12px;padding:4px 0 12px}
 .unreaddot{width:8px;height:8px;border-radius:50%;background:var(--accent);flex:0 0 auto;margin-top:5px}
+/* 작업 기록 */
+.worklog{padding:16px 22px 26px}
+.wlhead{display:flex;align-items:center;gap:10px;font-size:14px;font-weight:700;margin-bottom:4px}
+.bempty{color:var(--muted);font-size:12px;padding:8px 0 10px;line-height:1.6}
+.wlday{display:flex;align-items:center;gap:10px;margin:18px 0 9px;padding-bottom:6px;border-bottom:1px solid var(--line)}
+.wldate{font-size:13px;font-weight:700}
+.wldate .cnt{color:var(--muted);font-weight:500;font-size:11.5px;margin-left:7px}
+.wlcopy{margin-left:auto;font-size:11.5px;padding:4px 9px}
+.wlsum{font-size:12.5px;color:var(--ink);opacity:.9;line-height:1.65;margin:0 0 10px;padding:10px 13px;
+  background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:9px;white-space:pre-wrap}
+.wlitems{display:flex;flex-direction:column;gap:7px}
+.wlitem{display:flex;align-items:baseline;gap:8px;font-size:13px;color:var(--ink);line-height:1.5;flex-wrap:wrap}
+.wlic{flex:0 0 auto}
+.wlitem a{color:var(--ink);text-decoration:none}
+.wlitem a:hover{color:var(--accent)}
+.wlsrc{color:var(--purple);font-weight:700;font-size:11.5px;flex:0 0 auto}
+.wlloc{color:var(--dim);font-size:11.5px;flex:0 0 auto}
+#badge-worklog{background:var(--btn-accent-bg);color:var(--btn-accent-fg)}
+/* 사이드바 셸 */
+.shell{flex:1 1 auto;min-height:0;display:flex}
+.sidebar{flex:0 0 auto;width:190px;background:var(--panel);border-right:1px solid var(--line);
+  display:flex;flex-direction:column;gap:3px;padding:14px 10px;overflow-y:auto}
+.navitem{display:flex;align-items:center;gap:10px;width:100%;text-align:left;border:1px solid transparent;
+  background:transparent;color:var(--muted);border-radius:10px;padding:9px 11px;font-size:13.5px;font-weight:600}
+.navitem:hover{background:var(--panel2);color:var(--ink);filter:none}
+.navitem.active{background:var(--btn-accent-bg);color:var(--btn-accent-fg);border-color:var(--btn-accent-bd)}
+.navitem .ni-ico{font-size:15px;line-height:1}
+.navitem .ni-label{flex:1}
+.ni-badge{font-size:11px;font-weight:700;min-width:18px;height:18px;line-height:18px;text-align:center;
+  border-radius:9px;background:var(--bad);color:#fff;padding:0 5px}
+.ni-badge:empty{display:none}
+.ni-badge.dot{min-width:0;width:8px;height:8px;padding:0;border-radius:50%;background:var(--accent)}
+.main{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;overflow:hidden}
+.view{flex:1 1 auto;min-height:0;display:flex;flex-direction:column;overflow:hidden}
+.view[hidden]{display:none}
+#view-worklog{overflow-y:auto}
+.toolbar{flex:0 0 auto;display:flex;align-items:center;gap:10px;padding:11px 18px}
+.view .filterbar{position:static;top:auto}
 </style></head><body>
 <header><h1>👁 Lookout</h1>
-<div class="toggle"><button id="tLane" class="active" onclick="setView('lane')">레인별</button><button id="tAuthor" onclick="setView('author')">사람별</button></div>
-<button id="refreshBtn" onclick="refresh()">🔄 PR 가져오기</button>
-<span class="sub" id="sub">로딩…</span>
 <span class="sub" id="engStat" style="margin-left:14px"></span>
-<button id="themeBtn" onclick="cycleTheme()" title="테마 전환 (시스템 · 라이트 · 다크)" style="margin-left:auto">🖥 시스템</button>
-<span class="sub" style="margin-left:12px">5초마다 자동 새로고침</span></header>
-<div class="filterbar" id="filterbar"></div>
-<section class="mentions" id="mentions" style="display:none"></section>
-<div class="board" id="board"></div>
+<button id="themeBtn" onclick="cycleTheme()" title="테마 전환 (시스템 · 라이트 · 다크)" style="margin-left:auto">🖥 시스템</button></header>
+<div class="shell">
+<nav class="sidebar">
+  <button class="navitem active" id="nav-board" onclick="setNav('board')"><span class="ni-ico">📋</span><span class="ni-label">리뷰 보드</span><span class="ni-badge" id="badge-board"></span></button>
+  <button class="navitem" id="nav-worklog" onclick="setNav('worklog')"><span class="ni-ico">📓</span><span class="ni-label">작업 기록</span><span class="ni-badge" id="badge-worklog"></span></button>
+</nav>
+<main class="main">
+  <section class="view" id="view-board">
+    <div class="toolbar">
+      <div class="toggle"><button id="tLane" class="active" onclick="setView('lane')">레인별</button><button id="tAuthor" onclick="setView('author')">사람별</button></div>
+      <button id="refreshBtn" onclick="refresh()">🔄 PR 가져오기</button>
+      <span class="sub" id="sub">로딩…</span>
+      <span class="sub" style="margin-left:auto">5초마다 자동 새로고침</span>
+    </div>
+    <div class="filterbar" id="filterbar"></div>
+    <section class="mentions" id="mentions" style="display:none"></section>
+    <div class="board" id="board"></div>
+  </section>
+  <section class="view" id="view-worklog" hidden>
+    <section class="worklog" id="worklog"></section>
+  </section>
+</main>
+</div>
 <div class="ov" id="ov"><div class="modal" id="modal"></div></div>
 <script>
 const LANES=__LANES__;
 // Slack 미연동 — 멘션 섹션 숨김. Slack 연결 시 true 로 바꾸면 부활.
 const SHOW_MENTIONS=false;
+// 작업 기록 뷰. 끄려면 false.
+const SHOW_WORKLOG=true;
 // ── 테마 (시스템/라이트/다크) — 클릭 순환, localStorage 저장 ──
 const THEME_KEY='lookout_theme';
 const THEME_ORDER=['auto','light','dark'];
@@ -321,6 +376,23 @@ function pill(c){return isLight()
 function stripe(c){return isLight()?darken(c,.72):c;}  // 카드/finding 좌측 컬러 스트라이프
 applyTheme();
 let DATA=[];let VIEW='lane';let REPO='all';
+// ── 사이드바 네비 (뷰 전환 + 배지) ──
+const NAV_KEY='lookout_nav';const NAV_VIEWS=['board','worklog'];
+function setNav(v){
+  if(!NAV_VIEWS.includes(v))v='board';
+  NAV_VIEWS.forEach(k=>{
+    const view=document.getElementById('view-'+k); if(view)view.hidden=(k!==v);
+    const nav=document.getElementById('nav-'+k); if(nav)nav.classList.toggle('active',k===v);
+  });
+  try{localStorage.setItem(NAV_KEY,v);}catch(e){}
+  if(v==='worklog')loadWorklog();
+}
+function initNav(){let v='board';try{v=localStorage.getItem(NAV_KEY)||'board';}catch(e){}setNav(v);}
+function localToday(){try{return new Date().toLocaleDateString('en-CA');}catch(e){return '';}}
+function updateBadges(){
+  const b=document.getElementById('badge-board');
+  if(b){const n=DATA.filter(c=>c.status==='approve_blocked').length;b.textContent=n?String(n):'';}
+}
 // 엔진 가용성 — 초기엔 낙관적(true)으로 두고 /api/engines 응답으로 갱신
 let ENGINES={claude:{installed:true,logged_in:true,ready:true},codex:{installed:true,logged_in:true,ready:true}};
 function engReady(e){return !!(ENGINES&&ENGINES[e]&&ENGINES[e].ready);}
@@ -364,7 +436,9 @@ async function load(){
   renderEngStat();
   renderFilter();
   render();
+  updateBadges();
   if(SHOW_MENTIONS)loadMentions();
+  if(SHOW_WORKLOG)loadWorklog();
 }
 function renderEngStat(){
   const el=document.getElementById('engStat');if(!el)return;
@@ -408,6 +482,51 @@ async function loadMentions(){
 async function mAct(id,action){
   await fetch('/api/mention-action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,mention_id:id})});
   loadMentions();
+}
+// ── 작업 기록 (날짜별 저널) ─────────────────────────────────
+let _wl=[];
+const WLIC={commit:'💻',pr_merged:'✅',pr_opened:'📤',claude:'🤖',codex:'🤖'};
+async function loadWorklog(){
+  let d=[];try{d=await (await fetch('/api/worklog')).json();}catch(e){}
+  _wl=Array.isArray(d)?d:[];
+  const today=localToday();
+  const wb=document.getElementById('badge-worklog');
+  if(wb){const t=_wl.find(x=>x.day===today);const n=t?t.items.length:0;wb.textContent=n?String(n):'';}
+  const wrap=document.getElementById('worklog');
+  let h=`<div class="wlhead">📓 작업 기록 <span style="margin-left:auto"><button onclick="refreshWorklog()">🔄 새로고침</button></span></div>`;
+  if(!_wl.length){
+    wrap.innerHTML=h+'<div class="bempty">아직 기록이 없습니다 — [🔄 새로고침]으로 최근 작업을 불러오세요.<br>(최초 1회는 최근 30일을 훑어 수십 초 걸릴 수 있어요.)</div>';
+    return;
+  }
+  _wl.forEach((g,gi)=>{
+    h+=`<div class="wlday"><span class="wldate">${esc(g.day)}${g.day===today?' (오늘)':''}<span class="cnt">${g.items.length}건</span></span>
+      <button class="wlcopy" onclick="copyDay(${gi})">📋 복사</button></div>`;
+    if(g.summary)h+=`<div class="wlsum">${esc(g.summary)}</div>`;
+    h+=`<div class="wlitems">`;
+    g.items.forEach(it=>{
+      const ic=WLIC[it.source==='git'?it.kind:it.source]||'•';
+      const src=it.source==='claude'?'Claude':(it.source==='codex'?'Codex':'');
+      const loc=(it.repo?' ·'+esc(it.repo):'')+(it.branch?'/'+esc(it.branch):'');
+      const title=it.url?`<a href="${it.url}" target="_blank">${esc(it.title)}</a>`:esc(it.title);
+      h+=`<div class="wlitem"><span class="wlic">${ic}</span>${src?`<span class="wlsrc">${src}</span>`:''}<span>${title}</span><span class="wlloc">${loc}</span></div>`;
+    });
+    h+='</div>';
+  });
+  wrap.innerHTML=h;
+}
+function copyDay(gi){
+  const g=_wl[gi];if(!g)return;
+  const lines=[`${g.day} 작업`];
+  if(g.summary){lines.push(g.summary,'');}
+  g.items.forEach(it=>{const s=it.source==='claude'?'[Claude] ':(it.source==='codex'?'[Codex] ':'');
+    lines.push(`- ${s}${it.title}${it.repo?' ('+it.repo+')':''}`);});
+  navigator.clipboard.writeText(lines.join(String.fromCharCode(10))).then(
+    ()=>showToast('복사됨 📋'),()=>showToast('복사 실패 — 드래그해 복사하세요',false));
+}
+async function refreshWorklog(){
+  showToast('작업 기록 불러오는 중… ⏳',true);
+  try{await fetch('/api/worklog/refresh',{method:'POST'});}catch(e){}
+  await loadWorklog();showToast('갱신됨 📓');
 }
 function render(){
   // 5초 자동 새로고침이 DOM을 다시 그려 스크롤이 최상단으로 튀는 문제 → 위치 보존
@@ -528,7 +647,7 @@ async function refresh(){
   }catch(e){b.textContent='실패';}
   setTimeout(()=>{b.textContent=old;b.disabled=false;},1800);
 }
-load();setInterval(load,5000);
+initNav();load();setInterval(load,5000);
 </script></body></html>"""
 
 
@@ -552,6 +671,10 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, json.dumps(build_mentions(), ensure_ascii=False))
         elif self.path == "/api/engines":
             self._send(200, json.dumps(engines.availability(), ensure_ascii=False))
+        elif self.path == "/api/worklog":
+            with db.connect() as c:
+                data = worklog.by_day(c)
+            self._send(200, json.dumps(data, ensure_ascii=False))
         else:
             self._send(404, "{}")
 
@@ -560,6 +683,12 @@ class Handler(BaseHTTPRequestHandler):
         data = json.loads(self.rfile.read(n) or "{}")
         if self.path == "/api/refresh":
             self._send(200, json.dumps(refresh_poll()))
+            return
+        if self.path == "/api/worklog/refresh":
+            with db.connect() as c:
+                worklog.sync(c, 7)
+                data = worklog.by_day(c)
+            self._send(200, json.dumps(data, ensure_ascii=False))
             return
         if self.path == "/api/action":
             ok = do_action(data.get("action"), int(data.get("card_id", 0)),

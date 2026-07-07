@@ -102,10 +102,35 @@ CREATE TABLE IF NOT EXISTS slack_names (
   updated_at REAL NOT NULL
 );
 
+-- 작업 기록(work log): 날짜별로 쌓이는 저널. git 커밋/PR + Claude/Codex 세션.
+-- ref UNIQUE로 재스캔 시 중복 방지. 누적이 목적이라 purge_old에서 건드리지 않음.
+CREATE TABLE IF NOT EXISTS work_log (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  day        TEXT NOT NULL,             -- YYYY-MM-DD (local)
+  ts         REAL NOT NULL,             -- epoch, 정렬용
+  source     TEXT NOT NULL,             -- git | claude | codex
+  kind       TEXT,                      -- commit | pr_merged | pr_opened | session
+  repo       TEXT,
+  ref        TEXT UNIQUE,               -- dedupe key (sha / repo#pr / claude:sid / codex:sid)
+  title      TEXT,
+  url        TEXT,
+  branch     TEXT,
+  created_at REAL NOT NULL
+);
+
+-- 작업 기록 날짜별 haiku 요약. sig(그날 항목 해시)가 바뀔 때만 재생성.
+CREATE TABLE IF NOT EXISTS worklog_summary (
+  day        TEXT PRIMARY KEY,
+  summary    TEXT,
+  sig        TEXT,
+  updated_at REAL NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_cards_status ON cards(status);
 CREATE INDEX IF NOT EXISTS idx_findings_card ON findings(card_id);
 CREATE INDEX IF NOT EXISTS idx_inbox_processed ON inbox(processed);
 CREATE INDEX IF NOT EXISTS idx_mentions_status ON mentions(status);
+CREATE INDEX IF NOT EXISTS idx_worklog_ts ON work_log(ts);
 """
 
 

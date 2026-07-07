@@ -48,5 +48,14 @@
 
   "max_findings_per_review": 8,
   "min_confidence": "medium",
-  "max_concurrent_reviews": 3
+  "max_concurrent_reviews": 3,
+
+  "_worklog": "작업 기록(날짜별 저널). git 커밋/PR + 로컬 Claude/Codex 세션 병합. LLM 미사용. 최초 실행일(worklog_since)부터 오늘로만 누적(과거 소급 없음).",
+  "worklog_enabled": true,
+  "_worklog_sync_days": "tick(30분마다)에서 재스캔할 최근 일수(데몬이 꺼졌던 사이 놓친 것 보정용).",
+  "worklog_sync_days": 3,
+  "_worklog_llm": "날짜별 요약(그날 뭘 했는지). 내용 바뀐 날만 1콜. false면 요약 없음(0토큰).",
+  "worklog_llm": true,
+  "_worklog_model": "요약 모델. 기본 sonnet(도메인 용어 정확도↑). haiku로 낮추면 더 싸지만 용어를 뭉갤 수 있음.",
+  "worklog_model": "sonnet"
 }

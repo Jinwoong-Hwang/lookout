@@ -7,14 +7,15 @@ blocked are intentionally skipped.
 
 Run: python -m src.tick
 """
+import datetime
 import fcntl
 import os
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 
-from . import (approver, commenter, config, db, monitor, poller, reviewer,
-               router, verifier, worktree)
+from . import (approver, commenter, config, db, monitor, poller,
+               reviewer, router, verifier, worklog, worktree)
 
 CFG = config.CFG
 LOCK_PATH = config.path("logs/tick.lock")
@@ -161,6 +162,20 @@ def gc():
     worktree.gc_worktrees()
 
 
+def maybe_worklog():
+    """작업 기록 동기화 — 30분마다 최근 worklog_sync_days를 재스캔해 오늘부터 누적.
+    worklog_since(최초=오늘) 이전 작업은 기록 안 함. read-only라 리뷰 흐름과 무관."""
+    if not CFG.get("worklog_enabled", True):
+        return
+    with db.connect() as c:
+        last = float(db.get_meta(c, "last_worklog", "0"))
+    if time.time() - last < 30 * 60:
+        return
+    with db.connect() as c:
+        n = worklog.sync(c, int(CFG.get("worklog_sync_days", 3)))
+    print(f"[tick] worklog synced ({n} entries)")
+
+
 def deep_gc():
     """무거운 일일 청소 — run_once 종료 후(진행 중 리뷰 없음)에만 호출.
     ① 캐시 repo object store gc(누적 PR-fetch 객체 회수) ② 오래된 archived 카드/이벤트 purge."""
@@ -191,6 +206,8 @@ def main():
             deep_gc()
             with db.connect() as c:
                 db.set_meta(c, "last_deep_gc", str(time.time()))
+        # 작업 기록 동기화 (백필 1회 + 30분마다 최근분)
+        maybe_worklog()
         print("[tick] done")
     finally:
         fcntl.flock(lock, fcntl.LOCK_UN)

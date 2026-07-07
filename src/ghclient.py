@@ -40,6 +40,82 @@ def pr_diff(repo: str, pr: int) -> str:
     return proc.stdout
 
 
+def review_requested_prs(limit: int = 30) -> list:
+    """내가 리뷰어로 지정된 열린 PR (전체 GitHub). 호출부에서 allowlist로 걸러 씀.
+    gh 없거나 실패해도 예외 대신 빈 리스트 — 브리핑의 부가 섹션이라 조용히 생략."""
+    proc = _run([
+        "search", "prs", "--review-requested=@me", "--state=open",
+        "--limit", str(limit), "--json", "number,title,url,repository,isDraft",
+    ], check=False)
+    if proc.returncode != 0:
+        return []
+    try:
+        rows = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return []
+    out = []
+    for r in rows:
+        if r.get("isDraft"):
+            continue
+        repo = (r.get("repository") or {}).get("nameWithOwner", "")
+        out.append({"repo": repo, "number": r.get("number"),
+                    "title": r.get("title", ""), "url": r.get("url", "")})
+    return out
+
+
+def my_commits(repo: str, since_iso: str, until_iso: str, cap: int = 30) -> list:
+    """내가 author인 커밋(주어진 UTC 구간) — 스탠드업 '어제 한 일'용. 병합커밋 제외."""
+    me = my_login()
+    if not me:
+        return []
+    q = f"repos/{repo}/commits?author={me}&since={since_iso}&until={until_iso}&per_page=100"
+    proc = _run(["api", q, "--paginate",
+                 "-q", ".[] | {sha: .sha, msg: .commit.message, url: .html_url, date: .commit.committer.date}"],
+                check=False)
+    if proc.returncode != 0:
+        return []
+    out = []
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            d = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        msg = (d.get("msg") or "").splitlines()[0].strip()  # 첫 줄만
+        if not msg or msg.startswith("Merge "):
+            continue
+        out.append({"sha": (d.get("sha") or "")[:8], "msg": msg,
+                    "url": d.get("url", ""), "date": d.get("date", "")})
+        if len(out) >= cap:
+            break
+    return out
+
+
+def _my_prs_on(date_flag: str, day: str, cap: int = 30) -> list:
+    """date_flag: 'created'|'merged'. day는 'YYYY-MM-DD' 또는 'A..B' 범위."""
+    proc = _run(["search", "prs", "--author=@me", f"--{date_flag}={day}", "--limit", str(cap),
+                 "--json", "number,title,url,repository,createdAt,closedAt"], check=False)
+    if proc.returncode != 0:
+        return []
+    try:
+        rows = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return []
+    return [{"repo": (r.get("repository") or {}).get("nameWithOwner", ""),
+             "number": r.get("number"), "title": r.get("title", ""), "url": r.get("url", ""),
+             "created_at": r.get("createdAt", ""), "closed_at": r.get("closedAt", "")} for r in rows]
+
+
+def my_prs_created(day: str) -> list:
+    return _my_prs_on("created", day)
+
+
+def my_prs_merged(day: str) -> list:
+    return _my_prs_on("merged", day)
+
+
 def pr_comment(repo: str, pr: int, body: str) -> str:
     proc = _run(["pr", "comment", str(pr), "--repo", repo, "--body", body])
     return proc.stdout.strip()
