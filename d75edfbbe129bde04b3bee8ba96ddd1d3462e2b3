@@ -1,0 +1,21 @@
+config.example.json
+  h_03b13cada2edad 57,60-72
+src/dashboard.py
+  h_03b13cada2edad 689
+src/db.py
+  h_03b13cada2edad 121
+src/tick.py
+  h_03b13cada2edad 167
+src/worklog.py
+  h_03b13cada2edad 5-6,17,25-37,72-158,208,210,234-236,239-245,267-268,284,286,289-314,320-324,328,341-367,372-420,422-456,462-480,484-486,488-489,491-493,495,510,513,519-521,525,540,543,556-565
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "d75edfbbe129bde04b3bee8ba96ddd1d3462e2b3",
+  "prompts": {},
+  "humans": {
+    "h_03b13cada2edad": {
+      "author": "woong@zigbang.com"
+    }
+  }
+}
