@@ -118,7 +118,7 @@ CREATE TABLE IF NOT EXISTS work_log (
   created_at REAL NOT NULL
 );
 
--- 작업 기록 날짜별 haiku 요약. sig(그날 항목 해시)가 바뀔 때만 재생성.
+-- 작업 기록 날짜별 요약. sig(그날 항목 해시)가 바뀔 때만 재생성.
 CREATE TABLE IF NOT EXISTS worklog_summary (
   day        TEXT PRIMARY KEY,
   summary    TEXT,

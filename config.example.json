@@ -54,8 +54,20 @@
   "worklog_enabled": true,
   "_worklog_sync_days": "tick(30분마다)에서 재스캔할 최근 일수(데몬이 꺼졌던 사이 놓친 것 보정용).",
   "worklog_sync_days": 3,
-  "_worklog_llm": "날짜별 요약(그날 뭘 했는지). 내용 바뀐 날만 1콜. false면 요약 없음(0토큰).",
+  "_worklog_llm": "날짜별 요약(그날 뭘 했는지). false면 요약 없음(0토큰).",
   "worklog_llm": true,
   "_worklog_model": "요약 모델. 기본 sonnet(도메인 용어 정확도↑). haiku로 낮추면 더 싸지만 용어를 뭉갤 수 있음.",
-  "worklog_model": "sonnet"
+  "worklog_model": "sonnet",
+  "_worklog_summary_daily_hour": "자동 요약 실행 시작 시각(로컬 hour). 기본 2면 새벽 2시 이후 지난 날짜를 정리.",
+  "worklog_summary_daily_hour": 2,
+  "_worklog_summary_min_interval_hours": "같은 날짜 요약을 자동으로 다시 만들 최소 간격. 수동 새로고침은 내용이 바뀐 경우 즉시 갱신 가능.",
+  "worklog_summary_min_interval_hours": 20,
+  "_worklog_summary_today": "true면 자동 tick에서도 오늘 요약을 갱신. 기본 false는 LLM 비용 절약을 위해 오늘 요약은 수동 새로고침 때만 갱신.",
+  "worklog_summary_today": false,
+  "_worklog_summary_input_chars": "LLM에 넣는 압축 흔적의 최대 글자 수. 전문 대화/tool output/diff는 넣지 않음.",
+  "worklog_summary_input_chars": 12000,
+  "_worklog_ai_signal_threshold": "AI 세션을 작업 기록 후보로 볼 최소 신호 점수. 특정 문구가 아니라 repo/branch/ticket/link/PR/작업 단어 등으로 계산.",
+  "worklog_ai_signal_threshold": 4,
+  "_worklog_ai_session_gap_minutes": "같은 Codex session_id라도 이 시간 이상 비면 별도 작업 흐름으로 분리.",
+  "worklog_ai_session_gap_minutes": 120
 }

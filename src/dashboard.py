@@ -686,7 +686,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path == "/api/worklog/refresh":
             with db.connect() as c:
-                worklog.sync(c, 7)
+                worklog.sync(c, 7, force_summary=True)
                 data = worklog.by_day(c)
             self._send(200, json.dumps(data, ensure_ascii=False))
             return

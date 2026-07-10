@@ -164,7 +164,7 @@ def gc():
 
 def maybe_worklog():
     """작업 기록 동기화 — 30분마다 최근 worklog_sync_days를 재스캔해 오늘부터 누적.
-    worklog_since(최초=오늘) 이전 작업은 기록 안 함. read-only라 리뷰 흐름과 무관."""
+    LLM 요약은 worklog 쪽에서 하루 단위로 절제한다. read-only라 리뷰 흐름과 무관."""
     if not CFG.get("worklog_enabled", True):
         return
     with db.connect() as c:
