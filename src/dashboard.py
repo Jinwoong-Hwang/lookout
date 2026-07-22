@@ -87,6 +87,8 @@ def build_board():
                 "dryrun_pending": dryrun_pending,
                 "feedback": feedback.latest_for_card(c, card["id"]),
                 "closure": {"resolved": clo.get("resolved", 0),
+                            "dismissed": clo.get("dismissed", 0),
+                            "deferred": clo.get("deferred", 0),
                             "unresolved": clo.get("unresolved", 0)},
             })
         return out
@@ -606,7 +608,7 @@ function tile(c){
   el.style.borderLeftColor=stripe(sm.c);
   const statusPill=`<span class="statuspill" style="${pill(sm.c)}">${sm.ko}</span>`;
   const enginePill=(c.status!=='triage')?`<span class="pill">${c.engine}</span>`:'';
-  const clo=c.closure&&(c.closure.resolved||c.closure.unresolved)?`<span class="pill">✅${c.closure.resolved} ⚠️${c.closure.unresolved}</span>`:'';
+  const clo=c.closure&&(c.closure.resolved||c.closure.dismissed||c.closure.deferred||c.closure.unresolved)?`<span class="pill">✅${c.closure.resolved} ↪️${c.closure.deferred||0} ⚠️${c.closure.unresolved}</span>`:'';
   const fb=c.feedback&&(c.feedback.up||c.feedback.down||c.feedback.confused||c.feedback.replies)
     ?`<span class="pill" title="리뷰 피드백 스냅샷">👍${c.feedback.up||0} 👎${c.feedback.down||0} 💬${c.feedback.replies||0}</span>`:'';
   const inspect=c.feedback&&c.feedback.needs_inspection?`<span class="pill" style="${pill('#fbbf24')}">피드백 확인</span>`:'';
@@ -627,8 +629,8 @@ function openModal(c){
     <div class="msub">${esc(c.repo)} · @${esc(c.author)} · <code>${c.head}</code>
       <span class="statuspill" style="${pill(sm.c)}">${sm.ko}</span></div>`;
   if(c.url)html+=`<div class="mlink"><a href="${c.url}" target="_blank">GitHub에서 열기 ↗</a></div>`;
-  if(c.closure&&(c.closure.resolved||c.closure.unresolved))
-    html+=`<div class="lbl">이전 지적 추적</div><div class="pre">✅ ${c.closure.resolved} 해결 · ⚠️ ${c.closure.unresolved} 미해결</div>`;
+  if(c.closure&&(c.closure.resolved||c.closure.dismissed||c.closure.deferred||c.closure.unresolved))
+    html+=`<div class="lbl">이전 지적 추적</div><div class="pre">✅ ${c.closure.resolved} 해결 · ⏭️ ${c.closure.dismissed||0} 해명 수용 · ↪️ ${c.closure.deferred||0} 후속 작업 · ⚠️ ${c.closure.unresolved} 미해결</div>`;
   if(c.feedback&&(c.feedback.up||c.feedback.down||c.feedback.confused||c.feedback.replies)){
     html+=`<div class="lbl">리뷰 피드백</div><div class="pre">👍 ${c.feedback.up||0} · 👎 ${c.feedback.down||0} · 😕 ${c.feedback.confused||0} · 💬 ${c.feedback.replies||0}${c.feedback.needs_inspection?' · 확인 필요':''}</div>`;
   }

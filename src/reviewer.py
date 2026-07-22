@@ -66,17 +66,23 @@ def _run_closure(c, card, priors, diff, conversation, engine, wt, policy, plan=N
         cprompt = prompt_tpl.render(
             prompt_file, FILE=pf["file"], LINE=pf["line"], TITLE=pf["title"],
             PROBLEM=detail.get("problem", ""), DIFF=diff[:40000], CONVERSATION=conversation,
+            STATUS=pf["status"],
             PLAN_JSON=doc_planner.dumps(plan or {}),
         )
         try:
             verdict = engines.run_json(cprompt, engine=engine, cwd=wt, add_dir=wt)
         except Exception:  # noqa: BLE001 - keep prior status on failure
             continue
-        status = "resolved" if verdict.get("resolved") else "unresolved"
+        status = verdict.get("status")
+        if status not in {"resolved", "dismissed", "deferred", "unresolved"}:
+            status = "resolved" if verdict.get("resolved") else "unresolved"
+        evidence = (verdict.get("evidence") or "").strip()
+        if pf["status"] in {"dismissed", "deferred"} and status == "unresolved" and not evidence:
+            status = pf["status"]
         db.set_finding_status(c, pf["id"], status)
         db.log_event(c, "finding_closure", card["key"],
-                     {"fp": pf["fp"], "resolved": verdict.get("resolved"),
-                      "reason": verdict.get("reason")})
+                     {"fp": pf["fp"], "status": status,
+                      "reason": verdict.get("reason"), "evidence": evidence})
 
 
 def process(c, card):
@@ -117,6 +123,7 @@ def process(c, card):
                 }
                 _save_payload(c, card["id"], meta)
                 db.log_event(c, "doc_summary_planned", card["key"], meta["doc_summary"])
+            _run_closure(c, card, priors, diff, conversation, engine, wt, policy, plan)
             context = doc_planner.build_context(wt, diff, changed_files, plan)
             prompt = prompt_tpl.render(
                 profiles.prompt_name(policy, "review"),
@@ -127,6 +134,7 @@ def process(c, card):
                 DOC_CONTEXT=context,
             )
         else:
+            _run_closure(c, card, priors, diff, conversation, engine, wt, policy)
             prompt = prompt_tpl.render(
                 profiles.prompt_name(policy, "review"), REPO=repo, PR=pr, TITLE=meta.get("title", ""),
                 AUTHOR=meta.get("author", ""), HEAD=head, DIFF=diff[:120000],
@@ -135,7 +143,6 @@ def process(c, card):
         if engine == "claude" and not is_doc:
             prompt += CLAUDE_RECALL_NOTE
         result = engines.run_json(prompt, engine=engine, cwd=wt, add_dir=wt)
-        _run_closure(c, card, priors, diff, conversation, engine, wt, policy, plan)
     finally:
         if wt:
             worktree.remove_worktree(repo, wt)

@@ -51,7 +51,7 @@ CREATE TABLE IF NOT EXISTS findings (
   line       TEXT,
   severity   TEXT,
   confidence TEXT,
-  status     TEXT NOT NULL,             -- pending_verify|confirmed|rejected|posted|resolved|unresolved
+  status     TEXT NOT NULL,             -- pending_verify|confirmed|rejected|posted|resolved|dismissed|deferred|unresolved
   comment_id TEXT,
   created_at REAL NOT NULL,
   updated_at REAL NOT NULL,
@@ -281,17 +281,21 @@ def findings_for_card(c, card_id, status=None):
 
 
 def prior_open_findings(c, repo, pr, exclude_card_id):
-    """Findings raised on earlier review cards of this PR that aren't resolved yet."""
+    """Earlier findings that need closure at a new head.
+
+    Dismissed/deferred findings are retained here only so new code can reopen
+    them; they are never returned by unresolved_findings for re-commenting.
+    """
     return c.execute(
         """SELECT * FROM findings WHERE repo=? AND pr_number=? AND card_id!=?
-           AND status IN ('posted','confirmed','unresolved')""",
+           AND status IN ('posted','confirmed','unresolved','dismissed','deferred')""",
         (repo, pr, exclude_card_id),
     ).fetchall()
 
 
 def closure_counts(c, repo, pr):
     rows = c.execute(
-        "SELECT status, COUNT(*) n FROM findings WHERE repo=? AND pr_number=? AND status IN ('resolved','unresolved') GROUP BY status",
+        "SELECT status, COUNT(*) n FROM findings WHERE repo=? AND pr_number=? AND status IN ('resolved','dismissed','deferred','unresolved') GROUP BY status",
         (repo, pr),
     ).fetchall()
     return {r["status"]: r["n"] for r in rows}
