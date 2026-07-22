@@ -77,12 +77,16 @@ def _run_closure(c, card, priors, diff, conversation, engine, wt, policy, plan=N
         if status not in {"resolved", "dismissed", "deferred", "unresolved"}:
             status = "resolved" if verdict.get("resolved") else "unresolved"
         evidence = (verdict.get("evidence") or "").strip()
+        reply_evidence = (verdict.get("reply_evidence") or "").strip()
+        if status == "deferred" and not reply_evidence:
+            status = "unresolved"
         if pf["status"] in {"dismissed", "deferred"} and status == "unresolved" and not evidence:
             status = pf["status"]
         db.set_finding_status(c, pf["id"], status)
         db.log_event(c, "finding_closure", card["key"],
                      {"fp": pf["fp"], "status": status,
-                      "reason": verdict.get("reason"), "evidence": evidence})
+                      "reason": verdict.get("reason"), "evidence": evidence,
+                      "reply_evidence": reply_evidence})
 
 
 def process(c, card):

@@ -20,8 +20,12 @@ Choose exactly one status:
 - `resolved`: current code fixes the issue.
 - `dismissed`: the author gave a convincing explanation that the behavior is
   intentional or the finding is not a real issue.
-- `deferred`: the author explicitly moved the work to a follow-up task/issue.
-  This is tracking-only, not a merge-blocking finding.
+- `deferred`: the author explicitly moves it out of this PR for later work.
+  An issue link is not required: “별도 후속”, “추후 처리”, “다음 릴리즈에서 다룸”,
+  “범위 밖 개선”, or “관측되면 처리” all count when the author owns that follow-up.
+  Do not infer this only from “impact is low” or “not doing it now”. This is
+  tracking-only, not a merge-blocking finding. Quote the author in
+  `reply_evidence`.
 - `unresolved`: anything else; the issue is still present and unaddressed.
 
 For a finding already `dismissed` or `deferred`, keep that status unless the
@@ -34,5 +38,6 @@ set such a finding to `unresolved`, `evidence` must cite the current-head code
 {
   "status": "resolved|dismissed|deferred|unresolved",
   "reason": "<짧은 한국어 근거>",
-  "evidence": "<재개 시 현재 head 코드 근거, 아니면 빈 문자열>"
+  "evidence": "<재개 시 현재 head 코드 근거, 아니면 빈 문자열>",
+  "reply_evidence": "<deferred일 때 작성자의 명시적 이관 문구, 아니면 빈 문자열>"
 }

@@ -28,8 +28,11 @@ Choose exactly one status:
 - `resolved`: the docs fix the issue.
 - `dismissed`: the author gave a convincing explanation that the current docs
   are intentional and implementable.
-- `deferred`: the author explicitly moved the work to a follow-up task/issue.
-  This is tracking-only, not a merge-blocking finding.
+- `deferred`: the author explicitly moves it out of this PR for later work.
+  An issue link is not required: “별도 후속”, “추후 처리”, “다음 릴리즈에서 다룸”,
+  “범위 밖 개선”, or “관측되면 처리” all count when the author owns that follow-up.
+  Do not infer this only from “impact is low” or “not doing it now”. Quote the
+  author in `reply_evidence`; this state is tracking-only, not merge-blocking.
 - `unresolved`: anything else; the issue remains unaddressed.
 
 For an already `dismissed` or `deferred` finding, keep that status unless the
@@ -41,5 +44,6 @@ document evidence (path and line).
 {
   "status": "resolved|dismissed|deferred|unresolved",
   "reason": "<short Korean reason>",
-  "evidence": "<current-head evidence when reopening; otherwise empty>"
+  "evidence": "<current-head evidence when reopening; otherwise empty>",
+  "reply_evidence": "<author's explicit deferral wording, otherwise empty>"
 }

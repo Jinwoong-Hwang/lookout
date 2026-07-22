@@ -31,7 +31,7 @@ class ReviewerClosureTest(unittest.TestCase):
     def tearDown(self):
         self.c.close()
 
-    def _run(self, closure_status, findings, evidence=""):
+    def _run(self, closure_status, findings, evidence="", reply_evidence=""):
         calls = []
         rendered = []
         old_view, old_diff, old_conversation = ghclient.pr_view, ghclient.pr_diff, ghclient.pr_conversation
@@ -52,7 +52,8 @@ class ReviewerClosureTest(unittest.TestCase):
             def run(prompt, **_):
                 calls.append(prompt)
                 if prompt == "closure.md":
-                    return {"status": closure_status, "reason": "author reply judged", "evidence": evidence}
+                    return {"status": closure_status, "reason": "author reply judged",
+                            "evidence": evidence, "reply_evidence": reply_evidence}
                 return {"findings": findings}
 
             reviewer.engines.run_json = run
@@ -71,7 +72,8 @@ class ReviewerClosureTest(unittest.TestCase):
         for status in ("dismissed", "deferred"):
             with self.subTest(status=status):
                 self.c.execute("UPDATE findings SET status='posted', card_id=?", (self.old_id,))
-                calls, _ = self._run(status, duplicate)
+                calls, _ = self._run(status, duplicate,
+                                     reply_evidence="별도 후속으로 처리" if status == "deferred" else "")
                 finding = self.c.execute("SELECT * FROM findings WHERE fp=?", (self.fp,)).fetchone()
                 self.assertEqual(calls, ["closure.md", "review.md"])
                 self.assertEqual(finding["status"], status)
@@ -101,10 +103,16 @@ class ReviewerClosureTest(unittest.TestCase):
 
     def test_deferred_is_tracked_but_not_unresolved(self):
         self.c.execute("UPDATE findings SET status='deferred'")
-        _, rendered = self._run("deferred", [])
+        _, rendered = self._run("deferred", [], reply_evidence="관측되면 처리")
         self.assertEqual(rendered[0][1]["STATUS"], "deferred")
         self.assertEqual(db.unresolved_findings(self.c, "owner/repo", 1), [])
         self.assertEqual(db.closure_counts(self.c, "owner/repo", 1).get("deferred"), 1)
+
+    def test_deferred_requires_author_reply_evidence(self):
+        self._run("deferred", [])
+        finding = self.c.execute("SELECT * FROM findings WHERE fp=?", (self.fp,)).fetchone()
+        self.assertEqual(finding["status"], "confirmed")
+        self.assertEqual(finding["card_id"], self.new_id)
 
     def test_deferred_reopens_only_with_current_code_evidence(self):
         self.c.execute("UPDATE findings SET status='deferred'")
