@@ -447,6 +447,7 @@ function pill(c){return isLight()
 function stripe(c){return isLight()?darken(c,.72):c;}  // 카드/finding 좌측 컬러 스트라이프
 applyTheme();
 let DATA=[];let FEEDBACK=[];let VIEW='lane';let REPO='all';
+let LANE_SCROLL={};
 // 엔진 가용성 — 초기엔 낙관적(true)으로 두고 /api/engines 응답으로 갱신
 let ENGINES={claude:{installed:true,logged_in:true,ready:true},codex:{installed:true,logged_in:true,ready:true}};
 function engReady(e){return !!(ENGINES&&ENGINES[e]&&ENGINES[e].ready);}
@@ -566,18 +567,23 @@ function feedbackItem(f){
   return el;
 }
 function renderLanes(){
+  const board=document.getElementById('board');
+  LANE_SCROLL={left:board.scrollLeft};
+  board.querySelectorAll('.col .cards').forEach(cards=>LANE_SCROLL[cards.dataset.lane]=cards.scrollTop);
   const byLane={};LANES.forEach(([k])=>byLane[k]=[]);
   viewData().forEach(c=>{if(byLane[c.status])byLane[c.status].push(c)});
-  const board=document.getElementById('board');board.className='board';board.innerHTML='';
+  board.className='board';board.innerHTML='';
   for(const [key,label] of LANES){
     const list=byLane[key]||[];
     const col=document.createElement('div');col.className='col';
     col.innerHTML=`<h2><span class="lh"><span class="dot" style="background:${smeta(key).c}"></span>${label}</span><span class="n">${list.length}</span></h2>`;
-    const cc=document.createElement('div');cc.className='cards';
+    const cc=document.createElement('div');cc.className='cards';cc.dataset.lane=key;
     if(!list.length)cc.innerHTML='<div class="empty">—</div>';
     list.forEach(c=>cc.appendChild(tile(c)));
     col.appendChild(cc);board.appendChild(col);
   }
+  board.scrollLeft=LANE_SCROLL.left||0;
+  board.querySelectorAll('.col .cards').forEach(cards=>cards.scrollTop=LANE_SCROLL[cards.dataset.lane]||0);
 }
 function renderByAuthor(){
   const byA={};viewData().forEach(c=>{(byA[c.author||'(unknown)']=byA[c.author||'(unknown)']||[]).push(c)});
