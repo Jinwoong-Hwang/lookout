@@ -12,7 +12,10 @@ def process(c, card):
     policy = profiles.policy_from_card(card)
     pending = db.findings_for_card(c, card["id"], status="pending_verify")
     if not pending:
-        terminal = policy["no_confirmed_terminal"] if policy.get("profile_type") == "doc" else "commenting"
+        decision_pending = db.pending_decision_findings(c, repo, pr)
+        terminal = "commented" if decision_pending else (
+            policy["no_confirmed_terminal"] if policy.get("profile_type") == "doc" else "commenting"
+        )
         db.set_status(c, card["id"], terminal)
         return
 
@@ -47,4 +50,8 @@ def process(c, card):
             worktree.remove_worktree(repo, wt)
 
     confirmed = db.findings_for_card(c, card["id"], status="confirmed")
-    db.set_status(c, card["id"], "commenting" if confirmed else policy["no_confirmed_terminal"])
+    decision_pending = db.pending_decision_findings(c, repo, pr)
+    terminal = "commenting" if confirmed else (
+        "commented" if decision_pending else policy["no_confirmed_terminal"]
+    )
+    db.set_status(c, card["id"], terminal)

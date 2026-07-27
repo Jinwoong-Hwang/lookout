@@ -53,6 +53,9 @@ CREATE TABLE IF NOT EXISTS findings (
   confidence TEXT,
   status     TEXT NOT NULL,             -- pending_verify|confirmed|rejected|posted|resolved|dismissed|deferred|unresolved
   comment_id TEXT,
+  decision_head TEXT,
+  decision_comment_id TEXT,
+  decision_evidence TEXT,
   created_at REAL NOT NULL,
   updated_at REAL NOT NULL,
   UNIQUE(repo, pr_number, fp)
@@ -153,6 +156,10 @@ def init():
         cols = [r["name"] for r in c.execute("PRAGMA table_info(cards)").fetchall()]
         if "engine" not in cols:
             c.execute("ALTER TABLE cards ADD COLUMN engine TEXT DEFAULT 'claude'")
+        finding_cols = {r["name"] for r in c.execute("PRAGMA table_info(findings)").fetchall()}
+        for name in ("decision_head", "decision_comment_id", "decision_evidence"):
+            if name not in finding_cols:
+                c.execute(f"ALTER TABLE findings ADD COLUMN {name} TEXT")
 
 
 def get_meta(c, k: str, default=None):
@@ -288,14 +295,19 @@ def prior_open_findings(c, repo, pr, exclude_card_id):
     """
     return c.execute(
         """SELECT * FROM findings WHERE repo=? AND pr_number=? AND card_id!=?
-           AND status IN ('posted','confirmed','unresolved','dismissed','deferred')""",
+           AND status IN ('posted','confirmed','unresolved','dismissed','deferred',
+                          'dismiss_pending','defer_pending')""",
         (repo, pr, exclude_card_id),
     ).fetchall()
 
 
 def closure_counts(c, repo, pr):
     rows = c.execute(
-        "SELECT status, COUNT(*) n FROM findings WHERE repo=? AND pr_number=? AND status IN ('resolved','dismissed','deferred','unresolved') GROUP BY status",
+        """SELECT status, COUNT(*) n FROM findings
+           WHERE repo=? AND pr_number=?
+             AND status IN ('resolved','dismissed','deferred','unresolved',
+                            'dismiss_pending','defer_pending')
+           GROUP BY status""",
         (repo, pr),
     ).fetchall()
     return {r["status"]: r["n"] for r in rows}
@@ -316,6 +328,55 @@ def unresolved_findings(c, repo, pr):
     ).fetchall()
 
 
+def pending_decision_findings(c, repo, pr):
+    return c.execute(
+        """SELECT * FROM findings WHERE repo=? AND pr_number=?
+           AND status IN ('dismiss_pending','defer_pending')""",
+        (repo, pr),
+    ).fetchall()
+
+
+def revalidate_finding(c, card_id, repo, pr, head, fp, title, body, file, line,
+                       severity, confidence):
+    """Move a duplicate fingerprint into fresh verification unless same-head sticky."""
+    row = c.execute(
+        "SELECT * FROM findings WHERE repo=? AND pr_number=? AND fp=?",
+        (repo, pr, fp),
+    ).fetchone()
+    if not row:
+        return "missing"
+    def meaningful_body(raw):
+        try:
+            value = json.loads(raw or "{}")
+            return {k: v for k, v in value.items() if v not in (None, "", [], {})}
+        except (json.JSONDecodeError, AttributeError):
+            return raw or ""
+
+    same_payload = meaningful_body(row["body"]) == meaningful_body(body) and all(
+        (row[key] or "") == (str(value) if value is not None else "")
+        for key, value in {
+            "title": title, "file": file, "line": line,
+            "severity": severity, "confidence": confidence,
+        }.items()
+    )
+    if row["status"] in {"dismiss_pending", "defer_pending"} and same_payload:
+        return "sticky"
+    if (row["status"] in {"dismissed", "deferred"}
+            and (not row["decision_head"] or row["decision_head"] == head)
+            and same_payload):
+        return "sticky"
+    previous = row["status"]
+    c.execute(
+        """UPDATE findings SET card_id=?,head_sha=?,title=?,body=?,file=?,line=?,
+             severity=?,confidence=?,status='pending_verify',decision_head=NULL,
+             decision_comment_id=NULL,decision_evidence=NULL,updated_at=?
+           WHERE id=?""",
+        (card_id, head, title, body, file, str(line), severity, confidence,
+         now(), row["id"]),
+    )
+    return previous
+
+
 def reattach_finding(c, finding_id, card_id, status):
     c.execute("UPDATE findings SET card_id=?, status=?, updated_at=? WHERE id=?",
               (card_id, status, now(), finding_id))
@@ -325,6 +386,22 @@ def set_finding_status(c, finding_id, status, comment_id=None):
     c.execute(
         "UPDATE findings SET status=?, comment_id=COALESCE(?,comment_id), updated_at=? WHERE id=?",
         (status, comment_id, now(), finding_id),
+    )
+
+
+def set_finding_decision(c, finding_id, status, head, comment_id, evidence):
+    c.execute(
+        """UPDATE findings SET status=?,decision_head=?,decision_comment_id=?,
+             decision_evidence=?,updated_at=? WHERE id=?""",
+        (status, head, str(comment_id), evidence, now(), finding_id),
+    )
+
+
+def clear_finding_decision(c, finding_id, status):
+    c.execute(
+        """UPDATE findings SET status=?,decision_head=NULL,decision_comment_id=NULL,
+             decision_evidence=NULL,updated_at=? WHERE id=?""",
+        (status, now(), finding_id),
     )
 
 

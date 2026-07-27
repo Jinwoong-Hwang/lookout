@@ -10,6 +10,8 @@
   "_dashboard": "대시보드 바인딩. 내부망에서 보려면 dashboard_host를 0.0.0.0으로 설정.",
   "dashboard_host": "127.0.0.1",
   "dashboard_port": 8788,
+  "_dashboard_write_networks": "쓰기 API 허용 CIDR. LAN 허용 시 192.168.0.0/16 등을 명시.",
+  "dashboard_write_networks": ["127.0.0.0/8", "::1/128"],
 
   "_env_file": "선택: launchd/Codex에서 gh 인증이 안 될 때 GH_TOKEN 등을 읽을 private env 파일.",
   "env_file": "~/.config/lookout/env",

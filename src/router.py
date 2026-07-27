@@ -71,6 +71,78 @@ def ensure_pr_cards(c, repo: str, pr: int, source: str = "webhook"):
     return root_id
 
 
+def create_rereview(c, source_card_id: int, engine: str):
+    """Atomically create one same-head review attempt for a terminal card."""
+    source = c.execute("SELECT * FROM cards WHERE id=?", (source_card_id,)).fetchone()
+    if not source:
+        return None
+    target_key = keys.rereview_key(
+        source["repo"], source["pr_number"], source["head_sha"], source_card_id,
+    )
+    existing = db.get_card(c, target_key)
+    if existing:
+        return existing["id"]
+    allowed = (
+        source["kind"] == "review" and source["status"] in {"commented", "lgtm", "done"}
+    ) or (
+        source["kind"] == "approve" and source["status"] in {"approve_blocked", "done"}
+    )
+    if not allowed:
+        return None
+
+    info = ghclient.pr_view(source["repo"], source["pr_number"])
+    if (info.get("state") != "OPEN" or info.get("isDraft") or
+            info.get("headRefOid") != source["head_sha"]):
+        return None
+
+    try:
+        c.execute("BEGIN IMMEDIATE")
+        source = c.execute("SELECT * FROM cards WHERE id=?", (source_card_id,)).fetchone()
+        if not source:
+            c.execute("ROLLBACK")
+            return None
+        existing = db.get_card(c, target_key)
+        if existing:
+            c.execute("COMMIT")
+            return existing["id"]
+        allowed = (
+            source["kind"] == "review" and source["status"] in {"commented", "lgtm", "done"}
+        ) or (
+            source["kind"] == "approve" and source["status"] in {"approve_blocked", "done"}
+        )
+        if not allowed or source["head_sha"] != info["headRefOid"]:
+            c.execute("ROLLBACK")
+            return None
+
+        payload = {
+            "title": info.get("title"), "url": info.get("url"),
+            "author": (info.get("author") or {}).get("login", ""),
+            "source": "manual-rereview",
+            "review_policy": profiles.policy_for_repo(source["repo"]),
+        }
+        target_id = db.upsert_card(
+            c, target_key, "review", source["repo"], source["pr_number"],
+            status="intake", head_sha=source["head_sha"],
+            base_sha=info.get("baseRefName"), payload=payload,
+        )
+        db.set_engine(c, target_id, engine)
+        db.set_status(c, source_card_id, "archived")
+        c.execute(
+            """UPDATE cards SET status='archived', updated_at=?
+               WHERE repo=? AND pr_number=? AND head_sha=?
+                 AND kind='approve' AND status='approve_blocked'""",
+            (db.now(), source["repo"], source["pr_number"], source["head_sha"]),
+        )
+        db.log_event(c, "operator_rereview", target_key,
+                     {"source_card_id": source_card_id, "engine": engine})
+        c.execute("COMMIT")
+        return target_id
+    except Exception:
+        if c.in_transaction:
+            c.execute("ROLLBACK")
+        raise
+
+
 def _handle_pull_request(c, payload):
     action = payload.get("action")
     if action not in ("opened", "synchronize", "reopened", "ready_for_review"):

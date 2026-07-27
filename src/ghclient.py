@@ -4,6 +4,7 @@ Intake reads are deterministic (no LLM). Mutations (comment/approve) are guarded
 by dry-run flags in the workers, not here.
 """
 import json
+import re
 import subprocess
 
 from . import config
@@ -170,6 +171,59 @@ def issue_comments(repo: str, pr: int) -> list:
         if line:
             out.append(json.loads(line))
     return out
+
+
+def pr_author_identity(repo: str, pr: int) -> dict:
+    proc = _run([
+        "api", f"repos/{repo}/pulls/{pr}",
+        "-q", "{login: .user.login, id: (.user.id|tostring)}",
+    ])
+    return json.loads(proc.stdout)
+
+
+def issue_comments_structured(repo: str, pr: int) -> list[dict]:
+    """Issue comments with immutable author ids, sorted as GitHub returned them."""
+    proc = _run([
+        "api", f"repos/{repo}/issues/{pr}/comments", "--paginate",
+        "-q", ".[] | {id: (.id|tostring), author: .user.login, "
+              "author_id: (.user.id|tostring), created_at, body}",
+    ])
+    out = []
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if line:
+            out.append(json.loads(line))
+    return out
+
+
+def finding_author_replies(comments: list[dict], fp: str, author_id: str,
+                           bot_login: str) -> list[dict]:
+    """Verified PR-author replies in the bot finding's own comment window."""
+    marker = f"<!-- hermes:fp={fp} -->"
+    sources = [i for i, comment in enumerate(comments)
+               if comment.get("author") == bot_login and marker in (comment.get("body") or "")]
+    latest_with_reply = []
+    for source_idx in sources:
+        source_body = comments[source_idx].get("body") or ""
+        bundled = source_body.count("<!-- hermes:fp=") > 1
+        replies = []
+        for comment in comments[source_idx + 1:]:
+            body = comment.get("body") or ""
+            if comment.get("author") == bot_login and "<!-- hermes:fp=" in body:
+                break
+            linked = not bundled or re.search(
+                rf"(?<![A-Za-z0-9_.:/#-]){re.escape(fp)}(?![A-Za-z0-9_.:/#-])",
+                body,
+            ) is not None
+            if (linked and str(comment.get("author_id") or "") == str(author_id)
+                    and body.strip()):
+                replies.append({
+                    "id": str(comment["id"]), "author": comment.get("author", ""),
+                    "created_at": comment.get("created_at", ""), "body": body,
+                })
+        if replies:
+            latest_with_reply = replies
+    return latest_with_reply
 
 
 def comment_reactions(repo: str, comment_id: str) -> dict:

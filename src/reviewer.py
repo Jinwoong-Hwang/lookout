@@ -58,35 +58,78 @@ def _stable_rule(f: dict) -> str:
     return f"{slug}-{digest}"
 
 
-def _run_closure(c, card, priors, diff, conversation, engine, wt, policy, plan=None):
-    """Re-judge previously-raised findings at the new head, considering replies."""
+def _verified_reply(verdict: dict, replies: list[dict]):
+    comment_id = str(verdict.get("reply_comment_id") or "")
+    evidence = (verdict.get("reply_evidence") or "").strip()
+    if not comment_id or not evidence:
+        return None
+    return next((reply for reply in replies
+                 if str(reply.get("id")) == comment_id
+                 and evidence in (reply.get("body") or "")), None)
+
+
+def _run_closure(c, card, priors, diff, engine, wt, policy,
+                 author: dict, comments: list[dict], plan=None):
+    """Re-judge previous findings using backend-verified PR-author replies."""
     prompt_file = profiles.prompt_name(policy, "closure")
     for pf in priors:
+        decision_head = pf["decision_head"]
+        if pf["status"] in {"dismissed", "deferred", "dismiss_pending", "defer_pending"}:
+            if decision_head == card["head_sha"]:
+                continue
+
+        replies = ghclient.finding_author_replies(
+            comments, pf["fp"], author.get("id", ""), ghclient.my_login(),
+        )
+        if decision_head and decision_head != card["head_sha"] and pf["decision_comment_id"]:
+            decision_comment = next(
+                (x for x in comments if str(x.get("id")) == str(pf["decision_comment_id"])),
+                None,
+            )
+            if decision_comment:
+                replies = [x for x in replies
+                           if x.get("created_at", "") > decision_comment.get("created_at", "")]
         detail = _json.loads(pf["body"]) if pf["body"] else {}
         cprompt = prompt_tpl.render(
             prompt_file, FILE=pf["file"], LINE=pf["line"], TITLE=pf["title"],
-            PROBLEM=detail.get("problem", ""), DIFF=diff[:40000], CONVERSATION=conversation,
-            STATUS=pf["status"],
+            PROBLEM=detail.get("problem", ""), DIFF=diff[:40000], STATUS=pf["status"],
+            AUTHOR=author.get("login", ""),
+            REPLIES_JSON=_json.dumps(replies, ensure_ascii=False),
             PLAN_JSON=doc_planner.dumps(plan or {}),
         )
         try:
             verdict = engines.run_json(cprompt, engine=engine, cwd=wt, add_dir=wt)
-        except Exception:  # noqa: BLE001 - keep prior status on failure
+        except Exception as e:  # noqa: BLE001 - closure failure must block LGTM
+            db.clear_finding_decision(c, pf["id"], "unresolved")
+            db.log_event(c, "finding_closure_error", card["key"],
+                         {"fp": pf["fp"], "error": str(e)})
             continue
         status = verdict.get("status")
         if status not in {"resolved", "dismissed", "deferred", "unresolved"}:
             status = "resolved" if verdict.get("resolved") else "unresolved"
         evidence = (verdict.get("evidence") or "").strip()
-        reply_evidence = (verdict.get("reply_evidence") or "").strip()
-        if status == "deferred" and not reply_evidence:
+        verified_reply = _verified_reply(verdict, replies)
+        if pf["status"] in {"dismissed", "deferred"} and status == pf["status"]:
+            db.set_finding_status(c, pf["id"], status)
+        elif status in {"dismissed", "deferred"} and verified_reply:
+            status = "dismiss_pending" if status == "dismissed" else "defer_pending"
+            db.set_finding_decision(
+                c, pf["id"], status, card["head_sha"], verified_reply["id"],
+                (verdict.get("reply_evidence") or "").strip(),
+            )
+        elif status in {"dismissed", "deferred"}:
             status = "unresolved"
-        if pf["status"] in {"dismissed", "deferred"} and status == "unresolved" and not evidence:
+            db.clear_finding_decision(c, pf["id"], status)
+        elif pf["status"] in {"dismissed", "deferred"} and status == "unresolved" and not evidence:
             status = pf["status"]
-        db.set_finding_status(c, pf["id"], status)
+            db.set_finding_status(c, pf["id"], status)
+        else:
+            db.clear_finding_decision(c, pf["id"], status)
         db.log_event(c, "finding_closure", card["key"],
                      {"fp": pf["fp"], "status": status,
                       "reason": verdict.get("reason"), "evidence": evidence,
-                      "reply_evidence": reply_evidence})
+                      "reply_comment_id": verified_reply["id"] if verified_reply else "",
+                      "reply_evidence": (verdict.get("reply_evidence") or "").strip()})
 
 
 def process(c, card):
@@ -103,6 +146,12 @@ def process(c, card):
     meta = _payload(card)
     engine = card["engine"] or "claude"
     priors = db.prior_open_findings(c, repo, pr, card["id"])
+    try:
+        author_identity = ghclient.pr_author_identity(repo, pr) if priors else {}
+        structured_comments = ghclient.issue_comments_structured(repo, pr) if priors else []
+    except ghclient.GhError as e:
+        author_identity, structured_comments = {}, []
+        db.log_event(c, "closure_context_error", card["key"], {"error": str(e)})
     is_doc = policy.get("profile_type") == "doc"
     plan = None
 
@@ -127,7 +176,8 @@ def process(c, card):
                 }
                 _save_payload(c, card["id"], meta)
                 db.log_event(c, "doc_summary_planned", card["key"], meta["doc_summary"])
-            _run_closure(c, card, priors, diff, conversation, engine, wt, policy, plan)
+            _run_closure(c, card, priors, diff, engine, wt, policy,
+                         author_identity, structured_comments, plan)
             context = doc_planner.build_context(wt, diff, changed_files, plan)
             prompt = prompt_tpl.render(
                 profiles.prompt_name(policy, "review"),
@@ -138,7 +188,8 @@ def process(c, card):
                 DOC_CONTEXT=context,
             )
         else:
-            _run_closure(c, card, priors, diff, conversation, engine, wt, policy)
+            _run_closure(c, card, priors, diff, engine, wt, policy,
+                         author_identity, structured_comments)
             prompt = prompt_tpl.render(
                 profiles.prompt_name(policy, "review"), REPO=repo, PR=pr, TITLE=meta.get("title", ""),
                 AUTHOR=meta.get("author", ""), HEAD=head, DIFF=diff[:120000],
@@ -171,31 +222,22 @@ def process(c, card):
         }
         _save_payload(c, card["id"], meta)
         db.log_event(c, "doc_summary", card["key"], meta["doc_summary"])
+        blockers = db.unresolved_findings(c, repo, pr)
+        decisions = db.pending_decision_findings(c, repo, pr)
+        if blockers or decisions:
+            for pf in blockers:
+                db.reattach_finding(c, pf["id"], card["id"], "unresolved")
+            for pf in decisions:
+                db.reattach_finding(c, pf["id"], card["id"], pf["status"])
+            db.set_status(c, card["id"], "commented")
+            db.log_event(c, "doc_summary_blocked", card["key"],
+                         {"unresolved": len(blockers), "pending_decisions": len(decisions)})
+            return
         db.set_status(c, card["id"], policy["no_finding_terminal"])
         return
 
-    if not findings:
-        unresolved = db.unresolved_findings(c, repo, pr)
-        if unresolved:
-            # 새 이슈는 없지만 이전 미해결 지적이 남음 → 현재 카드로 재첨부.
-            # force_post=True → 기존 댓글이 있어도 최신 head에 다시 게시(리마인드).
-            for pf in unresolved:
-                db.reattach_finding(c, pf["id"], card["id"], "confirmed")
-            meta["force_post"] = True
-            meta["intro"] = "지난 리뷰의 아래 지적이 아직 반영되지 않은 것 같아 다시 확인 부탁드립니다."
-            _save_payload(c, card["id"], meta)
-            db.set_status(c, card["id"], "commenting")
-            db.log_event(c, "review_prior_unresolved", card["key"],
-                         {"count": len(unresolved), "engine": engine})
-            return
-        terminal = policy["no_finding_terminal"]
-        db.set_status(c, card["id"], terminal)
-        event_type = "review_doc_no_findings" if is_doc else "review_lgtm"
-        db.log_event(c, event_type, card["key"],
-                     {"summary": result.get("summary"), "engine": engine, "terminal": terminal})
-        return
-
-    created = 0
+    to_verify = 0
+    repeat_finding = False
     for f in findings:
         rule = _stable_rule(f)
         fp = keys.finding_fp(repo, pr, f.get("file", "?"), f.get("line", "?"), rule)
@@ -213,6 +255,50 @@ def process(c, card):
             severity=f.get("severity"), confidence=f.get("confidence"),
             status="pending_verify",
         ):
-            created += 1
-    db.set_status(c, card["id"], "verifying")
-    db.log_event(c, "review_findings", card["key"], {"count": created, "engine": engine})
+            to_verify += 1
+        else:
+            previous = db.revalidate_finding(
+                c, card["id"], repo, pr, head, fp,
+                title=f.get("title", ""), body=body,
+                file=f.get("file"), line=f.get("line"),
+                severity=f.get("severity"), confidence=f.get("confidence"),
+            )
+            if previous not in {"missing", "sticky"}:
+                to_verify += 1
+                repeat_finding = repeat_finding or previous in {
+                    "posted", "confirmed", "unresolved",
+                }
+
+    # UNIQUE(repo, pr, fp) keeps a repeated finding on its original row. Closure
+    # marks it unresolved; attach that row to this attempt so it is not lost.
+    unresolved = db.unresolved_findings(c, repo, pr)
+    for pf in unresolved:
+        db.reattach_finding(c, pf["id"], card["id"], "confirmed")
+    pending = db.pending_decision_findings(c, repo, pr)
+    for pf in pending:
+        db.reattach_finding(c, pf["id"], card["id"], pf["status"])
+    if unresolved or repeat_finding:
+        meta["force_post"] = True
+        meta["intro"] = "지난 리뷰의 아래 지적이 아직 반영되지 않은 것 같아 다시 확인 부탁드립니다."
+        _save_payload(c, card["id"], meta)
+    if unresolved:
+        db.log_event(c, "review_prior_unresolved", card["key"],
+                     {"count": len(unresolved), "engine": engine})
+
+    if to_verify:
+        db.set_status(c, card["id"], "verifying")
+        db.log_event(c, "review_findings", card["key"],
+                     {"count": to_verify, "unresolved": len(unresolved),
+                      "pending_decisions": len(pending), "engine": engine})
+    elif unresolved:
+        db.set_status(c, card["id"], "commenting")
+    elif pending:
+        db.set_status(c, card["id"], "commented")
+        db.log_event(c, "review_author_decision_pending", card["key"],
+                     {"count": len(pending)})
+    else:
+        terminal = policy["no_finding_terminal"]
+        db.set_status(c, card["id"], terminal)
+        event_type = "review_doc_no_findings" if is_doc else "review_lgtm"
+        db.log_event(c, event_type, card["key"],
+                     {"summary": result.get("summary"), "engine": engine, "terminal": terminal})

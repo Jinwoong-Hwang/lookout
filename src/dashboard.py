@@ -2,17 +2,18 @@
 
   python -m src.dashboard      # then open http://127.0.0.1:8788
 
-Read-only view of the board + a few operator actions (start / ignore / unblock).
+Board view + operator actions (start / rereview / ignore / unblock).
 """
 import json
 import os
 import subprocess
 import csv
 import io
+import ipaddress
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from . import commenter, db, engines, feedback, poller, worktree
+from . import commenter, db, engines, feedback, ghclient, poller, profiles, router, worktree
 from .config import CFG
 
 
@@ -29,6 +30,8 @@ def kick_tick():
 
 DASHBOARD_HOST = CFG.get("dashboard_host", "127.0.0.1")
 PORT = int(CFG.get("dashboard_port", 8788))
+WRITE_NETWORKS = tuple(ipaddress.ip_network(cidr) for cidr in
+                       CFG.get("dashboard_write_networks", ["127.0.0.0/8", "::1/128"]))
 
 LANES = [
     ("triage", "📥 Triage (리뷰 대기)"),
@@ -58,10 +61,12 @@ def build_board():
             for f in db.findings_for_card(c, card["id"]):
                 detail = json.loads(f["body"]) if f["body"] else {}
                 findings.append({
-                    "status": f["status"], "severity": f["severity"],
+                    "id": f["id"], "status": f["status"], "severity": f["severity"],
                     "confidence": f["confidence"], "file": f["file"], "line": f["line"],
                     "title": f["title"], "problem": detail.get("problem", ""),
                     "fix": detail.get("fix", ""),
+                    "decision_comment_id": f["decision_comment_id"],
+                    "decision_evidence": f["decision_evidence"],
                 })
             ev = c.execute(
                 "SELECT type, detail FROM events WHERE key=? AND type IN ('comment_dryrun','comment_posted','comment_dryrun_published') ORDER BY id",
@@ -89,7 +94,8 @@ def build_board():
                 "closure": {"resolved": clo.get("resolved", 0),
                             "dismissed": clo.get("dismissed", 0),
                             "deferred": clo.get("deferred", 0),
-                            "unresolved": clo.get("unresolved", 0)},
+                            "unresolved": clo.get("unresolved", 0),
+                            "pending": clo.get("dismiss_pending", 0) + clo.get("defer_pending", 0)},
             })
         return out
 
@@ -124,6 +130,23 @@ def do_action(action, card_id, engine="claude"):
         elif action == "publish_dryrun" and card["kind"] == "review":
             if not commenter.publish_dryrun(c, card):
                 return False
+        elif action == "rereview":
+            chosen_engine = card["engine"] if card["kind"] == "review" else None
+            if not chosen_engine:
+                prior = c.execute(
+                    """SELECT engine FROM cards
+                       WHERE repo=? AND pr_number=? AND head_sha=? AND kind='review'
+                       ORDER BY id DESC LIMIT 1""",
+                    (card["repo"], card["pr_number"], card["head_sha"]),
+                ).fetchone()
+                chosen_engine = prior["engine"] if prior and prior["engine"] else engines.default_engine()
+            if not engines.is_ready(chosen_engine):
+                db.log_event(c, "operator_rereview_blocked", card["key"],
+                             {"engine": chosen_engine})
+                return False
+            if not router.create_rereview(c, card["id"], chosen_engine):
+                return False
+            kick = True
         elif action == "stop" and card["status"] in ACTIVE_REVIEW:
             db.set_status(c, card["id"], "archived")  # terminal → 워커가 되살리지 않음
             db.log_event(c, "review_stopped", card["key"], {"from": card["status"]})
@@ -137,6 +160,47 @@ def do_action(action, card_id, engine="claude"):
     return True
 
 
+def do_finding_action(action, finding_id):
+    if action not in {"accept_author_decision", "operator_dismiss"}:
+        return False
+    kick = False
+    with db.connect() as c:
+        finding = c.execute("SELECT * FROM findings WHERE id=?", (finding_id,)).fetchone()
+        allowed = ({"dismiss_pending", "defer_pending"} if action == "accept_author_decision"
+                   else {"posted", "confirmed", "unresolved", "dismiss_pending", "defer_pending"})
+        if not finding or finding["status"] not in allowed:
+            return False
+        card = c.execute("SELECT * FROM cards WHERE id=?", (finding["card_id"],)).fetchone()
+        if not card or card["kind"] != "review" or card["status"] != "commented":
+            return False
+        accepted = ("deferred" if action == "accept_author_decision"
+                    and finding["status"] == "defer_pending" else "dismissed")
+        if action == "operator_dismiss":
+            db.set_finding_decision(c, finding_id, accepted, card["head_sha"], "",
+                                    "operator override")
+        else:
+            db.set_finding_status(c, finding_id, accepted)
+        db.log_event(c, "operator_author_decision", card["key"],
+                     {"finding_id": finding_id, "status": accepted,
+                      "comment_id": finding["decision_comment_id"],
+                      "manual_override": action == "operator_dismiss"})
+        blockers = c.execute(
+            """SELECT COUNT(*) n FROM findings WHERE repo=? AND pr_number=?
+               AND status IN ('posted','confirmed','unresolved','pending_verify',
+                              'dismiss_pending','defer_pending')""",
+            (finding["repo"], finding["pr_number"]),
+        ).fetchone()["n"]
+        if not blockers:
+            info = ghclient.pr_view(finding["repo"], finding["pr_number"])
+            if (info.get("state") == "OPEN" and not info.get("isDraft")
+                    and info.get("headRefOid") == card["head_sha"]):
+                db.set_status(c, card["id"], profiles.policy_from_card(card)["no_finding_terminal"])
+                kick = True
+    if kick:
+        kick_tick()
+    return True
+
+
 def refresh_poll():
     """Run the poller now (bypass the interval) — pull new PRs/heads into triage."""
     with db.connect() as c:
@@ -144,6 +208,19 @@ def refresh_poll():
         poller.poll(c)
         after = len(db.cards_in(c, ["triage"]))
     return {"added": max(0, after - before), "total": after}
+
+
+def mutation_allowed(client_ip: str, action_header: str, origin: str, host: str) -> bool:
+    """Writes are local-operator only; custom header blocks browser CSRF."""
+    try:
+        ip = ipaddress.ip_address(client_ip)
+        if getattr(ip, "ipv4_mapped", None):
+            ip = ip.ipv4_mapped
+    except ValueError:
+        return False
+    if not any(ip in network for network in WRITE_NETWORKS) or action_header != "1":
+        return False
+    return not origin or urlparse(origin).netloc == host
 
 
 def build_mentions():
@@ -540,7 +617,7 @@ async function loadMentions(){
   wrap.innerHTML=h+'</div>';
 }
 async function mAct(id,action){
-  await fetch('/api/mention-action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,mention_id:id})});
+  await fetch('/api/mention-action',{method:'POST',headers:{'Content-Type':'application/json','X-Lookout-Action':'1'},body:JSON.stringify({action,mention_id:id})});
   loadMentions();
 }
 function render(){VIEW==='feedback'?renderFeedback():VIEW==='author'?renderByAuthor():renderLanes();}
@@ -606,6 +683,8 @@ function tile(c){
     xbtn=`<button class="xbtn" title="목록에서 제외" onclick="ignoreCard(event,${c.id})">✕</button>`;
   }
   if(c.status==='approve_blocked')btns=`<div class="btns"><button class="go" onclick="act(event,'unblock',${c.id})">🔓 승인(Unblock)</button></div>`;
+  if((c.kind==='review'&&['commented','lgtm','done'].includes(c.status))||(c.kind==='approve'&&['approve_blocked','done'].includes(c.status)))
+    btns+=`<div class="btns"><button class="go" onclick="reReview(event,${c.id})">🔄 재리뷰</button></div>`;
   if(['intake','reviewing','verifying','commenting'].includes(c.status))
     btns=`<div class="btns"><button class="stop" onclick="stopReview(event,${c.id})">🛑 리뷰 중지</button></div>`;
   if(c.dryrun_pending)
@@ -614,7 +693,7 @@ function tile(c){
   el.style.borderLeftColor=stripe(sm.c);
   const statusPill=`<span class="statuspill" style="${pill(sm.c)}">${sm.ko}</span>`;
   const enginePill=(c.status!=='triage')?`<span class="pill">${c.engine}</span>`:'';
-  const clo=c.closure&&(c.closure.resolved||c.closure.dismissed||c.closure.deferred||c.closure.unresolved)?`<span class="pill">✅${c.closure.resolved} ↪️${c.closure.deferred||0} ⚠️${c.closure.unresolved}</span>`:'';
+  const clo=c.closure&&(c.closure.resolved||c.closure.dismissed||c.closure.deferred||c.closure.unresolved||c.closure.pending)?`<span class="pill">✅${c.closure.resolved} ↪️${c.closure.deferred||0} ⚠️${c.closure.unresolved} 🧑‍⚖️${c.closure.pending||0}</span>`:'';
   const fb=c.feedback&&(c.feedback.up||c.feedback.down||c.feedback.confused||c.feedback.replies)
     ?`<span class="pill" title="리뷰 피드백 스냅샷">👍${c.feedback.up||0} 👎${c.feedback.down||0} 💬${c.feedback.replies||0}</span>`:'';
   const inspect=c.feedback&&c.feedback.needs_inspection?`<span class="pill" style="${pill('#fbbf24')}">피드백 확인</span>`:'';
@@ -635,8 +714,8 @@ function openModal(c){
     <div class="msub">${esc(c.repo)} · @${esc(c.author)} · <code>${c.head}</code>
       <span class="statuspill" style="${pill(sm.c)}">${sm.ko}</span></div>`;
   if(c.url)html+=`<div class="mlink"><a href="${c.url}" target="_blank">GitHub에서 열기 ↗</a></div>`;
-  if(c.closure&&(c.closure.resolved||c.closure.dismissed||c.closure.deferred||c.closure.unresolved))
-    html+=`<div class="lbl">이전 지적 추적</div><div class="pre">✅ ${c.closure.resolved} 해결 · ⏭️ ${c.closure.dismissed||0} 해명 수용 · ↪️ ${c.closure.deferred||0} 후속 작업 · ⚠️ ${c.closure.unresolved} 미해결</div>`;
+  if(c.closure&&(c.closure.resolved||c.closure.dismissed||c.closure.deferred||c.closure.unresolved||c.closure.pending))
+    html+=`<div class="lbl">이전 지적 추적</div><div class="pre">✅ ${c.closure.resolved} 해결 · ⏭️ ${c.closure.dismissed||0} 해명 수용 · ↪️ ${c.closure.deferred||0} 후속 작업 · ⚠️ ${c.closure.unresolved} 미해결 · 🧑‍⚖️ ${c.closure.pending||0} 운영자 판단</div>`;
   if(c.feedback&&(c.feedback.up||c.feedback.down||c.feedback.confused||c.feedback.replies)){
     html+=`<div class="lbl">리뷰 피드백</div><div class="pre">👍 ${c.feedback.up||0} · 👎 ${c.feedback.down||0} · 😕 ${c.feedback.confused||0} · 💬 ${c.feedback.replies||0}${c.feedback.needs_inspection?' · 확인 필요':''}</div>`;
   }
@@ -652,6 +731,8 @@ function openModal(c){
         </div>
         <div class="pre">${esc(f.problem)}</div>
         ${f.fix?`<div class="lbl2">제안</div><div class="pre">${esc(f.fix)}</div>`:''}
+        ${['dismiss_pending','defer_pending'].includes(f.status)?`<div class="lbl2">작성자 결정 근거</div><div class="pre">${esc(f.decision_evidence||'')}</div><div class="btns"><button class="go" onclick="acceptAuthorDecision(event,${f.id},'accept_author_decision')">🧑‍⚖️ 작성자 결정 수용</button></div>`:''}
+        ${['posted','confirmed','unresolved'].includes(f.status)?`<div class="btns"><button class="go" onclick="acceptAuthorDecision(event,${f.id},'operator_dismiss')">🧑‍⚖️ 운영자 직접 수용</button></div>`:''}
       </div>`});
   }else html+='<p class="sub">아직 finding 없음</p>';
   if(c.comments.length){html+='<div class="lbl">게시된 / 게시될 댓글</div>';
@@ -676,13 +757,13 @@ function openFeedbackModal(f){
 }
 function closeM(){document.getElementById('ov').classList.remove('show')}
 document.getElementById('ov').onclick=e=>{if(e.target.id==='ov')closeM()};
-const ACT_MSG={start:'리뷰 시작 — 곧 분석을 시작합니다 ⏳',unblock:'승인 진행 중 🔓',ignore:'목록에서 제외됨',stop:'리뷰 중지됨 🛑'};
+const ACT_MSG={start:'리뷰 시작 — 곧 분석을 시작합니다 ⏳',rereview:'재리뷰 시작 — 곧 분석을 시작합니다 🔄',unblock:'승인 진행 중 🔓',ignore:'목록에서 제외됨',stop:'리뷰 중지됨 🛑'};
 async function act(e,action,id,engine){e.stopPropagation();
   showToast(ACT_MSG[action]||'처리됨', action!=='ignore');
   let j={};
-  try{const r=await fetch('/api/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,card_id:id,engine:engine||'claude'})});j=await r.json();}catch(err){}
-  if(action==='start'&&j&&j.ok===false)
-    showToast('시작할 수 없습니다 — '+(engine?engReason(engine)||'엔진 상태 확인':'엔진 상태 확인'),false);
+  try{const r=await fetch('/api/action',{method:'POST',headers:{'Content-Type':'application/json','X-Lookout-Action':'1'},body:JSON.stringify({action,card_id:id,engine:engine||'claude'})});j=await r.json();}catch(err){}
+  if(['start','rereview'].includes(action)&&j&&j.ok===false)
+    showToast(action==='rereview'?'재리뷰를 시작할 수 없습니다 — PR/head 상태를 확인하세요':'시작할 수 없습니다 — '+(engine?engReason(engine)||'엔진 상태 확인':'엔진 상태 확인'),false);
   load();}
 function showToast(msg,spin){
   let t=document.getElementById('toast');
@@ -693,15 +774,21 @@ function showToast(msg,spin){
 }
 function stopReview(e,id){e.stopPropagation();
   if(confirm('이 리뷰를 강제 중지할까요? (진행 중인 분석을 종료하고 목록에서 제외)'))act(e,'stop',id);}
+function reReview(e,id){e.stopPropagation();
+  if(confirm('커밋 변경 없이 현재 head를 다시 리뷰할까요? 기존 승인 대기 게이트는 취소됩니다.'))act(e,'rereview',id);}
 function ignoreCard(e,id){e.stopPropagation();
   if(confirm('이 PR을 목록에서 제외할까요? (리뷰하지 않음)'))act(e,'ignore',id);}
 function publishDryRun(e,id){e.stopPropagation();
   if(confirm('dry-run 댓글을 실제 GitHub PR 댓글로 게시할까요?'))act(e,'publish_dryrun',id);}
+async function acceptAuthorDecision(e,id,action){e.stopPropagation();
+  if(!confirm(action==='operator_dismiss'?'이 지적을 운영자 판단으로 직접 수용할까요?':'작성자의 미반영/후속 결정을 수용할까요? 이 지적은 더 이상 LGTM을 막지 않습니다.'))return;
+  const r=await fetch('/api/finding-action',{method:'POST',headers:{'Content-Type':'application/json','X-Lookout-Action':'1'},body:JSON.stringify({action,finding_id:id})});
+  const j=await r.json();showToast(j.ok?'작성자 결정 수용됨':'수용할 수 없습니다',false);closeM();load();}
 async function refresh(){
   const b=document.getElementById('refreshBtn');const old=b.textContent;
   b.textContent='가져오는 중…';b.disabled=true;
   try{
-    const r=await fetch('/api/refresh',{method:'POST'});const j=await r.json();
+    const r=await fetch('/api/refresh',{method:'POST',headers:{'X-Lookout-Action':'1'}});const j=await r.json();
     await load();
     b.textContent=j.added>0?`+${j.added}건 추가`:'최신 상태';
   }catch(e){b.textContent='실패';}
@@ -758,6 +845,11 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, "{}")
 
     def do_POST(self):
+        if not mutation_allowed(
+                self.client_address[0], self.headers.get("X-Lookout-Action", ""),
+                self.headers.get("Origin", ""), self.headers.get("Host", "")):
+            self._send(403, '{"ok":false}')
+            return
         n = int(self.headers.get("Content-Length", 0))
         data = json.loads(self.rfile.read(n) or "{}")
         if self.path == "/api/refresh":
@@ -766,6 +858,8 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/action":
             ok = do_action(data.get("action"), int(data.get("card_id", 0)),
                            data.get("engine", "claude"))
+        elif self.path == "/api/finding-action":
+            ok = do_finding_action(data.get("action"), int(data.get("finding_id", 0)))
         elif self.path == "/api/mention-action":
             ok = do_mention_action(data.get("action"), int(data.get("mention_id", 0)))
         else:
