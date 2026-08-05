@@ -21,18 +21,23 @@ class ClaudeError(RuntimeError):
     pass
 
 
-def run(prompt: str, cwd: str = None, add_dir: str = None, timeout: int = 900) -> str:
-    """Run claude headless, return the assistant's final text (the `result`)."""
+def run(prompt: str, cwd: str = None, add_dir: str = None, timeout: int = 900,
+        model: str = None, effort: str = None) -> str:
+    """Run claude headless, return the assistant's final text (the `result`).
+
+    model/effort 미지정 시 config 기본(리뷰용 opus/xhigh). 브리핑처럼 가벼운 잡은
+    model='haiku', effort='' 로 넘겨 값싸게 돌린다(effort=''면 --effort 미첨부)."""
     args = [
         CLAUDE, "-p", prompt,
         "--output-format", "json",
-        "--model", MODEL,
+        "--model", model or MODEL,
         "--permission-mode", "bypassPermissions",
         "--allowedTools", *READONLY_ALLOWED,
         "--disallowedTools", *DISALLOWED,
     ]
-    if EFFORT:
-        args += ["--effort", EFFORT]
+    eff = EFFORT if effort is None else effort
+    if eff:
+        args += ["--effort", eff]
     if add_dir:
         args += ["--add-dir", add_dir]
     proc = subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=timeout,
