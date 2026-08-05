@@ -67,6 +67,7 @@ def build_board():
                     "fix": detail.get("fix", ""),
                     "decision_comment_id": f["decision_comment_id"],
                     "decision_evidence": f["decision_evidence"],
+                    "decision_follow_up": f["decision_follow_up"],
                 })
             ev = c.execute(
                 "SELECT type, detail FROM events WHERE key=? AND type IN ('comment_dryrun','comment_posted','comment_dryrun_published') ORDER BY id",
@@ -731,7 +732,8 @@ function openModal(c){
         </div>
         <div class="pre">${esc(f.problem)}</div>
         ${f.fix?`<div class="lbl2">제안</div><div class="pre">${esc(f.fix)}</div>`:''}
-        ${['dismiss_pending','defer_pending'].includes(f.status)?`<div class="lbl2">작성자 결정 근거</div><div class="pre">${esc(f.decision_evidence||'')}</div><div class="btns"><button class="go" onclick="acceptAuthorDecision(event,${f.id},'accept_author_decision')">🧑‍⚖️ 작성자 결정 수용</button></div>`:''}
+        ${['dismiss_pending','defer_pending'].includes(f.status)?`<div class="lbl2">작성자 결정 근거</div><div class="pre">${esc(f.decision_evidence||'')}</div>${f.status==='defer_pending'?`<div class="lbl2">후속 참조</div><div class="pre">${esc(f.decision_follow_up||'후속 참조 없음')}</div>`:''}<div class="btns"><button class="go" onclick="acceptAuthorDecision(event,${f.id},'accept_author_decision')">🧑‍⚖️ 작성자 결정 수용</button></div>`:''}
+        ${f.status==='deferred'?`<div class="lbl2">작성자 결정 근거</div><div class="pre">${esc(f.decision_evidence||'')}</div><div class="lbl2">후속 참조</div><div class="pre">${esc(f.decision_follow_up||'후속 참조 없음')}</div>`:''}
         ${['posted','confirmed','unresolved'].includes(f.status)?`<div class="btns"><button class="go" onclick="acceptAuthorDecision(event,${f.id},'operator_dismiss')">🧑‍⚖️ 운영자 직접 수용</button></div>`:''}
       </div>`});
   }else html+='<p class="sub">아직 finding 없음</p>';

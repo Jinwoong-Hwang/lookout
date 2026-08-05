@@ -68,6 +68,14 @@ def _verified_reply(verdict: dict, replies: list[dict]):
                  and evidence in (reply.get("body") or "")), None)
 
 
+def _verified_follow_up(verdict: dict, reply: dict | None) -> str:
+    """Keep only a follow-up reference copied verbatim from the verified reply."""
+    follow_up = (verdict.get("follow_up") or "").strip()
+    token = r"(?:https?://\S+|[A-Z][A-Z0-9_]*-\d+|#\d+)"
+    return (follow_up if reply and re.fullmatch(token, follow_up)
+            and follow_up in (reply.get("body") or "") else "")
+
+
 def _run_closure(c, card, priors, diff, engine, wt, policy,
                  author: dict, comments: list[dict], plan=None):
     """Re-judge previous findings using backend-verified PR-author replies."""
@@ -109,13 +117,17 @@ def _run_closure(c, card, priors, diff, engine, wt, policy,
             status = "resolved" if verdict.get("resolved") else "unresolved"
         evidence = (verdict.get("evidence") or "").strip()
         verified_reply = _verified_reply(verdict, replies)
+        follow_up = _verified_follow_up(verdict, verified_reply) if status == "deferred" else ""
         if pf["status"] in {"dismissed", "deferred"} and status == pf["status"]:
+            # A new head rechecks the decision, but keeps the accepted author's
+            # original evidence/reference unless current code refutes it.
             db.set_finding_status(c, pf["id"], status)
         elif status in {"dismissed", "deferred"} and verified_reply:
             status = "dismiss_pending" if status == "dismissed" else "defer_pending"
             db.set_finding_decision(
                 c, pf["id"], status, card["head_sha"], verified_reply["id"],
                 (verdict.get("reply_evidence") or "").strip(),
+                follow_up,
             )
         elif status in {"dismissed", "deferred"}:
             status = "unresolved"
@@ -127,7 +139,7 @@ def _run_closure(c, card, priors, diff, engine, wt, policy,
             db.clear_finding_decision(c, pf["id"], status)
         db.log_event(c, "finding_closure", card["key"],
                      {"fp": pf["fp"], "status": status,
-                      "reason": verdict.get("reason"), "evidence": evidence,
+                      "evidence": evidence,
                       "reply_comment_id": verified_reply["id"] if verified_reply else "",
                       "reply_evidence": (verdict.get("reply_evidence") or "").strip()})
 

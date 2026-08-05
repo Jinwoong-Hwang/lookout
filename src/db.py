@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS findings (
   decision_head TEXT,
   decision_comment_id TEXT,
   decision_evidence TEXT,
+  decision_follow_up TEXT,
   created_at REAL NOT NULL,
   updated_at REAL NOT NULL,
   UNIQUE(repo, pr_number, fp)
@@ -157,7 +158,7 @@ def init():
         if "engine" not in cols:
             c.execute("ALTER TABLE cards ADD COLUMN engine TEXT DEFAULT 'claude'")
         finding_cols = {r["name"] for r in c.execute("PRAGMA table_info(findings)").fetchall()}
-        for name in ("decision_head", "decision_comment_id", "decision_evidence"):
+        for name in ("decision_head", "decision_comment_id", "decision_evidence", "decision_follow_up"):
             if name not in finding_cols:
                 c.execute(f"ALTER TABLE findings ADD COLUMN {name} TEXT")
 
@@ -369,7 +370,7 @@ def revalidate_finding(c, card_id, repo, pr, head, fp, title, body, file, line,
     c.execute(
         """UPDATE findings SET card_id=?,head_sha=?,title=?,body=?,file=?,line=?,
              severity=?,confidence=?,status='pending_verify',decision_head=NULL,
-             decision_comment_id=NULL,decision_evidence=NULL,updated_at=?
+             decision_comment_id=NULL,decision_evidence=NULL,decision_follow_up=NULL,updated_at=?
            WHERE id=?""",
         (card_id, head, title, body, file, str(line), severity, confidence,
          now(), row["id"]),
@@ -389,18 +390,21 @@ def set_finding_status(c, finding_id, status, comment_id=None):
     )
 
 
-def set_finding_decision(c, finding_id, status, head, comment_id, evidence):
+def set_finding_decision(c, finding_id, status, head, comment_id, evidence, follow_up=""):
+    """Persist a decision; follow-up references belong to deferred decisions only."""
     c.execute(
         """UPDATE findings SET status=?,decision_head=?,decision_comment_id=?,
-             decision_evidence=?,updated_at=? WHERE id=?""",
-        (status, head, str(comment_id), evidence, now(), finding_id),
+             decision_evidence=?,decision_follow_up=?,updated_at=? WHERE id=?""",
+        (status, head, str(comment_id), evidence,
+         follow_up if status in {"defer_pending", "deferred"} and follow_up else None,
+         now(), finding_id),
     )
 
 
 def clear_finding_decision(c, finding_id, status):
     c.execute(
         """UPDATE findings SET status=?,decision_head=NULL,decision_comment_id=NULL,
-             decision_evidence=NULL,updated_at=? WHERE id=?""",
+             decision_evidence=NULL,decision_follow_up=NULL,updated_at=? WHERE id=?""",
         (status, now(), finding_id),
     )
 

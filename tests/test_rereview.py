@@ -165,6 +165,31 @@ class RereviewTest(unittest.TestCase):
             "lgtm",
         )
 
+    def test_operator_dismiss_clears_deferred_follow_up(self):
+        db.upsert_finding(
+            self.c, self.source_id, "owner/repo", 1, "head", "defer-fp",
+            "deferred finding", "{}", "src/a.ts", 1, "high", "high", "defer_pending",
+        )
+        finding_id = self.c.execute("SELECT id FROM findings WHERE fp='defer-fp'").fetchone()["id"]
+        db.set_finding_decision(self.c, finding_id, "defer_pending", "head", "123",
+                                "후속 LOOK-123", "LOOK-123")
+        old_connect, old_kick = db.connect, dashboard.kick_tick
+
+        @contextmanager
+        def connect():
+            yield self.c
+
+        try:
+            db.connect = connect
+            dashboard.kick_tick = lambda: None
+            self.assertTrue(dashboard.do_finding_action("operator_dismiss", finding_id))
+        finally:
+            db.connect, dashboard.kick_tick = old_connect, old_kick
+
+        finding = self.c.execute("SELECT * FROM findings WHERE id=?", (finding_id,)).fetchone()
+        self.assertEqual(finding["status"], "dismissed")
+        self.assertIsNone(finding["decision_follow_up"])
+
 
 if __name__ == "__main__":
     unittest.main()

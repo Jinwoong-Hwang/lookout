@@ -31,7 +31,7 @@ class ReviewerClosureTest(unittest.TestCase):
     def tearDown(self):
         self.c.close()
 
-    def _run(self, closure_status, findings, evidence="", reply_evidence="",
+    def _run(self, closure_status, findings, evidence="", reply_evidence="", follow_up="",
              closure_error=False):
         calls = []
         rendered = []
@@ -39,7 +39,9 @@ class ReviewerClosureTest(unittest.TestCase):
         old_author = ghclient.pr_author_identity
         old_comments = ghclient.issue_comments_structured
         old_login = ghclient.my_login
+        old_changed_files = ghclient.pr_changed_files
         old_make, old_remove = worktree.make_worktree, worktree.remove_worktree
+        old_plan, old_context = reviewer.doc_planner.build_plan, reviewer.doc_planner.build_context
         old_render, old_run = prompt_tpl.render, reviewer.engines.run_json
         try:
             ghclient.pr_view = lambda *_: {"state": "OPEN", "headRefOid": "new"}
@@ -47,6 +49,7 @@ class ReviewerClosureTest(unittest.TestCase):
             ghclient.pr_conversation = lambda *_: "author reply"
             ghclient.pr_author_identity = lambda *_: {"login": "author", "id": "42"}
             ghclient.my_login = lambda: "bot"
+            ghclient.pr_changed_files = lambda *_: []
             ghclient.issue_comments_structured = lambda *_: [
                 {"id": "10", "author": "bot", "author_id": "1", "created_at": "1",
                  "body": commenter._marker(self.fp)},
@@ -55,6 +58,8 @@ class ReviewerClosureTest(unittest.TestCase):
             ]
             worktree.make_worktree = lambda *_: "/tmp/review"
             worktree.remove_worktree = lambda *_: None
+            reviewer.doc_planner.build_plan = lambda *_: {"summary_only": False, "review_mode": "full"}
+            reviewer.doc_planner.build_context = lambda *_: ""
             def render(name, **tokens):
                 rendered.append((name, tokens))
                 return name
@@ -63,12 +68,13 @@ class ReviewerClosureTest(unittest.TestCase):
 
             def run(prompt, **_):
                 calls.append(prompt)
-                if prompt == "closure.md":
+                if prompt.endswith("closure.md"):
                     if closure_error:
                         raise RuntimeError("closure unavailable")
                     return {"status": closure_status, "reason": "author reply judged",
                             "evidence": evidence, "reply_evidence": reply_evidence,
-                            "reply_comment_id": "11" if reply_evidence else ""}
+                            "reply_comment_id": "11" if reply_evidence else "",
+                            "follow_up": follow_up}
                 return {"findings": findings}
 
             reviewer.engines.run_json = run
@@ -78,7 +84,9 @@ class ReviewerClosureTest(unittest.TestCase):
             ghclient.pr_author_identity = old_author
             ghclient.issue_comments_structured = old_comments
             ghclient.my_login = old_login
+            ghclient.pr_changed_files = old_changed_files
             worktree.make_worktree, worktree.remove_worktree = old_make, old_remove
+            reviewer.doc_planner.build_plan, reviewer.doc_planner.build_context = old_plan, old_context
             prompt_tpl.render, reviewer.engines.run_json = old_render, old_run
         return calls, rendered
 
@@ -176,15 +184,47 @@ class ReviewerClosureTest(unittest.TestCase):
         self.assertEqual(finding["status"], "confirmed")
         self.assertEqual(finding["card_id"], self.new_id)
 
+    def test_deferred_follow_up_must_be_copied_from_author_reply(self):
+        reply = "별도 후속으로 처리합니다: LOOK-123"
+        self._run("deferred", [], reply_evidence=reply, follow_up="LOOK-123")
+        finding = self.c.execute("SELECT * FROM findings WHERE fp=?", (self.fp,)).fetchone()
+        self.assertEqual(finding["decision_follow_up"], "LOOK-123")
+
+        self.c.execute("UPDATE findings SET status='posted',card_id=?,decision_head=NULL WHERE fp=?",
+                       (self.old_id, self.fp))
+        self._run("deferred", [], reply_evidence=reply, follow_up="LOOK-999")
+        finding = self.c.execute("SELECT * FROM findings WHERE fp=?", (self.fp,)).fetchone()
+        self.assertIsNone(finding["decision_follow_up"])
+
+    def test_doc_closure_persists_verified_follow_up(self):
+        policy = {"profile_type": "doc", "max_findings": 3, "min_confidence": "medium"}
+        for card_id in (self.old_id, self.new_id):
+            self.c.execute("UPDATE cards SET payload=? WHERE id=?",
+                           (json.dumps({"review_policy": policy}), card_id))
+        reply = "문서 보완은 DOC-123으로 별도 후속합니다"
+        _, rendered = self._run("deferred", [], reply_evidence=reply, follow_up="DOC-123")
+        finding = self.c.execute("SELECT * FROM findings WHERE fp=?", (self.fp,)).fetchone()
+        self.assertEqual(rendered[0][0], "doc_closure.md")
+        self.assertEqual(finding["decision_follow_up"], "DOC-123")
+
+        self.c.execute("UPDATE findings SET status='posted',card_id=?,decision_head=NULL WHERE fp=?",
+                       (self.old_id, self.fp))
+        self._run("deferred", [], reply_evidence=reply, follow_up="LOOK")
+        finding = self.c.execute("SELECT * FROM findings WHERE fp=?", (self.fp,)).fetchone()
+        self.assertIsNone(finding["decision_follow_up"])
+
     def test_deferred_reopens_only_with_current_code_evidence(self):
-        self.c.execute("UPDATE findings SET status='deferred'")
+        self.c.execute("UPDATE findings SET status='deferred',decision_head='old',decision_follow_up='LOOK-123'")
         self._run("unresolved", [])
-        self.assertEqual(self.c.execute("SELECT status FROM findings WHERE fp=?", (self.fp,)).fetchone()["status"], "deferred")
+        finding = self.c.execute("SELECT * FROM findings WHERE fp=?", (self.fp,)).fetchone()
+        self.assertEqual(finding["status"], "deferred")
+        self.assertEqual(finding["decision_follow_up"], "LOOK-123")
 
         self._run("unresolved", [], evidence="src/example.ts:10 changed behavior")
         finding = self.c.execute("SELECT * FROM findings WHERE fp=?", (self.fp,)).fetchone()
         self.assertEqual(finding["status"], "confirmed")
         self.assertEqual(finding["card_id"], self.new_id)
+        self.assertIsNone(finding["decision_follow_up"])
 
     def test_operator_decision_is_rechecked_on_every_new_head(self):
         db.set_finding_decision(
