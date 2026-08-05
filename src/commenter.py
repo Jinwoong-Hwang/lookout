@@ -6,7 +6,7 @@ Ethan 봇 스타일 — 이모지/severity 데코 없이, 시니어 동료의 �
 """
 import json
 
-from . import db, ghclient, profiles
+from . import db, ghclient, profiles, reviewer
 from .config import CFG
 
 BOT_PREFIX = "🤖 "
@@ -110,6 +110,15 @@ def process(c, card):
     author = meta.get("author", "")
     intro = meta.get("intro", "")
     force = bool(meta.get("force_post"))  # 미해결 리마인드 — 기존 댓글 있어도 다시 게시
+    # A PR author can reply after review/verify but before this irreversible post.
+    # Re-check only findings that have already been posted and can therefore have
+    # a linked reply.  Hold this bundle if the reply now awaits operator approval.
+    reviewer.refresh_author_decisions(c, card)
+    if db.pending_decision_findings(c, repo, pr):
+        db.set_status(c, card["id"], "commented")
+        db.log_event(c, "comment_held_author_decision", card["key"])
+        return
+
     confirmed = db.findings_for_card(c, card["id"], status="confirmed")
     comment_policy = policy.get("comment_policy", "global")
     effective_dry_run = bool(CFG["dry_run_comments"]) or comment_policy == "dry_run"

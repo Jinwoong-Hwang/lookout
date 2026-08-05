@@ -144,6 +144,28 @@ def _run_closure(c, card, priors, diff, engine, wt, policy,
                       "reply_evidence": (verdict.get("reply_evidence") or "").strip()})
 
 
+def refresh_author_decisions(c, card):
+    """Last responsible moment for replies posted while review/verify ran."""
+    priors = db.posted_findings_for_closure(c, card["repo"], card["pr_number"])
+    if not priors:
+        return
+    try:
+        author = ghclient.pr_author_identity(card["repo"], card["pr_number"])
+        comments = ghclient.issue_comments_structured(card["repo"], card["pr_number"])
+        diff = ghclient.pr_diff(card["repo"], card["pr_number"])
+    except ghclient.GhError as e:
+        db.log_event(c, "closure_context_error", card["key"], {"error": str(e)})
+        return
+    wt = None
+    try:
+        wt = worktree.make_worktree(card["repo"], card["pr_number"], card["head_sha"])
+        _run_closure(c, card, priors, diff, card["engine"] or "claude", wt,
+                     profiles.policy_from_card(card), author, comments)
+    finally:
+        if wt:
+            worktree.remove_worktree(card["repo"], wt)
+
+
 def process(c, card):
     repo, pr, head = card["repo"], card["pr_number"], card["head_sha"]
     policy = profiles.policy_from_card(card)

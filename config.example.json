@@ -39,6 +39,7 @@
     "zigbang/product-hub": {
       "profile_type": "doc",
       "mode": "comment_only",
+      "auto_review": false,
       "approval_allowed": false,
       "comment_policy": "dry_run",
       "max_findings": 3,

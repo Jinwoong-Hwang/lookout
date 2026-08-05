@@ -27,8 +27,11 @@ def _author_ok(login: str) -> bool:
     return not WATCH_AUTHORS or login in WATCH_AUTHORS
 
 
-def _initial_status(login: str) -> str:
-    """Auto-review authors skip triage; everyone else waits for manual start."""
+def _initial_status(repo: str, login: str) -> str:
+    """Auto-review authors skip triage unless the repo policy opts out."""
+    policy = profiles.policy_for_repo(repo)
+    if policy.get("auto_review") is False:
+        return "triage"
     return "intake" if AUTO_REVIEW_ALL or login in AUTO_REVIEW_AUTHORS else "triage"
 
 
@@ -54,7 +57,7 @@ def ensure_pr_cards(c, repo: str, pr: int, source: str = "webhook"):
     # review card (per head). New head -> new key -> fresh review.
     vkey = keys.review_key(repo, pr, head)
     if db.get_card(c, vkey) is None:
-        status = _initial_status(author)
+        status = _initial_status(repo, author)
         engine = engines.default_engine()
         review_id = db.upsert_card(
             c, vkey, "review", repo, pr, status=status, head_sha=head,

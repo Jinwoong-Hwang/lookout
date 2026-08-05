@@ -337,6 +337,16 @@ def pending_decision_findings(c, repo, pr):
     ).fetchall()
 
 
+def posted_findings_for_closure(c, repo, pr):
+    """Findings with a bot marker that can have an author reply to re-check."""
+    return c.execute(
+        """SELECT * FROM findings WHERE repo=? AND pr_number=? AND comment_id IS NOT NULL
+           AND status IN ('posted','confirmed','unresolved','dismissed','deferred',
+                          'dismiss_pending','defer_pending')""",
+        (repo, pr),
+    ).fetchall()
+
+
 def revalidate_finding(c, card_id, repo, pr, head, fp, title, body, file, line,
                        severity, confidence):
     """Move a duplicate fingerprint into fresh verification unless same-head sticky."""

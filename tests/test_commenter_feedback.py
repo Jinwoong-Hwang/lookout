@@ -1,7 +1,8 @@
 import json
+import sqlite3
 import unittest
 
-from src import commenter
+from src import commenter, db, ghclient, reviewer
 
 
 class Finding(dict):
@@ -44,6 +45,33 @@ class CommenterFeedbackTest(unittest.TestCase):
     def test_feedback_subject_defaults_by_profile(self):
         self.assertEqual(commenter._feedback_subject({"profile_type": "code"}, []), "코드")
         self.assertEqual(commenter._feedback_subject({"profile_type": "doc"}, []), "문서")
+
+    def test_author_decision_holds_bundle_before_posting(self):
+        c = sqlite3.connect(":memory:")
+        c.row_factory = sqlite3.Row
+        c.executescript(db.SCHEMA)
+        c.execute("ALTER TABLE cards ADD COLUMN engine TEXT")
+        card_id = db.upsert_card(
+            c, "review:new", "review", "owner/repo", 1, "commenting", "head",
+            payload={"author": "author", "review_policy": {"profile_type": "code"}},
+        )
+        db.upsert_finding(c, card_id, "owner/repo", 1, "head", "new-fp", "new finding",
+                          json.dumps({"problem": "problem"}), "src/app.ts", 10,
+                          "medium", "high", "confirmed")
+        db.upsert_finding(c, card_id, "owner/repo", 1, "head", "old-fp", "old finding",
+                          json.dumps({"problem": "problem"}), "src/app.ts", 5,
+                          "medium", "high", "defer_pending")
+        old_refresh, old_comment = reviewer.refresh_author_decisions, ghclient.pr_comment
+        posted = []
+        try:
+            reviewer.refresh_author_decisions = lambda *_: None
+            ghclient.pr_comment = lambda *args: posted.append(args)
+            commenter.process(c, c.execute("SELECT * FROM cards WHERE id=?", (card_id,)).fetchone())
+        finally:
+            reviewer.refresh_author_decisions, ghclient.pr_comment = old_refresh, old_comment
+        self.assertEqual(posted, [])
+        self.assertEqual(c.execute("SELECT status FROM cards WHERE id=?", (card_id,)).fetchone()["status"],
+                         "commented")
 
 
 if __name__ == "__main__":
