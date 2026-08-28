@@ -1,0 +1,59 @@
+src/ghclient.py
+  dd2728a6def81bd9 18-22,44-51
+src/worktree.py
+  dd2728a6def81bd9 86-111
+src/reviewer.py
+  dd2728a6def81bd9 6,15-103
+prompts/review.codex.md
+  dd2728a6def81bd9 15-17
+prompts/review.claude.md
+  dd2728a6def81bd9 14-16
+config.example.json
+  dd2728a6def81bd9 53-55
+src/verifier.py
+  dd2728a6def81bd9 7-10,20,32
+src/notify.py
+  3e24b529cc95c799 1-38
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "108644d76adb138c4d77bc28e828805ee404d8f5",
+  "prompts": {
+    "3e24b529cc95c799": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "27710681-e617-47fe-9221-efcf65abad7f",
+        "model": "claude-opus-5"
+      },
+      "skills": [],
+      "tool_counts": {
+        "Bash": 83,
+        "AskUserQuestion": 1,
+        "ToolSearch": 1,
+        "Monitor": 1,
+        "Write": 1
+      },
+      "total_additions": 38,
+      "total_deletions": 0,
+      "overriden_lines": 0
+    },
+    "dd2728a6def81bd9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4bf43be2-652c-42b6-aab7-634c27664a9e",
+        "model": "claude-opus-5"
+      },
+      "skills": [],
+      "tool_counts": {
+        "Bash": 52,
+        "AskUserQuestion": 1,
+        "Read": 4,
+        "Edit": 17,
+        "Write": 1
+      },
+      "total_additions": 807,
+      "total_deletions": 0,
+      "overriden_lines": 9
+    }
+  }
+}
