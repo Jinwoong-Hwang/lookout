@@ -13,8 +13,8 @@ import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 
-from . import (approver, commenter, config, db, feedback, monitor, poller, reviewer,
-               router, verifier, worktree)
+from . import (approver, commenter, config, db, engines, feedback, monitor,
+               notify, poller, reviewer, router, verifier, worktree)
 
 CFG = config.CFG
 LOCK_PATH = config.path("logs/tick.lock")
@@ -43,31 +43,90 @@ def _maybe_poll():
 
 MAX_CONCURRENT = max(1, int(CFG.get("max_concurrent_reviews", 3)))
 RETRYABLE_STAGES = {"reviewer", "verifier", "commenter", "approver", "create_gate"}
-TERMINAL_STATUSES = {"done", "archived"}
+TERMINAL_STATUSES = {"done", "archived", "failed"}
 
 
 MAX_STAGE_RETRIES = 3  # 같은 카드가 이만큼 연속 실패하면 포기(무한 재시도 방지)
+QUOTA_NOTIFY_INTERVAL = 900  # 엔진별 쿼터 알림 최소 간격(초) — 카드마다 울리지 않게
+RETRY_COOLDOWN = 180   # 실패 직후 재시도 금지 구간(초). 없으면 같은 tick 안에서
+                       # 3연속 fail-fast로 재시도 예산이 20초 만에 소진된다.
+
+
+def _last_error_line(limit: int = 300) -> str:
+    """직전 예외의 마지막 줄(진짜 사유)만. failed 카드에 표시할 용도."""
+    return traceback.format_exc().strip().splitlines()[-1][:limit]
+
+
+def _cooling(c, card) -> bool:
+    """직전 실패가 RETRY_COOLDOWN 이내면 이번 웨이브는 건너뛴다.
+    단 사람이 직접 누른 시작/재시도는 즉시 돈다(쿨다운 무시)."""
+    row = c.execute(
+        "SELECT MAX(CASE WHEN type='stage_error' THEN ts END) e,"
+        "       MAX(CASE WHEN type IN ('operator_retry','operator_start') THEN ts END) r"
+        " FROM events WHERE key=?", (card["key"],)
+    ).fetchone()
+    if not row or not row["e"]:
+        return False
+    if row["r"] and row["r"] > row["e"]:
+        return False
+    return row["e"] > db.now() - RETRY_COOLDOWN
+
+
+def _quota_notify_due(c, engine: str) -> bool:
+    """엔진당 QUOTA_NOTIFY_INTERVAL에 한 번만 알린다(카드 5장이면 5번 울리지 않게)."""
+    k = f"quota_notified:{engine}"
+    if db.now() - float(db.get_meta(c, k, "0") or 0) < QUOTA_NOTIFY_INTERVAL:
+        return False
+    db.set_meta(c, k, str(db.now()))
+    return True
+
+
+def _requeue_quota(c, card, label, msg):
+    """엔진 토큰/쿼터 소진 — 실패가 아니라 '지금은 못 돎'. 재시도 예산을 태우지 않고
+    대기목록(triage)으로 되돌리고 사람에게 알린다."""
+    engine = card["engine"] or "claude"
+    hint = engines.quota_retry_hint(msg)
+    db.set_status(c, card["id"], "triage")
+    db.log_event(c, "review_quota_paused", card["key"],
+                 {"stage": label, "engine": engine, "retry_at": hint, "error": msg[:300]})
+    if _quota_notify_due(c, engine):
+        notify.send(
+            f"Lookout — {engine} 토큰 소진",
+            f'{card["repo"]}#{card["pr_number"]} 리뷰를 대기목록으로 되돌렸습니다.'
+            + (f" {hint} 이후 재시도하세요." if hint else " 쿼터 회복 후 재시도하세요."),
+            subtitle="리뷰 중단 · 카드는 Triage 에 있음",
+            group=f"lookout-quota-{engine}",
+        )
 
 
 def _process_one(fn, card, label):
     try:
         with db.connect() as c:
             fn(c, card)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         with db.connect() as c:
+            # 쿼터 소진은 결함이 아니므로 stage_error로 세지 않는다 — 세면 3번 만에
+            # 카드가 failed로 죽고, 쿼터가 풀려도 아무도 다시 돌리지 않는다.
+            if label in RETRYABLE_STAGES and engines.is_quota_error(str(exc)):
+                _requeue_quota(c, card, label, str(exc))
+                return
             db.log_event(c, "stage_error", card["key"],
                          {"stage": label, "trace": traceback.format_exc()[-800:]})
             if label in RETRYABLE_STAGES:
                 current = c.execute("SELECT status FROM cards WHERE id=?", (card["id"],)).fetchone()
                 if current and current["status"] not in TERMINAL_STATUSES:
                     fails = c.execute(
-                        "SELECT COUNT(*) n FROM events WHERE key=? AND type='stage_error' AND ts > ?",
-                        (card["key"], db.now() - 1800),
+                        "SELECT COUNT(*) n FROM events WHERE key=? AND type='stage_error'"
+                        " AND json_extract(detail,'$.stage')=? AND ts > ?",
+                        (card["key"], label, db.now() - 1800),
                     ).fetchone()["n"]
                     if fails >= MAX_STAGE_RETRIES:
-                        db.set_status(c, card["id"], "archived")  # 포기 — 무한루프 방지
+                        # archived로 보내면 대시보드에서 그냥 사라져 이유를 알 수 없다.
+                        # failed 레인에 남겨 사유를 보여주고 수동 재시도를 받는다.
+                        db.set_status(c, card["id"], "failed")
                         db.log_event(c, "review_gave_up", card["key"],
-                                     {"stage": label, "fails": fails})
+                                     {"stage": label, "fails": fails,
+                                      "error": _last_error_line()})
                     else:
                         db.set_status(c, card["id"], card["status"], blocked=card["blocked"])
 
@@ -77,6 +136,8 @@ def _stage(statuses, fn, label):
     own transaction; errors isolated. Same-repo git is serialized in worktree.py."""
     with db.connect() as c:
         cards = db.cards_in(c, statuses)
+        if label in RETRYABLE_STAGES:  # 실패 직후 같은 tick에서 재시도하지 않게
+            cards = [x for x in cards if not _cooling(c, x)]
     if not cards:
         return
     if MAX_CONCURRENT <= 1 or len(cards) == 1:
@@ -115,7 +176,7 @@ def _wave(statuses, fn, label):
     """리뷰/검증을 한 번에 MAX_CONCURRENT개씩만 처리(드레인 X) — 사이사이
     다운스트림(게이트/댓글)을 끼워넣어 lgtm이 긴 드레인에 막히지 않게."""
     with db.connect() as c:
-        cards = db.cards_in(c, statuses)[:MAX_CONCURRENT]
+        cards = [x for x in db.cards_in(c, statuses) if not _cooling(c, x)][:MAX_CONCURRENT]
     if not cards:
         return 0
     if len(cards) == 1:
@@ -143,7 +204,7 @@ def run_once():
     _monitor_roots()                                                  # 머지/닫힘 PR archive
     _stage(["reviewing", "verifying", "commenting"], monitor.process_active_stale, "monitor_active_stale")
     _stage(["commented"], monitor.process_commented, "monitor_commented")
-    _stage(["triage"], monitor.process_triage, "monitor_triage")
+    _stage(["triage", "failed"], monitor.process_triage, "monitor_triage")
     _stage(["approve_blocked"], monitor.process_approve_stale, "monitor_approve_stale")
     _fast_stages()
 

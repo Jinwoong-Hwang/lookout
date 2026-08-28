@@ -28,7 +28,7 @@ def poll(c):
         # 머지/닫힘된 PR의 대기 카드 정리 — open 목록에 없으면 목록에서 제외 (archive).
         # (reviewing/verifying 진행 중인 건 건드리지 않음)
         stale = c.execute(
-            "SELECT id, pr_number, key FROM cards WHERE repo=? AND status IN ('triage','approve_blocked','done')",
+            "SELECT id, pr_number, key FROM cards WHERE repo=? AND status IN ('triage','approve_blocked','done','failed')",
             (repo,),
         ).fetchall()
         for s in stale:

@@ -6,6 +6,7 @@ Board view + operator actions (start / rereview / ignore / unblock).
 """
 import json
 import os
+import re
 import subprocess
 import csv
 import io
@@ -44,6 +45,7 @@ LANES = [
     ("approve_blocked", "🔒 승인 대기"),
     ("approving", "🚀 승인 중"),
     ("done", "🏁 완료 · 머지 대기"),
+    ("failed", "⚠️ 실패 (재시도 필요)"),
 ]
 
 
@@ -82,6 +84,34 @@ def build_board():
                 (card["id"],),
             ).fetchone() is not None
             clo = db.closure_counts(c, card["repo"], card["pr_number"])
+            err = ""
+            if card["status"] == "failed":
+                g = c.execute(
+                    "SELECT detail FROM events WHERE key=? AND type='review_gave_up'"
+                    " ORDER BY id DESC LIMIT 1", (card["key"],)).fetchone()
+                d = json.loads(g["detail"]) if (g and g["detail"]) else {}
+                reason = d.get("error") or ""
+                if not reason:  # 구버전 이벤트엔 error가 없다 — trace 마지막 줄로 대체
+                    t = c.execute(
+                        "SELECT detail FROM events WHERE key=? AND type='stage_error'"
+                        " ORDER BY id DESC LIMIT 1", (card["key"],)).fetchone()
+                    if t and t["detail"]:
+                        tr = (json.loads(t["detail"]).get("trace") or "").strip()
+                        # trace 마지막 줄은 예외 메시지에 섞인 stderr 꼬리라 무의미할 수 있다.
+                        # 뒤에서부터 실제 예외 줄(XxxError: ...)을 먼저 찾는다.
+                        lines = [x.strip() for x in tr.splitlines() if x.strip()]
+                        hit = next((x for x in reversed(lines) if re.search(r"\w+Error: ", x)), "")
+                        reason = (hit or (lines[-1] if lines else ""))[:300]
+                err = f"[{d.get('stage', 'reviewer')}] {reason}".strip()
+            elif card["status"] == "triage":
+                q = c.execute(
+                    "SELECT detail FROM events WHERE key=? AND type='review_quota_paused'"
+                    " ORDER BY id DESC LIMIT 1", (card["key"],)).fetchone()
+                if q and q["detail"]:
+                    d = json.loads(q["detail"])
+                    at = d.get("retry_at")
+                    err = (f"⏸ {d.get('engine', '')} 토큰 소진으로 대기열 복귀"
+                           + (f" · {at} 이후 재시도" if at else ""))
             out.append({
                 "id": card["id"], "kind": card["kind"], "status": card["status"],
                 "engine": card["engine"] or "claude",
@@ -97,6 +127,7 @@ def build_board():
                             "deferred": clo.get("deferred", 0),
                             "unresolved": clo.get("unresolved", 0),
                             "pending": clo.get("dismiss_pending", 0) + clo.get("defer_pending", 0)},
+                "error": err,
             })
         return out
 
@@ -124,6 +155,10 @@ def do_action(action, card_id, engine="claude"):
         elif action == "ignore":
             db.set_status(c, card["id"], "archived")
             db.log_event(c, "operator_ignore", card["key"])
+        elif action == "retry" and card["status"] == "failed":
+            db.set_status(c, card["id"], "intake")
+            db.log_event(c, "operator_retry", card["key"], {"engine": card["engine"]})
+            kick = True
         elif action == "unblock" and card["kind"] == "approve":
             db.set_status(c, card["id"], "approving", blocked=0)
             db.log_event(c, "operator_unblock", card["key"])
@@ -463,6 +498,9 @@ background:transparent;border:none;padding:3px 5px;border-radius:6px;opacity:.4}
 .lbl2{font-size:11.5px;font-weight:700;color:var(--muted);margin-top:12px;margin-bottom:3px}
 .sevtag{font-size:11px;font-weight:700;padding:1px 8px;border-radius:20px;text-transform:uppercase}
 .fstatus{margin-left:auto;font-size:11px;color:var(--dim)}
+.errline{margin-top:6px;font-size:11px;line-height:1.35;color:#fb7185;overflow:hidden;
+  display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;word-break:break-all}
+.errline.warn{color:#fbbf24}
 .toast{position:fixed;left:50%;bottom:28px;transform:translateX(-50%) translateY(12px);
   background:var(--panel2);color:var(--ink);border:1px solid var(--accent);
   padding:11px 18px;border-radius:12px;font-size:13.5px;font-weight:600;
@@ -539,7 +577,8 @@ const STATUS_META={
   reviewing:{c:'#fbbf24',ko:'리뷰중'}, verifying:{c:'#fbbf24',ko:'검증중'},
   commenting:{c:'#fbbf24',ko:'댓글작성'}, commented:{c:'#4ade80',ko:'댓글완료'},
   lgtm:{c:'#4ade80',ko:'LGTM'}, approve_blocked:{c:'#a78bfa',ko:'승인대기'},
-  approving:{c:'#a78bfa',ko:'승인중'}, done:{c:'#6b7688',ko:'완료'}};
+  approving:{c:'#a78bfa',ko:'승인중'}, done:{c:'#6b7688',ko:'완료'},
+  failed:{c:'#fb7185',ko:'실패'}};
 function smeta(s){return STATUS_META[s]||{c:'#6b7688',ko:s};}
 function esc(s){return (s||"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]))}
 function repoShort(r){return (r||'').split('/')[1]||r;}
@@ -683,6 +722,10 @@ function tile(c){
     btns=reviewButtons(c.id);
     xbtn=`<button class="xbtn" title="목록에서 제외" onclick="ignoreCard(event,${c.id})">✕</button>`;
   }
+  if(c.status==='failed'){
+    btns=`<div class="btns"><button class="go" onclick="act(event,'retry',${c.id})">↻ 재시도</button></div>`;
+    xbtn=`<button class="xbtn" title="목록에서 제외" onclick="ignoreCard(event,${c.id})">✕</button>`;
+  }
   if(c.status==='approve_blocked')btns=`<div class="btns"><button class="go" onclick="act(event,'unblock',${c.id})">🔓 승인(Unblock)</button></div>`;
   if((c.kind==='review'&&['commented','lgtm','done'].includes(c.status))||(c.kind==='approve'&&['approve_blocked','done'].includes(c.status)))
     btns+=`<div class="btns"><button class="go" onclick="reReview(event,${c.id})">🔄 재리뷰</button></div>`;
@@ -703,7 +746,8 @@ function tile(c){
   el.innerHTML=`${xbtn}<div class="pr">${repoPill} <span class="num">#${c.pr}</span></div>
     <div class="title">${esc(c.title)||'(제목없음)'}</div>
     <div class="row">${statusPill}<span class="pill">${esc(c.author)}</span>${enginePill}${inspect}</div>
-    <div class="row"><span>@${c.head}</span>${dots?`<span class="row">${dots} ${c.findings.length}건</span>`:''}${clo}${fb}</div>${btns}`;
+    <div class="row"><span>@${c.head}</span>${dots?`<span class="row">${dots} ${c.findings.length}건</span>`:''}${clo}${fb}</div>
+    ${c.error?`<div class="errline ${c.status==='triage'?'warn':''}" title="${esc(c.error)}">${esc(c.error)}</div>`:''}${btns}`;
   el.onclick=()=>openModal(c);
   return el;
 }
@@ -715,6 +759,7 @@ function openModal(c){
     <div class="msub">${esc(c.repo)} · @${esc(c.author)} · <code>${c.head}</code>
       <span class="statuspill" style="${pill(sm.c)}">${sm.ko}</span></div>`;
   if(c.url)html+=`<div class="mlink"><a href="${c.url}" target="_blank">GitHub에서 열기 ↗</a></div>`;
+  if(c.error)html+=`<div class="lbl">실패 사유</div><div class="pre">${esc(c.error)}</div>`;
   if(c.closure&&(c.closure.resolved||c.closure.dismissed||c.closure.deferred||c.closure.unresolved||c.closure.pending))
     html+=`<div class="lbl">이전 지적 추적</div><div class="pre">✅ ${c.closure.resolved} 해결 · ⏭️ ${c.closure.dismissed||0} 해명 수용 · ↪️ ${c.closure.deferred||0} 후속 작업 · ⚠️ ${c.closure.unresolved} 미해결 · 🧑‍⚖️ ${c.closure.pending||0} 운영자 판단</div>`;
   if(c.feedback&&(c.feedback.up||c.feedback.down||c.feedback.confused||c.feedback.replies)){

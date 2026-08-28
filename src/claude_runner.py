@@ -43,7 +43,8 @@ def run(prompt: str, cwd: str = None, add_dir: str = None, timeout: int = 900,
     proc = subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=timeout,
                           env=config.subprocess_env())
     if proc.returncode != 0:
-        raise ClaudeError(f"claude failed (rc={proc.returncode}): {proc.stderr.strip()[:500]}")
+        # 실패 사유는 stderr 맨 끝에 찍히므로 앞이 아니라 뒤를 남긴다
+        raise ClaudeError(f"claude failed (rc={proc.returncode}): {proc.stderr.strip()[-500:]}")
     try:
         env = json.loads(proc.stdout)
         return env.get("result", proc.stdout)

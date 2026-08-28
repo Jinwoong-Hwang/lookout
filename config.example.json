@@ -83,6 +83,9 @@
   "dry_run_comments": true,
   "dry_run_approve": true,
 
+  "_notify": "엔진 토큰/쿼터 소진 등으로 리뷰가 멈추면 macOS 알림. terminal-notifier가 있으면 그걸, 없으면 osascript 사용.",
+  "notify_enabled": true,
+
   "max_findings_per_review": 8,
   "min_confidence": "medium",
   "max_concurrent_reviews": 3

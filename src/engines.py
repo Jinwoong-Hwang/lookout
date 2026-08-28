@@ -2,6 +2,7 @@
 review/verify stages: 'claude' (Claude Code) or 'codex' (OpenAI Codex)."""
 import json
 import os
+import re
 import subprocess
 import time
 
@@ -12,6 +13,34 @@ ENGINES = ("claude", "codex")
 
 class EngineError(RuntimeError):
     pass
+
+
+# ── 쿼터/레이트리밋 판별 ─────────────────────────────────────────────────────
+# 이건 "코드가 틀려서 실패"가 아니라 "지금은 못 돈다"이다. 재시도 예산을 태우고
+# 카드를 죽이는 대신 대기목록으로 돌려보내야 한다. 숫자 429는 sha/경로에 우연히
+# 섞일 수 있어 단독으로는 쓰지 않는다.
+_QUOTA_MARKERS = (
+    "usage limit",          # codex: You've hit your usage limit
+    "usage_limit",
+    "limit reached",        # claude: Claude usage limit reached
+    "rate limit",
+    "rate_limit",
+    "too many requests",
+    "quota",
+    "credit balance",
+    "out of credits",
+)
+
+
+def is_quota_error(text: str) -> bool:
+    t = (text or "").lower()
+    return any(m in t for m in _QUOTA_MARKERS)
+
+
+def quota_retry_hint(text: str) -> str:
+    """엔진이 알려주는 재시도 시각(예: "try again at 8:25 PM")을 그대로 뽑아온다."""
+    m = re.search(r"try again (?:at|after|in) ([^.\n|]{1,40})", text or "", re.I)
+    return m.group(1).strip() if m else ""
 
 
 def run(prompt: str, engine: str = "claude", **kw) -> str:
