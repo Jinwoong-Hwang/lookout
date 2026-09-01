@@ -1,8 +1,11 @@
 import json
+import pathlib
 import sqlite3
 import unittest
 
-from src import commenter, db, ghclient, prompt_tpl, reviewer, verifier, worktree
+from src import commenter, config, db, ghclient, prompt_tpl, reviewer, verifier, worktree
+
+prompts_dir = pathlib.Path(config.path("prompts"))
 
 
 class ReviewerClosureTest(unittest.TestCase):
@@ -106,13 +109,42 @@ class ReviewerClosureTest(unittest.TestCase):
                                      reply_evidence=("별도 후속으로 처리" if status == "deferred"
                                                      else "의도적으로 현재 동작을 유지"))
                 finding = self.c.execute("SELECT * FROM findings WHERE fp=?", (self.fp,)).fetchone()
-                self.assertEqual(calls, ["closure.md", "review.md"])
+                self.assertEqual(calls, ["closure.md", "review.codex.md"])
                 self.assertEqual(finding["status"],
                                  "dismiss_pending" if status == "dismissed" else "defer_pending")
                 self.assertEqual(finding["card_id"], self.new_id)
                 self.assertEqual(finding["decision_comment_id"], "11")
                 self.assertEqual(self.c.execute("SELECT COUNT(*) n FROM findings").fetchone()["n"], 1)
                 self.assertEqual(self.c.execute("SELECT status FROM cards WHERE id=?", (self.new_id,)).fetchone()["status"], "commented")
+
+    def test_code_profile_picks_the_engine_specific_review_prompt(self):
+        """Regression: the code profile once pointed at a single review.md that
+        no longer exists, which crashed every code review."""
+        finding = [{
+            "file": "src/example.ts", "line": 10, "rule": "same-rule",
+            "title": "same finding", "problem": "still relevant",
+            "severity": "medium", "confidence": "high",
+        }]
+        for engine, expected in (("codex", "review.codex.md"), ("claude", "review.claude.md")):
+            with self.subTest(engine=engine):
+                self.c.execute("UPDATE cards SET engine=? WHERE id=?", (engine, self.new_id))
+                self.c.execute("UPDATE cards SET status='intake' WHERE id=?", (self.new_id,))
+                self.c.execute(
+                    """UPDATE findings SET status='posted',card_id=?,decision_head=NULL,
+                       decision_comment_id=NULL,decision_evidence=NULL""", (self.old_id,)
+                )
+                calls, _ = self._run("unresolved", finding)
+                self.assertEqual(calls, ["closure.md", expected])
+                self.assertTrue((prompts_dir / expected).is_file(), f"{expected} must exist")
+
+    def test_legacy_snapshotted_policy_still_resolves_to_a_real_prompt(self):
+        """A card whose payload predates the engine split must not crash."""
+        legacy = {"profile_type": "code", "prompt_set": {"review": "review.md"}}
+        for engine, expected in (("codex", "review.codex.md"), ("claude", "review.claude.md")):
+            name = reviewer.profiles.prompt_name(
+                reviewer.profiles._normalize(legacy), "review", engine)
+            self.assertEqual(name, expected)
+            self.assertTrue((prompts_dir / name).is_file())
 
     def test_unresolved_closure_reattaches_existing_finding(self):
         self._run("unresolved", [])
@@ -155,6 +187,11 @@ class ReviewerClosureTest(unittest.TestCase):
             prompt_tpl.render, verifier.engines.run_json = old_render, old_run
 
         old_comments, old_comment = ghclient.list_review_comments, ghclient.pr_comment
+        # This asserts the real post path, so neutralize the operator's
+        # dry_run_comments setting instead of inheriting it from config.json.
+        old_dry = commenter.CFG["dry_run_comments"]
+        commenter.CFG["dry_run_comments"] = False
+        self.addCleanup(commenter.CFG.__setitem__, "dry_run_comments", old_dry)
         posted = []
         try:
             ghclient.list_review_comments = lambda *_: [{"body": commenter._marker(self.fp)}]

@@ -1,5 +1,6 @@
-import unittest
+import ipaddress
 import sqlite3
+import unittest
 
 from src import dashboard, db, ghclient, reviewer
 
@@ -91,6 +92,13 @@ class AuthorDecisionBoundaryTest(unittest.TestCase):
         c.close()
 
     def test_mutations_require_loopback_and_csrf_header(self):
+        # Pin the allowed networks so the assertion does not depend on whatever
+        # dashboard_write_networks the operator happens to have in config.json.
+        old_networks = dashboard.WRITE_NETWORKS
+        dashboard.WRITE_NETWORKS = tuple(
+            ipaddress.ip_network(n) for n in ("127.0.0.0/8", "::1/128", "192.168.0.0/16")
+        )
+        self.addCleanup(setattr, dashboard, "WRITE_NETWORKS", old_networks)
         self.assertTrue(dashboard.mutation_allowed(
             "127.0.0.1", "1", "http://127.0.0.1:8788", "127.0.0.1:8788",
         ))

@@ -4,8 +4,26 @@
 import Cocoa
 import WebKit
 
-let DASH_URL = "http://127.0.0.1:8788"
-let API_URL = "http://127.0.0.1:8788/api/board"
+// dashboard_port는 config.json에서 바꿀 수 있다. 앱은 항상 같은 머신에서 도니
+// host는 loopback으로 고정 — dashboard_host를 0.0.0.0으로 열어도 여기선 127.0.0.1.
+func lookoutRepoDir() -> String? {
+    if let p = Bundle.main.object(forInfoDictionaryKey: "LookoutRepoDir") as? String,
+       FileManager.default.fileExists(atPath: p + "/update.sh") { return p }
+    for c in ["\(NSHomeDirectory())/lookout", "\(NSHomeDirectory())/hermes-pr"] {
+        if FileManager.default.fileExists(atPath: c + "/update.sh") { return c }
+    }
+    return nil
+}
+
+let DASH_PORT: Int = {
+    guard let dir = lookoutRepoDir(),
+          let data = FileManager.default.contents(atPath: dir + "/config.json"),
+          let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let port = obj["dashboard_port"] as? Int else { return 8788 }
+    return port
+}()
+let DASH_URL = "http://127.0.0.1:\(DASH_PORT)"
+let API_URL = "\(DASH_URL)/api/board"
 let AGENTS = ["io.hermes.receiver", "io.hermes.dashboard", "io.hermes.tick"]
 
 final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate {
@@ -210,14 +228,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
     /// update.sh가 있는 lookout repo 경로. 빌드 시 Info.plist에 기록(LookoutRepoDir),
     /// 못 찾으면 흔한 위치로 폴백.
-    func repoDir() -> String? {
-        if let p = Bundle.main.object(forInfoDictionaryKey: "LookoutRepoDir") as? String,
-           FileManager.default.fileExists(atPath: p + "/update.sh") { return p }
-        for c in ["\(NSHomeDirectory())/lookout", "\(NSHomeDirectory())/hermes-pr"] {
-            if FileManager.default.fileExists(atPath: c + "/update.sh") { return c }
-        }
-        return nil
-    }
+    func repoDir() -> String? { lookoutRepoDir() }
 
     @objc func checkForUpdates() {
         guard let dir = repoDir() else {

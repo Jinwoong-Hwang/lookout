@@ -43,7 +43,8 @@ Lookout.app(메뉴바+창) ─────────────────�
 ```
 - 엔진: Claude `opus-4-8`(effort 조절) / Codex `gpt-5.5` — 카드별 선택
 - 리뷰 스코프: 이 PR이 도입/영향 준 것만 / 스타일·CLAUDE.md 관례는 제외
-- 멱등 마커 + closure(해결/미해결) + 대화 인지(작성자 반박 제외)
+- 멱등 마커 + closure(해결·해명 수용·후속 이관·미해결) + 대화 인지
+- 작성자가 “의도적입니다 / 후속에서 처리”라고 답하면 그 회신을 근거로 추적하되, **운영자가 수용해야** LGTM으로 넘어감
 
 ## 안전성
 - **리뷰는 read-only** — detached git worktree에서 `Read/Grep/Glob`만 허용하고 `Write/Edit/Bash`·push는 차단. 대상 코드를 수정하지 않음.
@@ -61,6 +62,11 @@ Lookout.app(메뉴바+창) ─────────────────�
 | `codex_model` | Codex 모델(null=codex 기본) |
 | `dry_run_comments` / `dry_run_approve` | 실게시/실승인 차단(검증용) |
 | `max_concurrent_reviews` | 동시 리뷰 수 |
+| `default_review_engine` | 자동 생성 카드의 기본 엔진 |
+| `dashboard_host` / `dashboard_port` | 대시보드 바인딩(기본 `127.0.0.1:8788`) |
+| `dashboard_write_networks` | 쓰기 API 허용 CIDR — 내부망에 열 때만 넓힘 |
+| `env_file` | launchd에서 `gh` 인증이 안 될 때 `GH_TOKEN`을 읽을 private 파일 |
+| `repo_profiles` | repo별 리뷰 정책(문서 repo는 comment-only·dry-run 등) |
 
 ## 업데이트
 메인테이너가 repo에 push하면, 받아서 적용:
@@ -77,17 +83,18 @@ Lookout.app(메뉴바+창) ─────────────────�
 ```bash
 ./hermes status | list | logs | start <id> [claude|codex] | stop <id> | unblock <id>
 launchctl list | grep -E "hermes|lookout"   # 데몬 상태
+tail -f ~/Library/Logs/Lookout/*.log         # 데몬 로그
 ./install.sh                                 # 코드 수정 후 재적용
 ```
 
 ## 제거
 ```bash
-for l in io.hermes.receiver io.hermes.dashboard io.hermes.tick io.lookout.app; do
+for l in io.hermes.receiver io.hermes.dashboard io.hermes.tick io.lookout.app io.lookout.hookdeck; do
   launchctl unload "$HOME/Library/LaunchAgents/$l.plist" 2>/dev/null
   rm -f "$HOME/Library/LaunchAgents/$l.plist"
 done
 rm -rf /Applications/Lookout.app "$HOME/Applications/Lookout.app"
-rm -rf ~/lookout   # clone 디렉토리(상태·config 포함)
+rm -rf ~/lookout "$HOME/Library/Logs/Lookout"   # clone 디렉토리(상태·config 포함) + 로그
 ```
 
 ## 한계

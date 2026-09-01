@@ -15,6 +15,7 @@ WATCH_AUTHORS = set(CFG.get("watch_authors") or [])
 AUTO_REVIEW_AUTHORS = set(CFG.get("auto_review_authors") or [])
 AUTO_REVIEW_ALL = bool(AUTO_REVIEW_AUTHORS & {"*", "all"})
 MY_SLACK = CFG.get("slack_user_id", "")
+MAX_INBOX_RETRIES = 5  # 같은 inbox 항목이 이만큼 실패하면 포기(무한 재시도 방지)
 SLACK_WORKSPACE = CFG.get("slack_workspace", "")
 
 
@@ -207,5 +208,16 @@ def drain(c):
             process_event(c, row["event_type"], payload)
             db.mark_inbox_done(c, row["id"])
         except Exception as e:  # noqa: BLE001 - keep draining; record failure
-            db.log_event(c, "router_error", detail={"inbox_id": row["id"], "error": str(e)})
+            # A transient failure (gh hiccup) should retry on the next drain, but
+            # a permanently broken event (deleted repo, revoked access) must not
+            # be replayed forever — same give-up shape as tick's stage retries.
+            key = f"inbox:{row['id']}"
+            db.log_event(c, "router_error", key, {"inbox_id": row["id"], "error": str(e)})
+            fails = c.execute(
+                "SELECT COUNT(*) n FROM events WHERE key=? AND type='router_error'", (key,),
+            ).fetchone()["n"]
+            if fails >= MAX_INBOX_RETRIES:
+                db.mark_inbox_done(c, row["id"])
+                db.log_event(c, "router_gave_up", key,
+                             {"inbox_id": row["id"], "event": row["event_type"], "fails": fails})
     return len(rows)
