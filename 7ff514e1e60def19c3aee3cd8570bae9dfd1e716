@@ -1,0 +1,27 @@
+config.example.json
+  h_03b13cada2edad 86-88
+src/claude_runner.py
+  h_03b13cada2edad 46-47
+src/codex_runner.py
+  h_03b13cada2edad 21-40,61
+src/dashboard.py
+  h_03b13cada2edad 9,48,87-114,130,158-161,501-503,580-581,725-728,749-750,762
+src/engines.py
+  h_03b13cada2edad 5,18-45
+src/notify.py
+  h_03b13cada2edad 1-38
+src/poller.py
+  h_03b13cada2edad 31
+src/tick.py
+  h_03b13cada2edad 16-17,46,50-99,106,108-112,119-121,124-126,128-129,139-140,179,207
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "7ff514e1e60def19c3aee3cd8570bae9dfd1e716",
+  "prompts": {},
+  "humans": {
+    "h_03b13cada2edad": {
+      "author": "woong@zigbang.com"
+    }
+  }
+}
