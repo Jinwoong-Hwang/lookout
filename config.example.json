@@ -7,6 +7,15 @@
   "receiver_path": "/webhook",
   "webhook_secret": "",
 
+  "_dashboard": "대시보드 바인딩. 내부망에서 보려면 dashboard_host를 0.0.0.0으로 설정.",
+  "dashboard_host": "127.0.0.1",
+  "dashboard_port": 8788,
+  "_dashboard_write_networks": "쓰기 API 허용 CIDR. LAN 허용 시 192.168.0.0/16 등을 명시.",
+  "dashboard_write_networks": ["127.0.0.0/8", "::1/128"],
+
+  "_env_file": "선택: launchd/Codex에서 gh 인증이 안 될 때 GH_TOKEN 등을 읽을 private env 파일.",
+  "env_file": "~/.config/lookout/env",
+
   "_slack": "(선택) Slack 멘션 catch-up. 안 쓰면 비워둠.",
   "slack_path": "/slack",
   "slack_signing_secret": "",
@@ -22,8 +31,35 @@
   "watch_authors": [
     "your-github-login"
   ],
-  "_auto_review_authors": "triage 없이 곧바로 자동 리뷰할 작성자. 비우면 전부 수동 선택.",
+  "_auto_review_authors": "triage 없이 곧바로 자동 리뷰할 작성자. 비우면 전부 수동 선택. 전체 자동 리뷰는 [\"*\"] 또는 [\"all\"].",
   "auto_review_authors": [],
+
+  "_repo_profiles": "선택: repo별 리뷰 정책. product-hub 같은 문서 repo는 comment-only dry-run부터 권장.",
+  "repo_profiles": {
+    "zigbang/product-hub": {
+      "profile_type": "doc",
+      "mode": "comment_only",
+      "auto_review": false,
+      "approval_allowed": false,
+      "comment_policy": "dry_run",
+      "max_findings": 3,
+      "min_confidence": "medium",
+      "prompt_set": {
+        "review": "doc_review.md",
+        "verify": "doc_verify.md",
+        "closure": "doc_closure.md"
+      },
+      "no_finding_terminal": "done",
+      "no_confirmed_terminal": "done",
+      "large_pr_policy": "summary_only",
+      "large_pr": {
+        "files": 20,
+        "diff_lines": 3000,
+        "epic_roots": 2
+      },
+      "no_finding_comment": false
+    }
+  },
 
   "events": ["pull_request", "push", "pull_request_review", "issue_comment"],
 
@@ -33,6 +69,7 @@
   "claude_effort": "xhigh",
   "codex_bin": "codex",
   "codex_model": null,
+  "default_review_engine": "codex",
 
   "worktree_dir": "worktrees",
   "repo_cache_dir": "repos",

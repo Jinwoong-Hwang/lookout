@@ -56,7 +56,7 @@ Lookout.app(메뉴바+창) ─────────────────�
 |---|---|
 | `allowlist` | 리뷰 대상 `owner/repo` |
 | `watch_authors` | 추적할 PR 작성자(비우면 전체) |
-| `auto_review_authors` | triage 없이 자동 리뷰할 작성자 |
+| `auto_review_authors` | triage 없이 자동 리뷰할 작성자 (`["*"]` 또는 `["all"]` = 전체) |
 | `claude_model` / `claude_effort` | Claude 모델·추론강도(low~max) |
 | `codex_model` | Codex 모델(null=codex 기본) |
 | `dry_run_comments` / `dry_run_approve` | 실게시/실승인 차단(검증용) |

@@ -17,9 +17,9 @@
   <key>KeepAlive</key>
   <true/>
   <key>StandardOutPath</key>
-  <string>__HERMES_HOME__/logs/dashboard.out.log</string>
+  <string>__LOG_DIR__/dashboard.out.log</string>
   <key>StandardErrorPath</key>
-  <string>__HERMES_HOME__/logs/dashboard.err.log</string>
+  <string>__LOG_DIR__/dashboard.err.log</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>

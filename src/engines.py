@@ -92,3 +92,22 @@ def availability(force: bool = False) -> dict:
 
 def is_ready(engine: str) -> bool:
     return availability().get(engine, {}).get("ready", False)
+
+
+def default_engine() -> str:
+    """Engine for automatic review cards.
+
+    Prefer a ready configured engine. If only one engine is usable, pick it so
+    Codex-only or Claude-only installs do not create cards for the unavailable
+    runner.
+    """
+    configured = config.CFG.get("default_review_engine")
+    avail = availability()
+    if configured in ENGINES and avail.get(configured, {}).get("ready"):
+        return configured
+    ready = [e for e in ENGINES if avail.get(e, {}).get("ready")]
+    if len(ready) == 1:
+        return ready[0]
+    if configured in ENGINES:
+        return configured
+    return "claude"

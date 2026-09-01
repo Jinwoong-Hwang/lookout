@@ -4,7 +4,7 @@ On a repo's first sight, existing open PR heads are seeded as 'seen' and NOT
 reviewed (avoids onboarding noise). Thereafter, any unseen head (new PR or new
 push) is routed into review.
 """
-from . import db, ghclient, router
+from . import db, feedback, ghclient, router
 from .config import CFG
 
 
@@ -33,6 +33,11 @@ def poll(c):
         ).fetchall()
         for s in stale:
             if s["pr_number"] not in open_nums:
+                try:
+                    feedback.snapshot_pr(c, repo, s["pr_number"], "pr_closed")
+                except ghclient.GhError as e:
+                    db.log_event(c, "feedback_close_error", s["key"], {"error": str(e)})
+                    continue
                 db.set_status(c, s["id"], "archived")
                 db.log_event(c, "card_pr_closed", s["key"], {"pr": s["pr_number"]})
 

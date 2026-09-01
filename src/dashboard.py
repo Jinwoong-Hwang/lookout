@@ -2,14 +2,19 @@
 
   python -m src.dashboard      # then open http://127.0.0.1:8788
 
-Read-only view of the board + a few operator actions (start / ignore / unblock).
+Board view + operator actions (start / rereview / ignore / unblock).
 """
 import json
 import os
 import subprocess
+import csv
+import io
+import ipaddress
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
 
-from . import db, engines, poller, worklog, worktree
+from . import commenter, db, engines, feedback, ghclient, poller, profiles, router, worktree
+from .config import CFG
 
 
 def kick_tick():
@@ -23,7 +28,10 @@ def kick_tick():
     except Exception:  # noqa: BLE001
         pass
 
-PORT = 8788
+DASHBOARD_HOST = CFG.get("dashboard_host", "127.0.0.1")
+PORT = int(CFG.get("dashboard_port", 8788))
+WRITE_NETWORKS = tuple(ipaddress.ip_network(cidr) for cidr in
+                       CFG.get("dashboard_write_networks", ["127.0.0.0/8", "::1/128"]))
 
 LANES = [
     ("triage", "📥 Triage (리뷰 대기)"),
@@ -53,19 +61,26 @@ def build_board():
             for f in db.findings_for_card(c, card["id"]):
                 detail = json.loads(f["body"]) if f["body"] else {}
                 findings.append({
-                    "status": f["status"], "severity": f["severity"],
+                    "id": f["id"], "status": f["status"], "severity": f["severity"],
                     "confidence": f["confidence"], "file": f["file"], "line": f["line"],
                     "title": f["title"], "problem": detail.get("problem", ""),
                     "fix": detail.get("fix", ""),
+                    "decision_comment_id": f["decision_comment_id"],
+                    "decision_evidence": f["decision_evidence"],
+                    "decision_follow_up": f["decision_follow_up"],
                 })
             ev = c.execute(
-                "SELECT type, detail FROM events WHERE key=? AND type IN ('comment_dryrun','comment_posted') ORDER BY id",
+                "SELECT type, detail FROM events WHERE key=? AND type IN ('comment_dryrun','comment_posted','comment_dryrun_published') ORDER BY id",
                 (card["key"],),
             ).fetchall()
             comments = []
             for e in ev:
                 d = json.loads(e["detail"]) if e["detail"] else {}
                 comments.append({"type": e["type"], "body": d.get("body", ""), "url": d.get("url", "")})
+            dryrun_pending = c.execute(
+                "SELECT 1 FROM findings WHERE card_id=? AND comment_id='DRYRUN' LIMIT 1",
+                (card["id"],),
+            ).fetchone() is not None
             clo = db.closure_counts(c, card["repo"], card["pr_number"])
             out.append({
                 "id": card["id"], "kind": card["kind"], "status": card["status"],
@@ -75,8 +90,13 @@ def build_board():
                 "title": meta.get("title", ""), "url": meta.get("url", ""),
                 "author": meta.get("author", ""),
                 "findings": findings, "comments": comments,
+                "dryrun_pending": dryrun_pending,
+                "feedback": feedback.latest_for_card(c, card["id"]),
                 "closure": {"resolved": clo.get("resolved", 0),
-                            "unresolved": clo.get("unresolved", 0)},
+                            "dismissed": clo.get("dismissed", 0),
+                            "deferred": clo.get("deferred", 0),
+                            "unresolved": clo.get("unresolved", 0),
+                            "pending": clo.get("dismiss_pending", 0) + clo.get("defer_pending", 0)},
             })
         return out
 
@@ -108,6 +128,26 @@ def do_action(action, card_id, engine="claude"):
             db.set_status(c, card["id"], "approving", blocked=0)
             db.log_event(c, "operator_unblock", card["key"])
             kick = True
+        elif action == "publish_dryrun" and card["kind"] == "review":
+            if not commenter.publish_dryrun(c, card):
+                return False
+        elif action == "rereview":
+            chosen_engine = card["engine"] if card["kind"] == "review" else None
+            if not chosen_engine:
+                prior = c.execute(
+                    """SELECT engine FROM cards
+                       WHERE repo=? AND pr_number=? AND head_sha=? AND kind='review'
+                       ORDER BY id DESC LIMIT 1""",
+                    (card["repo"], card["pr_number"], card["head_sha"]),
+                ).fetchone()
+                chosen_engine = prior["engine"] if prior and prior["engine"] else engines.default_engine()
+            if not engines.is_ready(chosen_engine):
+                db.log_event(c, "operator_rereview_blocked", card["key"],
+                             {"engine": chosen_engine})
+                return False
+            if not router.create_rereview(c, card["id"], chosen_engine):
+                return False
+            kick = True
         elif action == "stop" and card["status"] in ACTIVE_REVIEW:
             db.set_status(c, card["id"], "archived")  # terminal → 워커가 되살리지 않음
             db.log_event(c, "review_stopped", card["key"], {"from": card["status"]})
@@ -116,6 +156,47 @@ def do_action(action, card_id, engine="claude"):
             return False
     if stop_target:
         worktree.kill_review_process(*stop_target)  # 진행 중 LLM 프로세스 강제 종료
+    if kick:
+        kick_tick()
+    return True
+
+
+def do_finding_action(action, finding_id):
+    if action not in {"accept_author_decision", "operator_dismiss"}:
+        return False
+    kick = False
+    with db.connect() as c:
+        finding = c.execute("SELECT * FROM findings WHERE id=?", (finding_id,)).fetchone()
+        allowed = ({"dismiss_pending", "defer_pending"} if action == "accept_author_decision"
+                   else {"posted", "confirmed", "unresolved", "dismiss_pending", "defer_pending"})
+        if not finding or finding["status"] not in allowed:
+            return False
+        card = c.execute("SELECT * FROM cards WHERE id=?", (finding["card_id"],)).fetchone()
+        if not card or card["kind"] != "review" or card["status"] != "commented":
+            return False
+        accepted = ("deferred" if action == "accept_author_decision"
+                    and finding["status"] == "defer_pending" else "dismissed")
+        if action == "operator_dismiss":
+            db.set_finding_decision(c, finding_id, accepted, card["head_sha"], "",
+                                    "operator override")
+        else:
+            db.set_finding_status(c, finding_id, accepted)
+        db.log_event(c, "operator_author_decision", card["key"],
+                     {"finding_id": finding_id, "status": accepted,
+                      "comment_id": finding["decision_comment_id"],
+                      "manual_override": action == "operator_dismiss"})
+        blockers = c.execute(
+            """SELECT COUNT(*) n FROM findings WHERE repo=? AND pr_number=?
+               AND status IN ('posted','confirmed','unresolved','pending_verify',
+                              'dismiss_pending','defer_pending')""",
+            (finding["repo"], finding["pr_number"]),
+        ).fetchone()["n"]
+        if not blockers:
+            info = ghclient.pr_view(finding["repo"], finding["pr_number"])
+            if (info.get("state") == "OPEN" and not info.get("isDraft")
+                    and info.get("headRefOid") == card["head_sha"]):
+                db.set_status(c, card["id"], profiles.policy_from_card(card)["no_finding_terminal"])
+                kick = True
     if kick:
         kick_tick()
     return True
@@ -130,6 +211,19 @@ def refresh_poll():
     return {"added": max(0, after - before), "total": after}
 
 
+def mutation_allowed(client_ip: str, action_header: str, origin: str, host: str) -> bool:
+    """Writes are local-operator only; custom header blocks browser CSRF."""
+    try:
+        ip = ipaddress.ip_address(client_ip)
+        if getattr(ip, "ipv4_mapped", None):
+            ip = ip.ipv4_mapped
+    except ValueError:
+        return False
+    if not any(ip in network for network in WRITE_NETWORKS) or action_header != "1":
+        return False
+    return not origin or urlparse(origin).netloc == host
+
+
 def build_mentions():
     with db.connect() as c:
         rows = db.list_mentions(c)
@@ -140,6 +234,116 @@ def build_mentions():
             "text": r["text"], "ts": r["ts"],
             "permalink": r["permalink"], "status": r["status"],
         } for r in rows]
+
+
+def _feedback_row(r, include_private=False):
+    reactions = json.loads(r["reactions"]) if r["reactions"] else {}
+    replies = json.loads(r["author_replies"]) if r["author_replies"] else []
+    outcome = json.loads(r["outcome"]) if r["outcome"] else {}
+    payload = json.loads(r["payload"]) if r["payload"] else {}
+    if isinstance(payload, str):
+        payload = json.loads(payload)
+    out = {
+        "id": r["id"], "repo": r["repo"], "pr": r["pr_number"],
+        "card_id": r["card_id"], "profile": r["profile_type"],
+        "snapshot_type": r["snapshot_type"], "status": r["status"] or "archived",
+        "title": payload.get("title", ""), "comment_url": r["comment_url"],
+        "created_at": r["created_at"],
+        "reactions": {
+            "+1": int(reactions.get("+1") or 0),
+            "-1": int(reactions.get("-1") or 0),
+            "confused": int(reactions.get("confused") or 0),
+            "total_count": int(reactions.get("total_count") or 0),
+        },
+        "up": int(reactions.get("+1") or 0),
+        "down": int(reactions.get("-1") or 0),
+        "confused": int(reactions.get("confused") or 0),
+        "replies": len(replies),
+        "needs_inspection": bool(int(reactions.get("-1") or 0) or int(reactions.get("confused") or 0) or replies),
+    }
+    if include_private:
+        out["author_replies"] = [
+            {k: reply.get(k, "") for k in ("id", "url", "created_at")}
+            for reply in replies
+        ]
+        out["outcome"] = outcome
+    return out
+
+
+def _feedback_filters(params):
+    where, vals = [], []
+    def first(name, default=""):
+        return (params.get(name) or [default])[0]
+    for col, name in (("s.repo", "repo"), ("s.profile_type", "profile"), ("s.snapshot_type", "snapshot_type")):
+        val = first(name).strip()
+        if val:
+            where.append(f"{col}=?")
+            vals.append(val)
+    pr = first("pr").strip()
+    if pr:
+        where.append("s.pr_number=?")
+        vals.append(int(pr))
+    card_id = first("card_id").strip()
+    if card_id:
+        where.append("s.card_id=?")
+        vals.append(int(card_id))
+    needs = first("needs_inspection").strip().lower()
+    if needs in ("1", "true", "yes"):
+        where.append("(json_extract(s.reactions, '$.\"-1\"') > 0 OR json_extract(s.reactions, '$.confused') > 0 OR json_array_length(s.author_replies) > 0)")
+    limit = max(1, min(int(first("limit", "25") or 25), 500))
+    return where, vals, limit
+
+
+def build_feedback(params=None, include_private=False):
+    params = params or {}
+    where, vals, limit = _feedback_filters(params)
+    clause = "WHERE " + " AND ".join(where) if where else ""
+    with db.connect() as c:
+        rows = c.execute(
+            f"""SELECT s.*, c.payload, c.status
+               FROM review_feedback_snapshots s
+               LEFT JOIN cards c ON c.id=s.card_id
+               {clause}
+               ORDER BY s.created_at DESC, s.id DESC
+               LIMIT ?""",
+            (*vals, limit),
+        ).fetchall()
+        return [_feedback_row(r, include_private=include_private) for r in rows]
+
+
+def build_feedback_detail(snapshot_id):
+    with db.connect() as c:
+        row = c.execute(
+            """SELECT s.*, c.payload, c.status
+               FROM review_feedback_snapshots s
+               LEFT JOIN cards c ON c.id=s.card_id
+               WHERE s.id=?""",
+            (int(snapshot_id),),
+        ).fetchone()
+        return _feedback_row(row, include_private=True) if row else None
+
+
+def build_feedback_csv(params=None):
+    rows = build_feedback(params or {}, include_private=False)
+    out = io.StringIO()
+    writer = csv.DictWriter(out, fieldnames=[
+        "id", "repo", "pr", "card_id", "profile", "snapshot_type", "status",
+        "title", "comment_url", "created_at", "up", "down", "confused",
+        "replies", "needs_inspection",
+    ])
+    writer.writeheader()
+    for row in rows:
+        writer.writerow({k: _csv_cell(row.get(k, "")) for k in writer.fieldnames})
+    return out.getvalue()
+
+
+def _csv_cell(value):
+    if not isinstance(value, str):
+        return value
+    stripped = value.lstrip(" \t\r\n")
+    if stripped[:1] in ("=", "+", "-", "@"):
+        return "'" + value
+    return value
 
 
 def do_mention_action(action, mention_id):
@@ -283,77 +487,22 @@ background:transparent;border:none;padding:3px 5px;border-radius:6px;opacity:.4}
 .m a.open{text-decoration:none}
 .mempty{color:var(--muted);font-size:12px;padding:4px 0 12px}
 .unreaddot{width:8px;height:8px;border-radius:50%;background:var(--accent);flex:0 0 auto;margin-top:5px}
-/* 작업 기록 */
-.worklog{padding:16px 22px 26px}
-.wlhead{display:flex;align-items:center;gap:10px;font-size:14px;font-weight:700;margin-bottom:4px}
-.bempty{color:var(--muted);font-size:12px;padding:8px 0 10px;line-height:1.6}
-.wlday{display:flex;align-items:center;gap:10px;margin:18px 0 9px;padding-bottom:6px;border-bottom:1px solid var(--line)}
-.wldate{font-size:13px;font-weight:700}
-.wldate .cnt{color:var(--muted);font-weight:500;font-size:11.5px;margin-left:7px}
-.wlcopy{margin-left:auto;font-size:11.5px;padding:4px 9px}
-.wlsum{font-size:12.5px;color:var(--ink);opacity:.9;line-height:1.65;margin:0 0 10px;padding:10px 13px;
-  background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:9px;white-space:pre-wrap}
-.wlitems{display:flex;flex-direction:column;gap:7px}
-.wlitem{display:flex;align-items:baseline;gap:8px;font-size:13px;color:var(--ink);line-height:1.5;flex-wrap:wrap}
-.wlic{flex:0 0 auto}
-.wlitem a{color:var(--ink);text-decoration:none}
-.wlitem a:hover{color:var(--accent)}
-.wlsrc{color:var(--purple);font-weight:700;font-size:11.5px;flex:0 0 auto}
-.wlloc{color:var(--dim);font-size:11.5px;flex:0 0 auto}
-#badge-worklog{background:var(--btn-accent-bg);color:var(--btn-accent-fg)}
-/* 사이드바 셸 */
-.shell{flex:1 1 auto;min-height:0;display:flex}
-.sidebar{flex:0 0 auto;width:190px;background:var(--panel);border-right:1px solid var(--line);
-  display:flex;flex-direction:column;gap:3px;padding:14px 10px;overflow-y:auto}
-.navitem{display:flex;align-items:center;gap:10px;width:100%;text-align:left;border:1px solid transparent;
-  background:transparent;color:var(--muted);border-radius:10px;padding:9px 11px;font-size:13.5px;font-weight:600}
-.navitem:hover{background:var(--panel2);color:var(--ink);filter:none}
-.navitem.active{background:var(--btn-accent-bg);color:var(--btn-accent-fg);border-color:var(--btn-accent-bd)}
-.navitem .ni-ico{font-size:15px;line-height:1}
-.navitem .ni-label{flex:1}
-.ni-badge{font-size:11px;font-weight:700;min-width:18px;height:18px;line-height:18px;text-align:center;
-  border-radius:9px;background:var(--bad);color:#fff;padding:0 5px}
-.ni-badge:empty{display:none}
-.ni-badge.dot{min-width:0;width:8px;height:8px;padding:0;border-radius:50%;background:var(--accent)}
-.main{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;overflow:hidden}
-.view{flex:1 1 auto;min-height:0;display:flex;flex-direction:column;overflow:hidden}
-.view[hidden]{display:none}
-#view-worklog{overflow-y:auto}
-.toolbar{flex:0 0 auto;display:flex;align-items:center;gap:10px;padding:11px 18px}
-.view .filterbar{position:static;top:auto}
 </style></head><body>
 <header><h1>👁 Lookout</h1>
+<div class="toggle"><button id="tLane" class="active" onclick="setView('lane')">레인별</button><button id="tAuthor" onclick="setView('author')">사람별</button><button id="tFeedback" onclick="setView('feedback')">리뷰 피드백</button></div>
+<button id="refreshBtn" onclick="refresh()">🔄 PR 가져오기</button>
+<span class="sub" id="sub">로딩…</span>
 <span class="sub" id="engStat" style="margin-left:14px"></span>
-<button id="themeBtn" onclick="cycleTheme()" title="테마 전환 (시스템 · 라이트 · 다크)" style="margin-left:auto">🖥 시스템</button></header>
-<div class="shell">
-<nav class="sidebar">
-  <button class="navitem active" id="nav-board" onclick="setNav('board')"><span class="ni-ico">📋</span><span class="ni-label">리뷰 보드</span><span class="ni-badge" id="badge-board"></span></button>
-  <button class="navitem" id="nav-worklog" onclick="setNav('worklog')"><span class="ni-ico">📓</span><span class="ni-label">작업 기록</span><span class="ni-badge" id="badge-worklog"></span></button>
-</nav>
-<main class="main">
-  <section class="view" id="view-board">
-    <div class="toolbar">
-      <div class="toggle"><button id="tLane" class="active" onclick="setView('lane')">레인별</button><button id="tAuthor" onclick="setView('author')">사람별</button></div>
-      <button id="refreshBtn" onclick="refresh()">🔄 PR 가져오기</button>
-      <span class="sub" id="sub">로딩…</span>
-      <span class="sub" style="margin-left:auto">5초마다 자동 새로고침</span>
-    </div>
-    <div class="filterbar" id="filterbar"></div>
-    <section class="mentions" id="mentions" style="display:none"></section>
-    <div class="board" id="board"></div>
-  </section>
-  <section class="view" id="view-worklog" hidden>
-    <section class="worklog" id="worklog"></section>
-  </section>
-</main>
-</div>
+<button id="themeBtn" onclick="cycleTheme()" title="테마 전환 (시스템 · 라이트 · 다크)" style="margin-left:auto">🖥 시스템</button>
+<span class="sub" style="margin-left:12px">5초마다 자동 새로고침</span></header>
+<div class="filterbar" id="filterbar"></div>
+<section class="mentions" id="mentions" style="display:none"></section>
+<div class="board" id="board"></div>
 <div class="ov" id="ov"><div class="modal" id="modal"></div></div>
 <script>
 const LANES=__LANES__;
 // Slack 미연동 — 멘션 섹션 숨김. Slack 연결 시 true 로 바꾸면 부활.
 const SHOW_MENTIONS=false;
-// 작업 기록 뷰. 끄려면 false.
-const SHOW_WORKLOG=true;
 // ── 테마 (시스템/라이트/다크) — 클릭 순환, localStorage 저장 ──
 const THEME_KEY='lookout_theme';
 const THEME_ORDER=['auto','light','dark'];
@@ -375,24 +524,8 @@ function pill(c){return isLight()
   : `background:${c}22;color:${c};border:1px solid ${c}55`;}
 function stripe(c){return isLight()?darken(c,.72):c;}  // 카드/finding 좌측 컬러 스트라이프
 applyTheme();
-let DATA=[];let VIEW='lane';let REPO='all';
-// ── 사이드바 네비 (뷰 전환 + 배지) ──
-const NAV_KEY='lookout_nav';const NAV_VIEWS=['board','worklog'];
-function setNav(v){
-  if(!NAV_VIEWS.includes(v))v='board';
-  NAV_VIEWS.forEach(k=>{
-    const view=document.getElementById('view-'+k); if(view)view.hidden=(k!==v);
-    const nav=document.getElementById('nav-'+k); if(nav)nav.classList.toggle('active',k===v);
-  });
-  try{localStorage.setItem(NAV_KEY,v);}catch(e){}
-  if(v==='worklog')loadWorklog();
-}
-function initNav(){let v='board';try{v=localStorage.getItem(NAV_KEY)||'board';}catch(e){}setNav(v);}
-function localToday(){try{return new Date().toLocaleDateString('en-CA');}catch(e){return '';}}
-function updateBadges(){
-  const b=document.getElementById('badge-board');
-  if(b){const n=DATA.filter(c=>c.status==='approve_blocked').length;b.textContent=n?String(n):'';}
-}
+let DATA=[];let FEEDBACK=[];let VIEW='lane';let REPO='all';
+let LANE_SCROLL={};
 // 엔진 가용성 — 초기엔 낙관적(true)으로 두고 /api/engines 응답으로 갱신
 let ENGINES={claude:{installed:true,logged_in:true,ready:true},codex:{installed:true,logged_in:true,ready:true}};
 function engReady(e){return !!(ENGINES&&ENGINES[e]&&ENGINES[e].ready);}
@@ -414,11 +547,16 @@ const REPO_COLORS=['#2dd4bf','#a78bfa','#fbbf24','#60a5fa','#4ade80','#fb7185'];
 function repoColor(r){let h=0;for(const ch of (r||''))h=(h*31+ch.charCodeAt(0))>>>0;return REPO_COLORS[h%REPO_COLORS.length];}
 function setRepo(r){REPO=r;renderFilter();render();}
 function viewData(){return REPO==='all'?DATA:DATA.filter(c=>c.repo===REPO);}
+function viewFeedbackData(){return REPO==='all'?FEEDBACK:FEEDBACK.filter(f=>f.repo===REPO);}
+function filterSource(){return VIEW==='feedback'?FEEDBACK:DATA;}
+function normalizeRepo(){const src=filterSource();if(REPO!=='all'&&!src.some(x=>x.repo===REPO))REPO='all';}
 function renderFilter(){
-  const repos=[...new Set(DATA.map(c=>c.repo))].sort();
+  normalizeRepo();
+  const src=filterSource();
+  const repos=[...new Set(src.map(c=>c.repo))].sort();
   const bar=document.getElementById('filterbar');
-  let h=`<button class="chip ${REPO==='all'?'on':''}" onclick="setRepo('all')">전체 <b>${DATA.length}</b></button>`;
-  repos.forEach(r=>{const n=DATA.filter(c=>c.repo===r).length;const col=repoColor(r);
+  let h=`<button class="chip ${REPO==='all'?'on':''}" onclick="setRepo('all')">전체 <b>${src.length}</b></button>`;
+  repos.forEach(r=>{const n=src.filter(c=>c.repo===r).length;const col=repoColor(r);
     const on=REPO===r;
     const onStyle=on?(isLight()?`background:${col}2e;color:${darken(col,.5)};border-color:${col}66`:`background:${col};color:#06101f;border-color:${col}`):'';
     h+=`<button class="chip ${on?'on':''}" style="${onStyle}" onclick="setRepo('${r}')"><span class="rdot" style="background:${col}"></span>${esc(repoShort(r))} <b>${n}</b></button>`;});
@@ -427,18 +565,18 @@ function renderFilter(){
 function setView(v){VIEW=v;
   document.getElementById('tLane').classList.toggle('active',v==='lane');
   document.getElementById('tAuthor').classList.toggle('active',v==='author');
-  render();}
+  document.getElementById('tFeedback').classList.toggle('active',v==='feedback');
+  renderFilter();render();}
 async function load(){
-  const [rb,re]=await Promise.all([fetch('/api/board'),fetch('/api/engines')]);
+  const [rb,re,rf]=await Promise.all([fetch('/api/board'),fetch('/api/engines'),fetch('/api/feedback')]);
   DATA=await rb.json();
+  try{FEEDBACK=await rf.json();}catch(e){FEEDBACK=[];}
   try{ENGINES=await re.json();}catch(e){}
   document.getElementById('sub').textContent=DATA.length+'개 카드';
   renderEngStat();
   renderFilter();
   render();
-  updateBadges();
   if(SHOW_MENTIONS)loadMentions();
-  if(SHOW_WORKLOG)loadWorklog();
 }
 function renderEngStat(){
   const el=document.getElementById('engStat');if(!el)return;
@@ -480,67 +618,39 @@ async function loadMentions(){
   wrap.innerHTML=h+'</div>';
 }
 async function mAct(id,action){
-  await fetch('/api/mention-action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,mention_id:id})});
+  await fetch('/api/mention-action',{method:'POST',headers:{'Content-Type':'application/json','X-Lookout-Action':'1'},body:JSON.stringify({action,mention_id:id})});
   loadMentions();
 }
-// ── 작업 기록 (날짜별 저널) ─────────────────────────────────
-let _wl=[];
-const WLIC={commit:'💻',pr_merged:'✅',pr_opened:'📤',claude:'🤖',codex:'🤖'};
-async function loadWorklog(){
-  let d=[];try{d=await (await fetch('/api/worklog')).json();}catch(e){}
-  _wl=Array.isArray(d)?d:[];
-  const today=localToday();
-  const wb=document.getElementById('badge-worklog');
-  if(wb){const t=_wl.find(x=>x.day===today);const n=t?t.items.length:0;wb.textContent=n?String(n):'';}
-  const wrap=document.getElementById('worklog');
-  let h=`<div class="wlhead">📓 작업 기록 <span style="margin-left:auto"><button onclick="refreshWorklog()">🔄 새로고침</button></span></div>`;
-  if(!_wl.length){
-    wrap.innerHTML=h+'<div class="bempty">아직 기록이 없습니다 — [🔄 새로고침]으로 최근 작업을 불러오세요.<br>(최초 1회는 최근 30일을 훑어 수십 초 걸릴 수 있어요.)</div>';
-    return;
-  }
-  _wl.forEach((g,gi)=>{
-    h+=`<div class="wlday"><span class="wldate">${esc(g.day)}${g.day===today?' (오늘)':''}<span class="cnt">${g.items.length}건</span></span>
-      <button class="wlcopy" onclick="copyDay(${gi})">📋 복사</button></div>`;
-    if(g.summary)h+=`<div class="wlsum">${esc(g.summary)}</div>`;
-    h+=`<div class="wlitems">`;
-    g.items.forEach(it=>{
-      const ic=WLIC[it.source==='git'?it.kind:it.source]||'•';
-      const src=it.source==='claude'?'Claude':(it.source==='codex'?'Codex':'');
-      const loc=(it.repo?' ·'+esc(it.repo):'')+(it.branch?'/'+esc(it.branch):'');
-      const title=it.url?`<a href="${it.url}" target="_blank">${esc(it.title)}</a>`:esc(it.title);
-      h+=`<div class="wlitem"><span class="wlic">${ic}</span>${src?`<span class="wlsrc">${src}</span>`:''}<span>${title}</span><span class="wlloc">${loc}</span></div>`;
-    });
-    h+='</div>';
-  });
-  wrap.innerHTML=h;
+function render(){VIEW==='feedback'?renderFeedback():VIEW==='author'?renderByAuthor():renderLanes();}
+function renderFeedback(){
+  const list=viewFeedbackData();
+  const board=document.getElementById('board');board.className='board stack';board.innerHTML='';
+  const sec=document.createElement('div');sec.className='sec';
+  const inspect=list.filter(f=>f.needs_inspection).length;
+  sec.innerHTML=`<h2>🧭 리뷰 피드백 <span class="n">${list.length}</span>${inspect?`<span class="pill">확인 ${inspect}</span>`:''}</h2>`;
+  const cc=document.createElement('div');cc.className='mlist';
+  if(!list.length)cc.innerHTML='<div class="empty">아직 수집된 피드백 없음</div>';
+  list.forEach(f=>cc.appendChild(feedbackItem(f)));
+  sec.appendChild(cc);board.appendChild(sec);
 }
-function copyDay(gi){
-  const g=_wl[gi];if(!g)return;
-  const lines=[`${g.day} 작업`];
-  if(g.summary){lines.push(g.summary,'');}
-  g.items.forEach(it=>{const s=it.source==='claude'?'[Claude] ':(it.source==='codex'?'[Codex] ':'');
-    lines.push(`- ${s}${it.title}${it.repo?' ('+it.repo+')':''}`);});
-  navigator.clipboard.writeText(lines.join(String.fromCharCode(10))).then(
-    ()=>showToast('복사됨 📋'),()=>showToast('복사 실패 — 드래그해 복사하세요',false));
-}
-async function refreshWorklog(){
-  showToast('작업 기록 불러오는 중… ⏳',true);
-  try{await fetch('/api/worklog/refresh',{method:'POST'});}catch(e){}
-  await loadWorklog();showToast('갱신됨 📓');
-}
-function render(){
-  // 5초 자동 새로고침이 DOM을 다시 그려 스크롤이 최상단으로 튀는 문제 → 위치 보존
-  const board=document.getElementById('board');
-  const sx=board.scrollLeft, sy=board.scrollTop, cols={};
-  board.querySelectorAll('.cards[data-lane]').forEach(el=>{cols[el.dataset.lane]=el.scrollTop;});
-  VIEW==='author'?renderByAuthor():renderLanes();
-  board.scrollLeft=sx; board.scrollTop=sy;
-  board.querySelectorAll('.cards[data-lane]').forEach(el=>{const v=cols[el.dataset.lane]; if(v)el.scrollTop=v;});
+function feedbackItem(f){
+  const el=document.createElement('div');el.className=`m ${f.needs_inspection?'':'read'}`;
+  const rc=repoColor(f.repo);const open=f.comment_url?`<a class="open" href="${f.comment_url}" target="_blank" onclick="event.stopPropagation()"><button>댓글↗</button></a>`:'';
+  el.innerHTML=`<span class="rdot" style="background:${rc};margin-top:5px"></span>
+    <div class="body"><div class="meta"><b>${esc(repoShort(f.repo))}#${f.pr}</b> · ${esc(f.profile)} · ${esc(f.snapshot_type)} · ${esc(f.status)}</div>
+    <div class="txt">${esc(f.title||'(제목없음)')}</div>
+    <div class="meta">👍 ${f.up||0} · 👎 ${f.down||0} · 😕 ${f.confused||0} · 💬 ${f.replies||0}</div></div>
+    <div class="acts">${open}</div>`;
+  el.onclick=()=>openFeedbackModal(f);
+  return el;
 }
 function renderLanes(){
+  const board=document.getElementById('board');
+  LANE_SCROLL={left:board.scrollLeft};
+  board.querySelectorAll('.col .cards').forEach(cards=>LANE_SCROLL[cards.dataset.lane]=cards.scrollTop);
   const byLane={};LANES.forEach(([k])=>byLane[k]=[]);
   viewData().forEach(c=>{if(byLane[c.status])byLane[c.status].push(c)});
-  const board=document.getElementById('board');board.className='board';board.innerHTML='';
+  board.className='board';board.innerHTML='';
   for(const [key,label] of LANES){
     const list=byLane[key]||[];
     const col=document.createElement('div');col.className='col';
@@ -550,6 +660,8 @@ function renderLanes(){
     list.forEach(c=>cc.appendChild(tile(c)));
     col.appendChild(cc);board.appendChild(col);
   }
+  board.scrollLeft=LANE_SCROLL.left||0;
+  board.querySelectorAll('.col .cards').forEach(cards=>cards.scrollTop=LANE_SCROLL[cards.dataset.lane]||0);
 }
 function renderByAuthor(){
   const byA={};viewData().forEach(c=>{(byA[c.author||'(unknown)']=byA[c.author||'(unknown)']||[]).push(c)});
@@ -572,19 +684,26 @@ function tile(c){
     xbtn=`<button class="xbtn" title="목록에서 제외" onclick="ignoreCard(event,${c.id})">✕</button>`;
   }
   if(c.status==='approve_blocked')btns=`<div class="btns"><button class="go" onclick="act(event,'unblock',${c.id})">🔓 승인(Unblock)</button></div>`;
+  if((c.kind==='review'&&['commented','lgtm','done'].includes(c.status))||(c.kind==='approve'&&['approve_blocked','done'].includes(c.status)))
+    btns+=`<div class="btns"><button class="go" onclick="reReview(event,${c.id})">🔄 재리뷰</button></div>`;
   if(['intake','reviewing','verifying','commenting'].includes(c.status))
     btns=`<div class="btns"><button class="stop" onclick="stopReview(event,${c.id})">🛑 리뷰 중지</button></div>`;
+  if(c.dryrun_pending)
+    btns+=`<div class="btns"><button class="go" onclick="publishDryRun(event,${c.id})">💬 dry-run 댓글 게시</button></div>`;
   const sm=smeta(c.status);
   el.style.borderLeftColor=stripe(sm.c);
   const statusPill=`<span class="statuspill" style="${pill(sm.c)}">${sm.ko}</span>`;
   const enginePill=(c.status!=='triage')?`<span class="pill">${c.engine}</span>`:'';
-  const clo=c.closure&&(c.closure.resolved||c.closure.unresolved)?`<span class="pill">✅${c.closure.resolved} ⚠️${c.closure.unresolved}</span>`:'';
+  const clo=c.closure&&(c.closure.resolved||c.closure.dismissed||c.closure.deferred||c.closure.unresolved||c.closure.pending)?`<span class="pill">✅${c.closure.resolved} ↪️${c.closure.deferred||0} ⚠️${c.closure.unresolved} 🧑‍⚖️${c.closure.pending||0}</span>`:'';
+  const fb=c.feedback&&(c.feedback.up||c.feedback.down||c.feedback.confused||c.feedback.replies)
+    ?`<span class="pill" title="리뷰 피드백 스냅샷">👍${c.feedback.up||0} 👎${c.feedback.down||0} 💬${c.feedback.replies||0}</span>`:'';
+  const inspect=c.feedback&&c.feedback.needs_inspection?`<span class="pill" style="${pill('#fbbf24')}">피드백 확인</span>`:'';
   const rc=repoColor(c.repo);
   const repoPill=`<span class="repopill" style="${pill(rc)}"><span class="rdot" style="background:${rc}"></span>${esc(repoShort(c.repo))}</span>`;
   el.innerHTML=`${xbtn}<div class="pr">${repoPill} <span class="num">#${c.pr}</span></div>
     <div class="title">${esc(c.title)||'(제목없음)'}</div>
-    <div class="row">${statusPill}<span class="pill">${esc(c.author)}</span>${enginePill}</div>
-    <div class="row"><span>@${c.head}</span>${dots?`<span class="row">${dots} ${c.findings.length}건</span>`:''}${clo}</div>${btns}`;
+    <div class="row">${statusPill}<span class="pill">${esc(c.author)}</span>${enginePill}${inspect}</div>
+    <div class="row"><span>@${c.head}</span>${dots?`<span class="row">${dots} ${c.findings.length}건</span>`:''}${clo}${fb}</div>${btns}`;
   el.onclick=()=>openModal(c);
   return el;
 }
@@ -596,8 +715,11 @@ function openModal(c){
     <div class="msub">${esc(c.repo)} · @${esc(c.author)} · <code>${c.head}</code>
       <span class="statuspill" style="${pill(sm.c)}">${sm.ko}</span></div>`;
   if(c.url)html+=`<div class="mlink"><a href="${c.url}" target="_blank">GitHub에서 열기 ↗</a></div>`;
-  if(c.closure&&(c.closure.resolved||c.closure.unresolved))
-    html+=`<div class="lbl">이전 지적 추적</div><div class="pre">✅ ${c.closure.resolved} 해결 · ⚠️ ${c.closure.unresolved} 미해결</div>`;
+  if(c.closure&&(c.closure.resolved||c.closure.dismissed||c.closure.deferred||c.closure.unresolved||c.closure.pending))
+    html+=`<div class="lbl">이전 지적 추적</div><div class="pre">✅ ${c.closure.resolved} 해결 · ⏭️ ${c.closure.dismissed||0} 해명 수용 · ↪️ ${c.closure.deferred||0} 후속 작업 · ⚠️ ${c.closure.unresolved} 미해결 · 🧑‍⚖️ ${c.closure.pending||0} 운영자 판단</div>`;
+  if(c.feedback&&(c.feedback.up||c.feedback.down||c.feedback.confused||c.feedback.replies)){
+    html+=`<div class="lbl">리뷰 피드백</div><div class="pre">👍 ${c.feedback.up||0} · 👎 ${c.feedback.down||0} · 😕 ${c.feedback.confused||0} · 💬 ${c.feedback.replies||0}${c.feedback.needs_inspection?' · 확인 필요':''}</div>`;
+  }
   if(c.findings.length){html+=`<div class="lbl">리뷰 결과 · ${c.findings.length}건</div>`;
     c.findings.forEach(f=>{const sc=SEVC[f.severity]||'#6b7688';
       html+=`<div class="finding" style="border-left-color:${stripe(sc)}">
@@ -610,21 +732,40 @@ function openModal(c){
         </div>
         <div class="pre">${esc(f.problem)}</div>
         ${f.fix?`<div class="lbl2">제안</div><div class="pre">${esc(f.fix)}</div>`:''}
+        ${['dismiss_pending','defer_pending'].includes(f.status)?`<div class="lbl2">작성자 결정 근거</div><div class="pre">${esc(f.decision_evidence||'')}</div>${f.status==='defer_pending'?`<div class="lbl2">후속 참조</div><div class="pre">${esc(f.decision_follow_up||'후속 참조 없음')}</div>`:''}<div class="btns"><button class="go" onclick="acceptAuthorDecision(event,${f.id},'accept_author_decision')">🧑‍⚖️ 작성자 결정 수용</button></div>`:''}
+        ${f.status==='deferred'?`<div class="lbl2">작성자 결정 근거</div><div class="pre">${esc(f.decision_evidence||'')}</div><div class="lbl2">후속 참조</div><div class="pre">${esc(f.decision_follow_up||'후속 참조 없음')}</div>`:''}
+        ${['posted','confirmed','unresolved'].includes(f.status)?`<div class="btns"><button class="go" onclick="acceptAuthorDecision(event,${f.id},'operator_dismiss')">🧑‍⚖️ 운영자 직접 수용</button></div>`:''}
       </div>`});
   }else html+='<p class="sub">아직 finding 없음</p>';
   if(c.comments.length){html+='<div class="lbl">게시된 / 게시될 댓글</div>';
-    c.comments.forEach(cm=>{html+=`<div class="cmt">${esc(cm.body)}</div>${cm.url?`<div class="msub"><a href="${cm.url}" target="_blank">${esc(cm.url)}</a></div>`:'<div class="msub">(dry-run · 미게시)</div>'}`})}
+    c.comments.forEach(cm=>{const pending=(cm.type==='comment_dryrun'&&c.dryrun_pending);
+      html+=`<div class="cmt">${esc(cm.body)}</div>${cm.url?`<div class="msub"><a href="${cm.url}" target="_blank">${esc(cm.url)}</a></div>`:`<div class="msub">${pending?'(dry-run · 미게시)':'(dry-run preview)'}</div>`}`});
+    if(c.dryrun_pending)
+      html+=`<div class="btns"><button class="go" onclick="publishDryRun(event,${c.id})">💬 dry-run 댓글 게시</button></div>`;}
+  m.innerHTML=html;document.getElementById('ov').classList.add('show');
+}
+function openFeedbackModal(f){
+  const m=document.getElementById('modal');const rc=repoColor(f.repo);
+  let html=`<span class="close" onclick="closeM()">✕ 닫기</span>
+    <h3>${esc(repoShort(f.repo))}#${f.pr} 리뷰 피드백</h3>
+    <div class="msub">${esc(f.repo)} · card #${f.card_id} · snapshot #${f.id}
+      <span class="statuspill" style="${pill(f.needs_inspection?'#fbbf24':'#4ade80')}">${f.needs_inspection?'확인 필요':'수집됨'}</span></div>
+    <div class="row"><span class="repopill" style="${pill(rc)}"><span class="rdot" style="background:${rc}"></span>${esc(f.profile)}</span><span class="pill">${esc(f.snapshot_type)}</span><span class="pill">${esc(f.status)}</span></div>
+    <div class="title" style="margin-top:12px">${esc(f.title)||'(제목없음)'}</div>
+    <div class="lbl">반응</div><div class="pre">👍 ${f.up||0} · 👎 ${f.down||0} · 😕 ${f.confused||0} · 💬 ${f.replies||0}</div>`;
+  if(f.comment_url)html+=`<div class="mlink"><a href="${f.comment_url}" target="_blank">GitHub 댓글 열기 ↗</a></div>`;
+  html+=`<div class="lbl">API</div><div class="pre">/api/feedback/${f.id}</div>`;
   m.innerHTML=html;document.getElementById('ov').classList.add('show');
 }
 function closeM(){document.getElementById('ov').classList.remove('show')}
 document.getElementById('ov').onclick=e=>{if(e.target.id==='ov')closeM()};
-const ACT_MSG={start:'리뷰 시작 — 곧 분석을 시작합니다 ⏳',unblock:'승인 진행 중 🔓',ignore:'목록에서 제외됨',stop:'리뷰 중지됨 🛑'};
+const ACT_MSG={start:'리뷰 시작 — 곧 분석을 시작합니다 ⏳',rereview:'재리뷰 시작 — 곧 분석을 시작합니다 🔄',unblock:'승인 진행 중 🔓',ignore:'목록에서 제외됨',stop:'리뷰 중지됨 🛑'};
 async function act(e,action,id,engine){e.stopPropagation();
   showToast(ACT_MSG[action]||'처리됨', action!=='ignore');
   let j={};
-  try{const r=await fetch('/api/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,card_id:id,engine:engine||'claude'})});j=await r.json();}catch(err){}
-  if(action==='start'&&j&&j.ok===false)
-    showToast('시작할 수 없습니다 — '+(engine?engReason(engine)||'엔진 상태 확인':'엔진 상태 확인'),false);
+  try{const r=await fetch('/api/action',{method:'POST',headers:{'Content-Type':'application/json','X-Lookout-Action':'1'},body:JSON.stringify({action,card_id:id,engine:engine||'claude'})});j=await r.json();}catch(err){}
+  if(['start','rereview'].includes(action)&&j&&j.ok===false)
+    showToast(action==='rereview'?'재리뷰를 시작할 수 없습니다 — PR/head 상태를 확인하세요':'시작할 수 없습니다 — '+(engine?engReason(engine)||'엔진 상태 확인':'엔진 상태 확인'),false);
   load();}
 function showToast(msg,spin){
   let t=document.getElementById('toast');
@@ -635,19 +776,27 @@ function showToast(msg,spin){
 }
 function stopReview(e,id){e.stopPropagation();
   if(confirm('이 리뷰를 강제 중지할까요? (진행 중인 분석을 종료하고 목록에서 제외)'))act(e,'stop',id);}
+function reReview(e,id){e.stopPropagation();
+  if(confirm('커밋 변경 없이 현재 head를 다시 리뷰할까요? 기존 승인 대기 게이트는 취소됩니다.'))act(e,'rereview',id);}
 function ignoreCard(e,id){e.stopPropagation();
   if(confirm('이 PR을 목록에서 제외할까요? (리뷰하지 않음)'))act(e,'ignore',id);}
+function publishDryRun(e,id){e.stopPropagation();
+  if(confirm('dry-run 댓글을 실제 GitHub PR 댓글로 게시할까요?'))act(e,'publish_dryrun',id);}
+async function acceptAuthorDecision(e,id,action){e.stopPropagation();
+  if(!confirm(action==='operator_dismiss'?'이 지적을 운영자 판단으로 직접 수용할까요?':'작성자의 미반영/후속 결정을 수용할까요? 이 지적은 더 이상 LGTM을 막지 않습니다.'))return;
+  const r=await fetch('/api/finding-action',{method:'POST',headers:{'Content-Type':'application/json','X-Lookout-Action':'1'},body:JSON.stringify({action,finding_id:id})});
+  const j=await r.json();showToast(j.ok?'작성자 결정 수용됨':'수용할 수 없습니다',false);closeM();load();}
 async function refresh(){
   const b=document.getElementById('refreshBtn');const old=b.textContent;
   b.textContent='가져오는 중…';b.disabled=true;
   try{
-    const r=await fetch('/api/refresh',{method:'POST'});const j=await r.json();
+    const r=await fetch('/api/refresh',{method:'POST',headers:{'X-Lookout-Action':'1'}});const j=await r.json();
     await load();
     b.textContent=j.added>0?`+${j.added}건 추가`:'최신 상태';
   }catch(e){b.textContent='실패';}
   setTimeout(()=>{b.textContent=old;b.disabled=false;},1800);
 }
-initNav();load();setInterval(load,5000);
+load();setInterval(load,5000);
 </script></body></html>"""
 
 
@@ -662,37 +811,57 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body.encode() if isinstance(body, str) else body)
 
     def do_GET(self):
-        if self.path == "/" or self.path.startswith("/index"):
+        parsed = urlparse(self.path)
+        path = parsed.path
+        params = parse_qs(parsed.query)
+        if path == "/" or path.startswith("/index"):
             html = HTML.replace("__LANES__", json.dumps(LANES, ensure_ascii=False))
             self._send(200, html, "text/html; charset=utf-8")
-        elif self.path == "/api/board":
+        elif path == "/api/board":
             self._send(200, json.dumps(build_board(), ensure_ascii=False))
-        elif self.path == "/api/mentions":
+        elif path == "/api/mentions":
             self._send(200, json.dumps(build_mentions(), ensure_ascii=False))
-        elif self.path == "/api/engines":
+        elif path == "/api/feedback":
+            try:
+                body = json.dumps(build_feedback(params), ensure_ascii=False)
+            except ValueError:
+                self._send(400, "{}")
+                return
+            self._send(200, body)
+        elif path == "/api/feedback/export.csv":
+            try:
+                body = build_feedback_csv(params)
+            except ValueError:
+                self._send(400, "{}")
+                return
+            self._send(200, body, "text/csv; charset=utf-8")
+        elif path.startswith("/api/feedback/"):
+            try:
+                item = build_feedback_detail(path.rsplit("/", 1)[-1])
+            except ValueError:
+                item = None
+            self._send(200 if item else 404, json.dumps(item or {}, ensure_ascii=False))
+        elif path == "/api/engines":
             self._send(200, json.dumps(engines.availability(), ensure_ascii=False))
-        elif self.path == "/api/worklog":
-            with db.connect() as c:
-                data = worklog.by_day(c)
-            self._send(200, json.dumps(data, ensure_ascii=False))
         else:
             self._send(404, "{}")
 
     def do_POST(self):
+        if not mutation_allowed(
+                self.client_address[0], self.headers.get("X-Lookout-Action", ""),
+                self.headers.get("Origin", ""), self.headers.get("Host", "")):
+            self._send(403, '{"ok":false}')
+            return
         n = int(self.headers.get("Content-Length", 0))
         data = json.loads(self.rfile.read(n) or "{}")
         if self.path == "/api/refresh":
             self._send(200, json.dumps(refresh_poll()))
             return
-        if self.path == "/api/worklog/refresh":
-            with db.connect() as c:
-                worklog.sync(c, 7, force_summary=True)
-                data = worklog.by_day(c)
-            self._send(200, json.dumps(data, ensure_ascii=False))
-            return
         if self.path == "/api/action":
             ok = do_action(data.get("action"), int(data.get("card_id", 0)),
                            data.get("engine", "claude"))
+        elif self.path == "/api/finding-action":
+            ok = do_finding_action(data.get("action"), int(data.get("finding_id", 0)))
         elif self.path == "/api/mention-action":
             ok = do_mention_action(data.get("action"), int(data.get("mention_id", 0)))
         else:
@@ -703,8 +872,8 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     db.init()
-    server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
-    print(f"[dashboard] http://127.0.0.1:{PORT}")
+    server = ThreadingHTTPServer((DASHBOARD_HOST, PORT), Handler)
+    print(f"[dashboard] http://{DASHBOARD_HOST}:{PORT}")
     server.serve_forever()
 
 

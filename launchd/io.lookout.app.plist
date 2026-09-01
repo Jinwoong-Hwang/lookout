@@ -11,8 +11,8 @@
   <key>RunAtLoad</key>
   <true/>
   <key>StandardOutPath</key>
-  <string>__HERMES_HOME__/logs/app.out.log</string>
+  <string>__LOG_DIR__/app.out.log</string>
   <key>StandardErrorPath</key>
-  <string>__HERMES_HOME__/logs/app.err.log</string>
+  <string>__LOG_DIR__/app.err.log</string>
 </dict>
 </plist>

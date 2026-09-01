@@ -51,8 +51,12 @@ CREATE TABLE IF NOT EXISTS findings (
   line       TEXT,
   severity   TEXT,
   confidence TEXT,
-  status     TEXT NOT NULL,             -- pending_verify|confirmed|rejected|posted|resolved|unresolved
+  status     TEXT NOT NULL,             -- pending_verify|confirmed|rejected|posted|resolved|dismissed|deferred|unresolved
   comment_id TEXT,
+  decision_head TEXT,
+  decision_comment_id TEXT,
+  decision_evidence TEXT,
+  decision_follow_up TEXT,
   created_at REAL NOT NULL,
   updated_at REAL NOT NULL,
   UNIQUE(repo, pr_number, fp)
@@ -72,6 +76,23 @@ CREATE TABLE IF NOT EXISTS events (
   key    TEXT,
   type   TEXT NOT NULL,
   detail TEXT
+);
+
+CREATE TABLE IF NOT EXISTS review_feedback_snapshots (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  card_id        INTEGER NOT NULL,
+  repo           TEXT NOT NULL,
+  pr_number      INTEGER NOT NULL,
+  head_sha       TEXT,
+  profile_type   TEXT,
+  snapshot_type  TEXT NOT NULL,          -- pr_closed | weekly_open | manual
+  comment_id     TEXT NOT NULL,
+  comment_url    TEXT,
+  reactions      TEXT,                   -- JSON: +1/-1/confused/total_count
+  author_replies TEXT,                   -- JSON array of author replies after bot comment
+  outcome        TEXT,                   -- JSON: state, closure counts, etc.
+  created_at     REAL NOT NULL,
+  UNIQUE(card_id, snapshot_type, comment_id)
 );
 
 CREATE TABLE IF NOT EXISTS meta (
@@ -102,35 +123,11 @@ CREATE TABLE IF NOT EXISTS slack_names (
   updated_at REAL NOT NULL
 );
 
--- 작업 기록(work log): 날짜별로 쌓이는 저널. git 커밋/PR + Claude/Codex 세션.
--- ref UNIQUE로 재스캔 시 중복 방지. 누적이 목적이라 purge_old에서 건드리지 않음.
-CREATE TABLE IF NOT EXISTS work_log (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  day        TEXT NOT NULL,             -- YYYY-MM-DD (local)
-  ts         REAL NOT NULL,             -- epoch, 정렬용
-  source     TEXT NOT NULL,             -- git | claude | codex
-  kind       TEXT,                      -- commit | pr_merged | pr_opened | session
-  repo       TEXT,
-  ref        TEXT UNIQUE,               -- dedupe key (sha / repo#pr / claude:sid / codex:sid)
-  title      TEXT,
-  url        TEXT,
-  branch     TEXT,
-  created_at REAL NOT NULL
-);
-
--- 작업 기록 날짜별 요약. sig(그날 항목 해시)가 바뀔 때만 재생성.
-CREATE TABLE IF NOT EXISTS worklog_summary (
-  day        TEXT PRIMARY KEY,
-  summary    TEXT,
-  sig        TEXT,
-  updated_at REAL NOT NULL
-);
-
 CREATE INDEX IF NOT EXISTS idx_cards_status ON cards(status);
 CREATE INDEX IF NOT EXISTS idx_findings_card ON findings(card_id);
 CREATE INDEX IF NOT EXISTS idx_inbox_processed ON inbox(processed);
 CREATE INDEX IF NOT EXISTS idx_mentions_status ON mentions(status);
-CREATE INDEX IF NOT EXISTS idx_worklog_ts ON work_log(ts);
+CREATE INDEX IF NOT EXISTS idx_feedback_card ON review_feedback_snapshots(card_id);
 """
 
 
@@ -160,6 +157,10 @@ def init():
         cols = [r["name"] for r in c.execute("PRAGMA table_info(cards)").fetchall()]
         if "engine" not in cols:
             c.execute("ALTER TABLE cards ADD COLUMN engine TEXT DEFAULT 'claude'")
+        finding_cols = {r["name"] for r in c.execute("PRAGMA table_info(findings)").fetchall()}
+        for name in ("decision_head", "decision_comment_id", "decision_evidence", "decision_follow_up"):
+            if name not in finding_cols:
+                c.execute(f"ALTER TABLE findings ADD COLUMN {name} TEXT")
 
 
 def get_meta(c, k: str, default=None):
@@ -288,17 +289,26 @@ def findings_for_card(c, card_id, status=None):
 
 
 def prior_open_findings(c, repo, pr, exclude_card_id):
-    """Findings raised on earlier review cards of this PR that aren't resolved yet."""
+    """Earlier findings that need closure at a new head.
+
+    Dismissed/deferred findings are retained here only so new code can reopen
+    them; they are never returned by unresolved_findings for re-commenting.
+    """
     return c.execute(
         """SELECT * FROM findings WHERE repo=? AND pr_number=? AND card_id!=?
-           AND status IN ('posted','confirmed','unresolved')""",
+           AND status IN ('posted','confirmed','unresolved','dismissed','deferred',
+                          'dismiss_pending','defer_pending')""",
         (repo, pr, exclude_card_id),
     ).fetchall()
 
 
 def closure_counts(c, repo, pr):
     rows = c.execute(
-        "SELECT status, COUNT(*) n FROM findings WHERE repo=? AND pr_number=? AND status IN ('resolved','unresolved') GROUP BY status",
+        """SELECT status, COUNT(*) n FROM findings
+           WHERE repo=? AND pr_number=?
+             AND status IN ('resolved','dismissed','deferred','unresolved',
+                            'dismiss_pending','defer_pending')
+           GROUP BY status""",
         (repo, pr),
     ).fetchall()
     return {r["status"]: r["n"] for r in rows}
@@ -319,6 +329,65 @@ def unresolved_findings(c, repo, pr):
     ).fetchall()
 
 
+def pending_decision_findings(c, repo, pr):
+    return c.execute(
+        """SELECT * FROM findings WHERE repo=? AND pr_number=?
+           AND status IN ('dismiss_pending','defer_pending')""",
+        (repo, pr),
+    ).fetchall()
+
+
+def posted_findings_for_closure(c, repo, pr):
+    """Findings with a bot marker that can have an author reply to re-check."""
+    return c.execute(
+        """SELECT * FROM findings WHERE repo=? AND pr_number=? AND comment_id IS NOT NULL
+           AND status IN ('posted','confirmed','unresolved','dismissed','deferred',
+                          'dismiss_pending','defer_pending')""",
+        (repo, pr),
+    ).fetchall()
+
+
+def revalidate_finding(c, card_id, repo, pr, head, fp, title, body, file, line,
+                       severity, confidence):
+    """Move a duplicate fingerprint into fresh verification unless same-head sticky."""
+    row = c.execute(
+        "SELECT * FROM findings WHERE repo=? AND pr_number=? AND fp=?",
+        (repo, pr, fp),
+    ).fetchone()
+    if not row:
+        return "missing"
+    def meaningful_body(raw):
+        try:
+            value = json.loads(raw or "{}")
+            return {k: v for k, v in value.items() if v not in (None, "", [], {})}
+        except (json.JSONDecodeError, AttributeError):
+            return raw or ""
+
+    same_payload = meaningful_body(row["body"]) == meaningful_body(body) and all(
+        (row[key] or "") == (str(value) if value is not None else "")
+        for key, value in {
+            "title": title, "file": file, "line": line,
+            "severity": severity, "confidence": confidence,
+        }.items()
+    )
+    if row["status"] in {"dismiss_pending", "defer_pending"} and same_payload:
+        return "sticky"
+    if (row["status"] in {"dismissed", "deferred"}
+            and (not row["decision_head"] or row["decision_head"] == head)
+            and same_payload):
+        return "sticky"
+    previous = row["status"]
+    c.execute(
+        """UPDATE findings SET card_id=?,head_sha=?,title=?,body=?,file=?,line=?,
+             severity=?,confidence=?,status='pending_verify',decision_head=NULL,
+             decision_comment_id=NULL,decision_evidence=NULL,decision_follow_up=NULL,updated_at=?
+           WHERE id=?""",
+        (card_id, head, title, body, file, str(line), severity, confidence,
+         now(), row["id"]),
+    )
+    return previous
+
+
 def reattach_finding(c, finding_id, card_id, status):
     c.execute("UPDATE findings SET card_id=?, status=?, updated_at=? WHERE id=?",
               (card_id, status, now(), finding_id))
@@ -328,6 +397,25 @@ def set_finding_status(c, finding_id, status, comment_id=None):
     c.execute(
         "UPDATE findings SET status=?, comment_id=COALESCE(?,comment_id), updated_at=? WHERE id=?",
         (status, comment_id, now(), finding_id),
+    )
+
+
+def set_finding_decision(c, finding_id, status, head, comment_id, evidence, follow_up=""):
+    """Persist a decision; follow-up references belong to deferred decisions only."""
+    c.execute(
+        """UPDATE findings SET status=?,decision_head=?,decision_comment_id=?,
+             decision_evidence=?,decision_follow_up=?,updated_at=? WHERE id=?""",
+        (status, head, str(comment_id), evidence,
+         follow_up if status in {"defer_pending", "deferred"} and follow_up else None,
+         now(), finding_id),
+    )
+
+
+def clear_finding_decision(c, finding_id, status):
+    c.execute(
+        """UPDATE findings SET status=?,decision_head=NULL,decision_comment_id=NULL,
+             decision_evidence=NULL,decision_follow_up=NULL,updated_at=? WHERE id=?""",
+        (status, now(), finding_id),
     )
 
 

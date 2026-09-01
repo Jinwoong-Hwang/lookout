@@ -13,6 +13,10 @@ def review_key(repo: str, pr: int, head_sha: str) -> str:
     return f"pr-auto-review:{repo}#{pr}:review:{head_sha}"
 
 
+def rereview_key(repo: str, pr: int, head_sha: str, source_card_id: int) -> str:
+    return f"pr-auto-review:{repo}#{pr}:review:{head_sha}:rereview:{source_card_id}"
+
+
 def approve_key(repo: str, pr: int, head_sha: str) -> str:
     return f"pr-auto-review:{repo}#{pr}:approve:{head_sha}"
 

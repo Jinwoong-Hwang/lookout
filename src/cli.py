@@ -7,12 +7,15 @@
   python -m src.cli start <card> [claude|codex]   start review on a triaged PR
   python -m src.cli ignore <card>     dismiss a triaged PR from the list
   python -m src.cli unblock <card>    approve a blocked approve-gate card
+  python -m src.cli publish-dryrun <card>  post a dry-run comment to GitHub
+  python -m src.cli feedback-snapshot <card>  capture feedback for one card
+  python -m src.cli feedback-weekly   capture weekly open-PR feedback samples
   python -m src.cli tick              run one maintenance tick now
 """
 import json
 import sys
 
-from . import db, tick
+from . import commenter, db, feedback, tick
 
 
 def _fmt_ts(ts):
@@ -120,6 +123,37 @@ def cmd_unblock(card_id):
         print(f"unblocked #{card_id}; will be re-verified + approved on next tick")
 
 
+def cmd_publish_dryrun(card_id):
+    db.init()
+    with db.connect() as c:
+        card = c.execute("SELECT * FROM cards WHERE id=?", (int(card_id),)).fetchone()
+        if not card or card["kind"] != "review":
+            print("not a review card")
+            return
+        if commenter.publish_dryrun(c, card):
+            print(f"published dry-run comment for #{card_id} ({card['repo']}#{card['pr_number']})")
+        else:
+            print("no dry-run comment to publish")
+
+
+def cmd_feedback_snapshot(card_id):
+    db.init()
+    with db.connect() as c:
+        card = c.execute("SELECT * FROM cards WHERE id=?", (int(card_id),)).fetchone()
+        if not card or card["kind"] != "review":
+            print("not a review card")
+            return
+        rows = feedback.snapshot_card(c, card, "manual")
+        print(f"captured {len(rows)} feedback snapshot(s) for #{card_id}")
+
+
+def cmd_feedback_weekly():
+    db.init()
+    with db.connect() as c:
+        n = feedback.weekly_open(c)
+    print(f"captured {n} weekly feedback snapshot(s)")
+
+
 def main(argv):
     if not argv:
         print(__doc__)
@@ -141,6 +175,12 @@ def main(argv):
         cmd_stop(rest[0])
     elif cmd == "unblock":
         cmd_unblock(rest[0])
+    elif cmd == "publish-dryrun":
+        cmd_publish_dryrun(rest[0])
+    elif cmd == "feedback-snapshot":
+        cmd_feedback_snapshot(rest[0])
+    elif cmd == "feedback-weekly":
+        cmd_feedback_weekly()
     elif cmd == "tick":
         tick.main()
     else:

@@ -7,15 +7,14 @@ blocked are intentionally skipped.
 
 Run: python -m src.tick
 """
-import datetime
 import fcntl
 import os
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 
-from . import (approver, commenter, config, db, monitor, poller,
-               reviewer, router, verifier, worklog, worktree)
+from . import (approver, commenter, config, db, feedback, monitor, poller, reviewer,
+               router, verifier, worktree)
 
 CFG = config.CFG
 LOCK_PATH = config.path("logs/tick.lock")
@@ -142,6 +141,7 @@ def run_once():
 
     # 1) 빠른 정리/진행 먼저 — 느린 리뷰에 막히지 않게 (머지·stale 즉시 archive)
     _monitor_roots()                                                  # 머지/닫힘 PR archive
+    _stage(["reviewing", "verifying", "commenting"], monitor.process_active_stale, "monitor_active_stale")
     _stage(["commented"], monitor.process_commented, "monitor_commented")
     _stage(["triage"], monitor.process_triage, "monitor_triage")
     _stage(["approve_blocked"], monitor.process_approve_stale, "monitor_approve_stale")
@@ -160,20 +160,6 @@ def run_once():
 def gc():
     """Periodic workspace cleanup (worktree prune) — 가벼움, gc_interval마다."""
     worktree.gc_worktrees()
-
-
-def maybe_worklog():
-    """작업 기록 동기화 — 30분마다 최근 worklog_sync_days를 재스캔해 오늘부터 누적.
-    LLM 요약은 worklog 쪽에서 하루 단위로 절제한다. read-only라 리뷰 흐름과 무관."""
-    if not CFG.get("worklog_enabled", True):
-        return
-    with db.connect() as c:
-        last = float(db.get_meta(c, "last_worklog", "0"))
-    if time.time() - last < 30 * 60:
-        return
-    with db.connect() as c:
-        n = worklog.sync(c, int(CFG.get("worklog_sync_days", 3)))
-    print(f"[tick] worklog synced ({n} entries)")
 
 
 def deep_gc():
@@ -206,8 +192,13 @@ def main():
             deep_gc()
             with db.connect() as c:
                 db.set_meta(c, "last_deep_gc", str(time.time()))
-        # 작업 기록 동기화 (백필 1회 + 30분마다 최근분)
-        maybe_worklog()
+        with db.connect() as c:
+            last_feedback = float(db.get_meta(c, "last_feedback_weekly", "0"))
+        if time.time() - last_feedback > feedback.WEEKLY_INTERVAL_SECONDS:
+            with db.connect() as c:
+                n = feedback.weekly_open(c)
+                db.set_meta(c, "last_feedback_weekly", str(time.time()))
+            print(f"[tick] feedback_weekly: {n} snapshots")
         print("[tick] done")
     finally:
         fcntl.flock(lock, fcntl.LOCK_UN)

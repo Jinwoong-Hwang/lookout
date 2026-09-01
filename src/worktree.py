@@ -5,6 +5,7 @@ store across worktrees. PR head (incl. forks) is fetched via refs/pull/<n>/head.
 The worktree is detached and NEVER pushed; target code is read-only.
 """
 import os
+import base64
 import subprocess
 import threading
 
@@ -35,9 +36,24 @@ def kill_review_process(repo: str, pr: int):
     subprocess.run(["pkill", "-f", pattern], capture_output=True)
 
 
+def _git_env():
+    env = config.subprocess_env()
+    token = env.get("GH_TOKEN") or env.get("GITHUB_TOKEN")
+    if token:
+        # Launchd cannot answer GitHub credential prompts. Feed git the same
+        # token gh uses, without depending on global credential-helper state.
+        basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+        env.setdefault("GIT_CONFIG_COUNT", "1")
+        env.setdefault("GIT_CONFIG_KEY_0", "http.https://github.com/.extraheader")
+        env.setdefault("GIT_CONFIG_VALUE_0", f"AUTHORIZATION: basic {basic}")
+        env.setdefault("GIT_TERMINAL_PROMPT", "0")
+    return env
+
+
 def _git(repo_dir, *args, check=True, timeout=600):
     proc = subprocess.run(["git", "-C", repo_dir, *args],
-                          capture_output=True, text=True, timeout=timeout)
+                          capture_output=True, text=True, timeout=timeout,
+                          env=_git_env())
     if check and proc.returncode != 0:
         raise RuntimeError(f"git {' '.join(args)} failed: {proc.stderr.strip()[:300]}")
     return proc

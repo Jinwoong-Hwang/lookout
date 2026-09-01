@@ -4,7 +4,7 @@ An approve card is created BLOCKED. It does nothing until the operator unblocks
 it (`hermes unblock <id>`), which flips it to 'approving'. Even then, approval
 only fires after re-resolving head + checks. Approval is NEVER automatic.
 """
-from . import db, ghclient, keys, router
+from . import db, ghclient, keys, profiles, router
 from .config import CFG
 
 
@@ -12,7 +12,16 @@ def create_gate(c, review_card):
     """Create the blocked approve card after an LGTM review, archive the review card.
     머지/닫힘 또는 stale head면 게이트를 만들지 않고 그냥 archive."""
     import json
+    current = c.execute("SELECT status FROM cards WHERE id=?", (review_card["id"],)).fetchone()
+    if not current or current["status"] != "lgtm":
+        return
     repo, pr, head = review_card["repo"], review_card["pr_number"], review_card["head_sha"]
+    policy = profiles.policy_from_card(review_card)
+    if not policy.get("approval_allowed"):
+        db.set_status(c, review_card["id"], "done")
+        db.log_event(c, "approve_gate_skipped_policy", review_card["key"],
+                     {"profile_type": policy.get("profile_type"), "mode": policy.get("mode")})
+        return
     info = ghclient.pr_view(repo, pr)
     if info.get("state") != "OPEN" or info.get("headRefOid") != head:
         db.set_status(c, review_card["id"], "archived")
@@ -28,10 +37,16 @@ def create_gate(c, review_card):
     # payload comes off the DB row as a JSON string; parse so upsert re-encodes once
     meta = json.loads(review_card["payload"]) if review_card["payload"] else None
     akey = keys.approve_key(repo, pr, head)
-    if db.get_card(c, akey) is None:
+    gate = db.get_card(c, akey)
+    if gate is None:
         db.upsert_card(c, akey, "approve", repo, pr, status="approve_blocked",
                        head_sha=head, blocked=1, payload=meta)
         db.log_event(c, "approve_gate_created", akey, {"head": head})
+    elif gate["status"] == "archived":
+        c.execute("UPDATE cards SET payload=? WHERE id=?",
+                  (json.dumps(meta, ensure_ascii=False), gate["id"]))
+        db.set_status(c, gate["id"], "approve_blocked", blocked=1)
+        db.log_event(c, "approve_gate_reactivated", akey, {"head": head})
     db.set_status(c, review_card["id"], "archived")
 
 
@@ -59,7 +74,16 @@ def _checks_ok(info) -> bool:
 
 def process_gate(c, card):
     """Only runs once operator unblocked the card (status='approving')."""
+    current = c.execute("SELECT status FROM cards WHERE id=?", (card["id"],)).fetchone()
+    if not current or current["status"] != "approving":
+        return
     repo, pr, head = card["repo"], card["pr_number"], card["head_sha"]
+    policy = profiles.policy_from_card(card)
+    if not policy.get("approval_allowed"):
+        db.set_status(c, card["id"], "done")
+        db.log_event(c, "approve_skipped_policy", card["key"],
+                     {"profile_type": policy.get("profile_type"), "mode": policy.get("mode")})
+        return
     info = ghclient.pr_view(repo, pr)
 
     # ADR-007: stale head -> supersede instead of repeat-unblock
@@ -83,7 +107,7 @@ def process_gate(c, card):
         db.log_event(c, "approve_checks_failing_proceed", card["key"],
                      {"note": "CI 실패하지만 사람이 승인 결정 → 진행"})
 
-    body = "LGTM — Hermes 자동 리뷰 통과 후 검수자 승인."
+    body = "🤖 LGTM — Lookout 자동 리뷰 통과 후 검수자 승인."
     if CFG["dry_run_approve"]:
         db.log_event(c, "approve_dryrun", card["key"], {"would_approve": True})
     else:

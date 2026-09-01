@@ -4,6 +4,7 @@ Intake reads are deterministic (no LLM). Mutations (comment/approve) are guarded
 by dry-run flags in the workers, not here.
 """
 import json
+import re
 import subprocess
 
 from . import config
@@ -40,80 +41,9 @@ def pr_diff(repo: str, pr: int) -> str:
     return proc.stdout
 
 
-def review_requested_prs(limit: int = 30) -> list:
-    """내가 리뷰어로 지정된 열린 PR (전체 GitHub). 호출부에서 allowlist로 걸러 씀.
-    gh 없거나 실패해도 예외 대신 빈 리스트 — 브리핑의 부가 섹션이라 조용히 생략."""
-    proc = _run([
-        "search", "prs", "--review-requested=@me", "--state=open",
-        "--limit", str(limit), "--json", "number,title,url,repository,isDraft",
-    ], check=False)
-    if proc.returncode != 0:
-        return []
-    try:
-        rows = json.loads(proc.stdout)
-    except json.JSONDecodeError:
-        return []
-    out = []
-    for r in rows:
-        if r.get("isDraft"):
-            continue
-        repo = (r.get("repository") or {}).get("nameWithOwner", "")
-        out.append({"repo": repo, "number": r.get("number"),
-                    "title": r.get("title", ""), "url": r.get("url", "")})
-    return out
-
-
-def my_commits(repo: str, since_iso: str, until_iso: str, cap: int = 30) -> list:
-    """내가 author인 커밋(주어진 UTC 구간) — 스탠드업 '어제 한 일'용. 병합커밋 제외."""
-    me = my_login()
-    if not me:
-        return []
-    q = f"repos/{repo}/commits?author={me}&since={since_iso}&until={until_iso}&per_page=100"
-    proc = _run(["api", q, "--paginate",
-                 "-q", ".[] | {sha: .sha, msg: .commit.message, url: .html_url, date: .commit.committer.date}"],
-                check=False)
-    if proc.returncode != 0:
-        return []
-    out = []
-    for line in proc.stdout.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            d = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        msg = (d.get("msg") or "").splitlines()[0].strip()  # 첫 줄만
-        if not msg or msg.startswith("Merge "):
-            continue
-        out.append({"sha": (d.get("sha") or "")[:8], "msg": msg,
-                    "url": d.get("url", ""), "date": d.get("date", "")})
-        if len(out) >= cap:
-            break
-    return out
-
-
-def _my_prs_on(date_flag: str, day: str, cap: int = 30) -> list:
-    """date_flag: 'created'|'merged'. day는 'YYYY-MM-DD' 또는 'A..B' 범위."""
-    proc = _run(["search", "prs", "--author=@me", f"--{date_flag}={day}", "--limit", str(cap),
-                 "--json", "number,title,url,repository,createdAt,closedAt"], check=False)
-    if proc.returncode != 0:
-        return []
-    try:
-        rows = json.loads(proc.stdout)
-    except json.JSONDecodeError:
-        return []
-    return [{"repo": (r.get("repository") or {}).get("nameWithOwner", ""),
-             "number": r.get("number"), "title": r.get("title", ""), "url": r.get("url", ""),
-             "created_at": r.get("createdAt", ""), "closed_at": r.get("closedAt", "")} for r in rows]
-
-
-def my_prs_created(day: str) -> list:
-    return _my_prs_on("created", day)
-
-
-def my_prs_merged(day: str) -> list:
-    return _my_prs_on("merged", day)
+def pr_changed_files(repo: str, pr: int) -> list[str]:
+    proc = _run(["pr", "diff", str(pr), "--repo", repo, "--name-only"])
+    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
 
 
 def pr_comment(repo: str, pr: int, body: str) -> str:
@@ -128,7 +58,11 @@ def my_login() -> str:
     global _MY_LOGIN
     if _MY_LOGIN is None:
         proc = _run(["api", "user", "-q", ".login"], check=False)
-        _MY_LOGIN = proc.stdout.strip() if proc.returncode == 0 else ""
+        login = proc.stdout.strip() if proc.returncode == 0 else ""
+        if login:
+            _MY_LOGIN = login
+            return login
+        return ""
     return _MY_LOGIN
 
 
@@ -221,3 +155,89 @@ def list_review_comments(repo: str, pr: int) -> list:
         if line:
             out.append(json.loads(line))
     return out
+
+
+def issue_comments(repo: str, pr: int) -> list:
+    """Issue comments for feedback snapshots."""
+    proc = _run([
+        "api", f"repos/{repo}/issues/{pr}/comments",
+        "--paginate",
+        "-H", "Accept: application/vnd.github+json",
+        "-q", ".[] | {id, html_url, body, created_at, user: .user.login}",
+    ])
+    out = []
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if line:
+            out.append(json.loads(line))
+    return out
+
+
+def pr_author_identity(repo: str, pr: int) -> dict:
+    proc = _run([
+        "api", f"repos/{repo}/pulls/{pr}",
+        "-q", "{login: .user.login, id: (.user.id|tostring)}",
+    ])
+    return json.loads(proc.stdout)
+
+
+def issue_comments_structured(repo: str, pr: int) -> list[dict]:
+    """Issue comments with immutable author ids, sorted as GitHub returned them."""
+    proc = _run([
+        "api", f"repos/{repo}/issues/{pr}/comments", "--paginate",
+        "-q", ".[] | {id: (.id|tostring), author: .user.login, "
+              "author_id: (.user.id|tostring), created_at, body}",
+    ])
+    out = []
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if line:
+            out.append(json.loads(line))
+    return out
+
+
+def finding_author_replies(comments: list[dict], fp: str, author_id: str,
+                           bot_login: str) -> list[dict]:
+    """Verified PR-author replies in the bot finding's own comment window."""
+    marker = f"<!-- hermes:fp={fp} -->"
+    sources = [i for i, comment in enumerate(comments)
+               if comment.get("author") == bot_login and marker in (comment.get("body") or "")]
+    latest_with_reply = []
+    for source_idx in sources:
+        source_body = comments[source_idx].get("body") or ""
+        bundled = source_body.count("<!-- hermes:fp=") > 1
+        replies = []
+        for comment in comments[source_idx + 1:]:
+            body = comment.get("body") or ""
+            if comment.get("author") == bot_login and "<!-- hermes:fp=" in body:
+                break
+            linked = not bundled or re.search(
+                rf"(?<![A-Za-z0-9_.:/#-]){re.escape(fp)}(?![A-Za-z0-9_.:/#-])",
+                body,
+            ) is not None
+            if (linked and str(comment.get("author_id") or "") == str(author_id)
+                    and body.strip()):
+                replies.append({
+                    "id": str(comment["id"]), "author": comment.get("author", ""),
+                    "created_at": comment.get("created_at", ""), "body": body,
+                })
+        if replies:
+            latest_with_reply = replies
+    return latest_with_reply
+
+
+def comment_reactions(repo: str, comment_id: str) -> dict:
+    """Count reactions on one issue comment."""
+    proc = _run([
+        "api", f"repos/{repo}/issues/comments/{comment_id}/reactions",
+        "--paginate",
+        "-H", "Accept: application/vnd.github+json",
+        "-q", ".[].content",
+    ])
+    counts = {"+1": 0, "-1": 0, "confused": 0, "total_count": 0}
+    for line in proc.stdout.splitlines():
+        content = line.strip()
+        if content in counts:
+            counts[content] += 1
+        counts["total_count"] += 1
+    return counts
