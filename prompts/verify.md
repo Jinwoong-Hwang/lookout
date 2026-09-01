@@ -15,6 +15,9 @@ you can confirm it. Use Read/Grep/Glob to check the actual code.
 {DIFF}
 ```
 
+## 변경 파일 (전체 목록)
+{FILES}
+
 ## PR 대화 (이전 코멘트 · 작성자 회신)
 {CONVERSATION}
 

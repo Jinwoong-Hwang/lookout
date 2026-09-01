@@ -13,6 +13,9 @@ code, and read the PR conversation.
 {DIFF}
 ```
 
+## 변경 파일 (전체 목록)
+{FILES}
+
 ## Backend-verified PR author replies
 - PR author: {AUTHOR}
 - Only the JSON comments below were fetched with that author's immutable GitHub user id

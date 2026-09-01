@@ -4,7 +4,10 @@ Only verifier-confirmed findings advance to commenting.
 """
 import json
 
-from . import db, engines, ghclient, profiles, prompt_tpl, worktree
+from . import db, engines, ghclient, prdiff, profiles, prompt_tpl, worktree
+
+# finding 하나만 재검증하므로 리뷰보다 적은 예산으로 충분
+VERIFY_DIFF_CHARS = 40000
 
 
 def process(c, card):
@@ -19,7 +22,7 @@ def process(c, card):
         db.set_status(c, card["id"], terminal)
         return
 
-    diff = ghclient.pr_diff(repo, pr)
+    diff, manifest = prdiff.collect(c, card, VERIFY_DIFF_CHARS)
     conversation = ghclient.pr_conversation(repo, pr)
     engine = card["engine"] or "claude"
     wt = None
@@ -31,7 +34,7 @@ def process(c, card):
                 profiles.prompt_name(policy, "verify"), REPO=repo, PR=pr, HEAD=head,
                 FILE=f["file"], LINE=f["line"], TITLE=f["title"],
                 PROBLEM=detail.get("problem", ""), FIX=detail.get("fix", ""),
-                DIFF=diff[:40000], CONVERSATION=conversation,
+                DIFF=diff, FILES=manifest, CONVERSATION=conversation,
                 CATEGORY=detail.get("category", ""),
                 IMPACT=detail.get("impact", ""),
                 REQUIRED_DECISION=detail.get("required_decision", ""),

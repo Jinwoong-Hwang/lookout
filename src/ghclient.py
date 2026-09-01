@@ -16,6 +16,11 @@ class GhError(RuntimeError):
     pass
 
 
+class DiffTooLarge(GhError):
+    """GitHub refuses diffs over 20,000 lines (HTTP 406). Callers fall back to a
+    local `git diff` in the cached clone."""
+
+
 def _run(args, check=True):
     proc = subprocess.run([GH, *args], capture_output=True, text=True, env=config.subprocess_env())
     if check and proc.returncode != 0:
@@ -37,7 +42,14 @@ def pr_list_open(repo: str) -> list:
 
 
 def pr_diff(repo: str, pr: int) -> str:
-    proc = _run(["pr", "diff", str(pr), "--repo", repo])
+    """Unified diff via the API. Raises DiffTooLarge when the PR exceeds GitHub's
+    20k-line diff cap — worktree.local_diff() computes it from the clone instead."""
+    proc = _run(["pr", "diff", str(pr), "--repo", repo], check=False)
+    if proc.returncode != 0:
+        err = proc.stderr.strip()
+        if "too_large" in err or "exceeded the maximum number of lines" in err:
+            raise DiffTooLarge(err)
+        raise GhError(f"gh pr diff {pr} --repo {repo} failed: {err}")
     return proc.stdout
 
 

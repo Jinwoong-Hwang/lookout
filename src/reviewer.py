@@ -7,10 +7,13 @@ import hashlib
 import json as _json
 import re
 
-from . import db, doc_planner, engines, ghclient, keys, profiles, prompt_tpl, worktree
+from . import db, doc_planner, engines, ghclient, keys, prdiff, profiles, prompt_tpl, worktree
 from .config import CFG
 
 ACTIONABLE_SEVERITY_DOC = {"blocking", "should-fix"}
+
+# closure 프롬프트는 finding 하나만 판단하므로 리뷰보다 적은 예산으로 충분
+CLOSURE_DIFF_CHARS = 40000
 
 
 def _is_stale(card) -> bool:
@@ -68,6 +71,8 @@ def _run_closure(c, card, priors, diff, engine, wt, policy,
                  author: dict, comments: list[dict], plan=None):
     """Re-judge previous findings using backend-verified PR-author replies."""
     prompt_file = profiles.prompt_name(policy, "closure")
+    # 문자로 자르면 파일 중간에서 끊기므로 여기서도 파일 단위로 다시 담는다
+    cdiff, cfiles, _ = prdiff.pack(diff, CLOSURE_DIFF_CHARS)
     for pf in priors:
         decision_head = pf["decision_head"]
         if pf["status"] in {"dismissed", "deferred", "dismiss_pending", "defer_pending"}:
@@ -88,7 +93,8 @@ def _run_closure(c, card, priors, diff, engine, wt, policy,
         detail = _json.loads(pf["body"]) if pf["body"] else {}
         cprompt = prompt_tpl.render(
             prompt_file, FILE=pf["file"], LINE=pf["line"], TITLE=pf["title"],
-            PROBLEM=detail.get("problem", ""), DIFF=diff[:40000], STATUS=pf["status"],
+            PROBLEM=detail.get("problem", ""), DIFF=cdiff, FILES=cfiles,
+            STATUS=pf["status"],
             AUTHOR=author.get("login", ""),
             REPLIES_JSON=_json.dumps(replies, ensure_ascii=False),
             PLAN_JSON=doc_planner.dumps(plan or {}),
@@ -140,7 +146,9 @@ def refresh_author_decisions(c, card):
     try:
         author = ghclient.pr_author_identity(card["repo"], card["pr_number"])
         comments = ghclient.issue_comments_structured(card["repo"], card["pr_number"])
-        diff = ghclient.pr_diff(card["repo"], card["pr_number"])
+        # pr_diff는 대형 PR에서 DiffTooLarge(=GhError)를 던져 아래 except가 삼킨다.
+        # 그러면 작성자 회신 재확인이 조용히 건너뛰어지므로 로컬 폴백을 쓴다.
+        diff = prdiff.fetch(c, card)
     except ghclient.GhError as e:
         db.log_event(c, "closure_context_error", card["key"], {"error": str(e)})
         return
@@ -163,7 +171,8 @@ def process(c, card):
         return
 
     db.set_status(c, card["id"], "reviewing")
-    diff = ghclient.pr_diff(repo, pr)
+    raw_diff = prdiff.fetch(c, card)
+    diff, manifest = prdiff.pack_logged(c, card, raw_diff)
     conversation = ghclient.pr_conversation(repo, pr)
     meta = _payload(card)
     engine = card["engine"] or "claude"
@@ -182,7 +191,7 @@ def process(c, card):
         wt = worktree.make_worktree(repo, pr, head)
         if is_doc:
             changed_files = ghclient.pr_changed_files(repo, pr)
-            plan = doc_planner.build_plan(repo, pr, wt, diff, changed_files, policy)
+            plan = doc_planner.build_plan(repo, pr, wt, raw_diff, changed_files, policy)
             meta["doc_review_plan"] = plan
             _save_payload(c, card["id"], meta)
             db.log_event(c, "doc_review_plan", card["key"], plan)
@@ -204,7 +213,7 @@ def process(c, card):
             prompt = prompt_tpl.render(
                 profiles.prompt_name(policy, "review", engine),
                 REPO=repo, PR=pr, TITLE=meta.get("title", ""),
-                AUTHOR=meta.get("author", ""), HEAD=head, DIFF=diff[:120000],
+                AUTHOR=meta.get("author", ""), HEAD=head, DIFF=diff, FILES=manifest,
                 CONVERSATION=conversation, MAX_FINDINGS=policy["max_findings"],
                 REVIEW_MODE=plan["review_mode"], PLAN_JSON=doc_planner.dumps(plan),
                 DOC_CONTEXT=context,
@@ -215,7 +224,7 @@ def process(c, card):
             prompt = prompt_tpl.render(
                 profiles.prompt_name(policy, "review", engine),
                 REPO=repo, PR=pr, TITLE=meta.get("title", ""),
-                AUTHOR=meta.get("author", ""), HEAD=head, DIFF=diff[:120000],
+                AUTHOR=meta.get("author", ""), HEAD=head, DIFF=diff, FILES=manifest,
                 CONVERSATION=conversation, MAX_FINDINGS=policy["max_findings"],
             )
         result = engines.run_json(prompt, engine=engine, cwd=wt, add_dir=wt)

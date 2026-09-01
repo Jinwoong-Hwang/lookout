@@ -88,5 +88,8 @@
 
   "max_findings_per_review": 8,
   "min_confidence": "medium",
-  "max_concurrent_reviews": 3
+  "max_concurrent_reviews": 3,
+
+  "_max_diff_chars": "프롬프트에 넣을 diff 예산(문자). 초과하면 파일 단위로 담고, 빠진 파일은 목록으로 알려 리뷰어가 워크트리에서 직접 열게 함.",
+  "max_diff_chars": 120000
 }

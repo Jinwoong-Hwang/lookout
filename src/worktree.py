@@ -99,6 +99,32 @@ def make_worktree(repo: str, pr: int, head_sha: str) -> str:
     return wt
 
 
+def local_diff(repo: str, pr: int, head_sha: str, base_ref: str) -> str:
+    """Three-dot diff computed in the cached clone — the fallback for PRs whose
+    diff GitHub's API refuses (>20k lines).
+
+    Same semantics as the PR page: merge-base(base tip, head)..head. The base tip
+    is fetched into a throwaway ref (deleted after) so nothing pins objects; if the
+    base branch is gone (renamed/deleted after the PR opened) we fall back to the
+    clone's default branch, which is wrong-but-readable rather than a hard failure.
+    """
+    repo_dir = ensure_clone(repo)
+    tmp_ref = f"refs/lookout/base/pr{pr}"
+    with _repo_lock(repo):
+        _git(repo_dir, "fetch", "--quiet", "origin", f"pull/{pr}/head")
+        fetched = _git(repo_dir, "fetch", "--quiet", "origin",
+                       f"+{base_ref}:{tmp_ref}", check=False)
+        base = tmp_ref
+        if fetched.returncode != 0:
+            _git(repo_dir, "remote", "set-head", "origin", "--auto", check=False)
+            base = "origin/HEAD"
+        try:
+            mb = _git(repo_dir, "merge-base", base, head_sha).stdout.strip()
+            return _git(repo_dir, "diff", mb, head_sha, timeout=900).stdout
+        finally:
+            _git(repo_dir, "update-ref", "-d", tmp_ref, check=False)
+
+
 def remove_worktree(repo: str, wt: str):
     repo_dir = os.path.join(config.path(CFG["repo_cache_dir"]), _slug(repo))
     with _repo_lock(repo):
