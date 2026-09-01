@@ -75,9 +75,13 @@ Lookout.app(메뉴바+창) ─────────────────�
 - **터미널에서**:
 ```bash
 ./update.sh --check   # origin(GitHub repo) 기준으로 새 버전 있는지만 확인
-./update.sh           # git pull + 데몬 재시작 + (변경 시) 앱 재빌드/재설치 + config 새 키 머지
+./update.sh           # origin 기준 정렬 + 데몬 재시작 + (변경 시) 앱 재빌드/재설치 + config 새 키 머지
 ```
 > 업데이트 확인 기준은 clone의 `origin`(이 repo)입니다. config.json은 gitignore라 덮어쓰지 않고, 새로 생긴 키만 비워서 채워줍니다. 앱 자체가 갱신되면 "재실행" 팝업이 뜹니다.
+
+> **clone은 배포 타겟입니다** — 설정·상태는 전부 gitignore라, 추적되는 파일은 upstream과 같아야 정상입니다. 그래서 머지가 아니라 `origin` 기준 강제 정렬로 적용합니다.
+> 로컬에서 손댄 파일이나 push 안 된 커밋이 있으면 **버리지 않고 `backup/pre-update-<시각>` 브랜치에 통째로 보존한 뒤** 정렬합니다 (미추적 파일 포함). 되돌리려면 `git checkout backup/pre-update-…`.
+> 이 clone에서 직접 개발하지 마세요 — 매 업데이트마다 백업 브랜치가 쌓입니다.
 
 ## 운영
 ```bash
