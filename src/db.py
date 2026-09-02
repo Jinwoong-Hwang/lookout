@@ -288,6 +288,21 @@ def findings_for_card(c, card_id, status=None):
     return c.execute("SELECT * FROM findings WHERE card_id=?", (card_id,)).fetchall()
 
 
+def postable_findings_for_card(c, card_id):
+    """Findings on this card the author still needs to see.
+
+    'unresolved' belongs here next to 'confirmed': the reviewer reattaches a
+    prior unresolved finding as 'confirmed' to force a reminder, and the
+    commenter's own closure re-check can downgrade it back to 'unresolved'
+    moments later.  Selecting 'confirmed' alone dropped that reminder silently.
+    """
+    return c.execute(
+        """SELECT * FROM findings WHERE card_id=?
+           AND status IN ('confirmed','unresolved') ORDER BY id""",
+        (card_id,),
+    ).fetchall()
+
+
 def prior_open_findings(c, repo, pr, exclude_card_id):
     """Earlier findings that need closure at a new head.
 

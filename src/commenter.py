@@ -119,7 +119,7 @@ def process(c, card):
         db.log_event(c, "comment_held_author_decision", card["key"])
         return
 
-    confirmed = db.findings_for_card(c, card["id"], status="confirmed")
+    postable = db.postable_findings_for_card(c, card["id"])
     comment_policy = policy.get("comment_policy", "global")
     effective_dry_run = bool(CFG["dry_run_comments"]) or comment_policy == "dry_run"
     silent = comment_policy == "silent"
@@ -133,20 +133,24 @@ def process(c, card):
 
     # force면 마커 중복 무시하고 전부 게시, 아니면 아직 안 올라간 것만
     fresh = []
-    for f in confirmed:
+    for f in postable:
         if not force and any(_marker(f["fp"]) in b for b in posted_bodies):
             db.set_finding_status(c, f["id"], "posted", comment_id="exists")
         else:
             fresh.append(f)
 
-    if force:  # 1회성 플래그 — 게시 후 재사용 방지
+    if not fresh:
+        # 조용히 끝내면 "댓글 없이 댓글완료"로 남아 원인을 못 찾는다.
+        db.set_status(c, card["id"], "commented")
+        db.log_event(c, "comment_nothing_to_post", card["key"],
+                     {"force": force, "postable": len(postable),
+                      "card_findings": len(db.findings_for_card(c, card["id"]))})
+        return
+
+    if force:  # 1회성 플래그 — 게시할 게 확정된 뒤에만 소진
         meta.pop("force_post", None)
         c.execute("UPDATE cards SET payload=? WHERE id=?",
                   (json.dumps(meta, ensure_ascii=False), card["id"]))
-
-    if not fresh:
-        db.set_status(c, card["id"], "commented")
-        return
 
     subject = _review_subject(policy)
     body = render_bundle(author, fresh, mention=force or not already, intro=intro,
