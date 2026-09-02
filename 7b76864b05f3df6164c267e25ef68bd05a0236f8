@@ -1,0 +1,17 @@
+src/commenter.py
+  h_03b13cada2edad 122,136,143,145-147,150-154
+src/db.py
+  h_03b13cada2edad 291-305
+tests/test_commenter_reminder.py
+  h_03b13cada2edad 1-119
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "7b76864b05f3df6164c267e25ef68bd05a0236f8",
+  "prompts": {},
+  "humans": {
+    "h_03b13cada2edad": {
+      "author": "woong@zigbang.com"
+    }
+  }
+}
