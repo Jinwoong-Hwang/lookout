@@ -1,3 +1,4 @@
+import json
 import sqlite3
 import unittest
 from contextlib import contextmanager
@@ -63,6 +64,32 @@ class RereviewTest(unittest.TestCase):
             self.c.execute("SELECT status FROM cards WHERE id=?", (self.source_id,)).fetchone()["status"],
             "commented",
         )
+
+    def test_refusal_is_logged_with_reason(self):
+        """토스트만 뜨고 로그가 없으면 왜 안 눌리는지 못 찾는다."""
+        def last_refusal():
+            row = self.c.execute(
+                """SELECT * FROM events WHERE type='operator_rereview_refused'
+                   ORDER BY id DESC LIMIT 1""",
+            ).fetchone()
+            return json.loads(row["detail"]) if row else None
+
+        # 새 커밋이 올라온 뒤 낡은 카드에서 누른 경우
+        ghclient.pr_view = lambda *_: {
+            "state": "OPEN", "isDraft": False, "headRefOid": "new-head",
+        }
+        self.assertIsNone(router.create_rereview(self.c, self.source_id, "codex"))
+        detail = last_refusal()
+        self.assertEqual(detail["reason"], "head_moved")
+        self.assertEqual(detail["card_head"], "head")
+        self.assertEqual(detail["pr_head"], "new-head")
+
+        # 리뷰가 아직 진행 중인 카드
+        db.set_status(self.c, self.source_id, "reviewing")
+        self.assertIsNone(router.create_rereview(self.c, self.source_id, "codex"))
+        detail = last_refusal()
+        self.assertEqual(detail["reason"], "status_not_eligible")
+        self.assertEqual(detail["source_status"], "reviewing")
 
     def test_dashboard_action_starts_rereview(self):
         old_connect = db.connect

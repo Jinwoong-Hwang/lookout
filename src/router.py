@@ -75,11 +75,23 @@ def ensure_pr_cards(c, repo: str, pr: int, source: str = "webhook"):
     return root_id
 
 
+def _rereview_refused(c, source, source_card_id: int, reason: str, **extra):
+    """거부 이유를 남긴다 — 토스트만 뜨고 로그가 없으면 원인을 못 찾는다."""
+    detail = {"source_card_id": source_card_id, "reason": reason}
+    if source is not None:
+        detail["source_status"] = source["status"]
+        detail["card_head"] = source["head_sha"]
+    detail.update(extra)
+    db.log_event(c, "operator_rereview_refused",
+                 source["key"] if source is not None else None, detail)
+    return None
+
+
 def create_rereview(c, source_card_id: int, engine: str):
     """Atomically create one same-head review attempt for a terminal card."""
     source = c.execute("SELECT * FROM cards WHERE id=?", (source_card_id,)).fetchone()
     if not source:
-        return None
+        return _rereview_refused(c, None, source_card_id, "card_gone")
     target_key = keys.rereview_key(
         source["repo"], source["pr_number"], source["head_sha"], source_card_id,
     )
@@ -92,19 +104,25 @@ def create_rereview(c, source_card_id: int, engine: str):
         source["kind"] == "approve" and source["status"] in {"approve_blocked", "done"}
     )
     if not allowed:
-        return None
+        return _rereview_refused(c, source, source_card_id, "status_not_eligible")
 
     info = ghclient.pr_view(source["repo"], source["pr_number"])
-    if (info.get("state") != "OPEN" or info.get("isDraft") or
-            info.get("headRefOid") != source["head_sha"]):
-        return None
+    if info.get("state") != "OPEN":
+        return _rereview_refused(c, source, source_card_id, "pr_not_open",
+                                 pr_state=info.get("state"))
+    if info.get("isDraft"):
+        return _rereview_refused(c, source, source_card_id, "pr_draft")
+    if info.get("headRefOid") != source["head_sha"]:
+        # 새 커밋이 올라온 뒤 낡은 카드에서 누른 경우 — poller가 만든 새 카드로 가야 한다.
+        return _rereview_refused(c, source, source_card_id, "head_moved",
+                                 pr_head=info.get("headRefOid"))
 
     try:
         c.execute("BEGIN IMMEDIATE")
         source = c.execute("SELECT * FROM cards WHERE id=?", (source_card_id,)).fetchone()
         if not source:
             c.execute("ROLLBACK")
-            return None
+            return _rereview_refused(c, None, source_card_id, "card_gone_race")
         existing = db.get_card(c, target_key)
         if existing:
             c.execute("COMMIT")
@@ -116,7 +134,8 @@ def create_rereview(c, source_card_id: int, engine: str):
         )
         if not allowed or source["head_sha"] != info["headRefOid"]:
             c.execute("ROLLBACK")
-            return None
+            return _rereview_refused(c, source, source_card_id, "changed_under_us",
+                                     pr_head=info.get("headRefOid"))
 
         payload = {
             "title": info.get("title"), "url": info.get("url"),
