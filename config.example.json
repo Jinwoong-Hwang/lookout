@@ -23,6 +23,15 @@
   "slack_user_id": "",
   "slack_workspace": "",
 
+  "_issues": "(선택) 작업 진입점 — 할당된 GitHub 이슈를 triage 카드로 올린다. issue_repos가 비면 이 기능은 꺼진다.",
+  "issue_repos": ["your-org/product-hub"],
+  "_issue_assignee": "gh --assignee 값. '@me'면 내게 할당된 것만. 비우면 필터 없음(대량 주의).",
+  "issue_assignee": "@me",
+  "_issue_title_prefixes": "제목 태그로 추가 필터(예: [\"[FE]\"]). 비우면 필터 없음.",
+  "issue_title_prefixes": [],
+  "_issue_display_prefix": "카드에 보일 별칭 접두어. repo -> prefix (PH-1767처럼 보인다).",
+  "issue_display_prefix": { "your-org/product-hub": "PH" },
+
   "_allowlist": "리뷰 대상 repo (owner/repo). 본인이 gh로 접근 가능한 repo만.",
   "allowlist": [
     "your-org/your-repo"

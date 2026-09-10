@@ -242,11 +242,38 @@ def set_engine(c, card_id: int, engine: str):
     c.execute("UPDATE cards SET engine=?, updated_at=? WHERE id=?", (engine, now(), card_id))
 
 
-def cards_in(c, statuses):
+def cards_in(c, statuses, kind=None):
+    """Cards sitting in the given lanes, oldest-touched first.
+
+    이 함수는 status만 본다. 그래서 새 kind가 기존 상태 이름을 하나라도 재사용하면
+    그 카드가 남의 스테이지(예: reviewer.process)로 조용히 들어간다. 호출부가 자기
+    kind를 넘겨 거르는 것이 유일한 구조적 방어이므로 스테이지 호출은 kind를 명시한다.
+    """
     q = ",".join("?" * len(statuses))
+    if kind is None:
+        return c.execute(
+            f"SELECT * FROM cards WHERE status IN ({q}) ORDER BY updated_at ASC", statuses
+        ).fetchall()
     return c.execute(
-        f"SELECT * FROM cards WHERE status IN ({q}) ORDER BY updated_at ASC", statuses
+        f"SELECT * FROM cards WHERE status IN ({q}) AND kind=? ORDER BY updated_at ASC",
+        (*statuses, kind),
     ).fetchall()
+
+
+def merge_payload(c, card_id: int, patch: dict) -> dict:
+    """payload(JSON)에 키를 병합한다.
+
+    한 카드의 payload를 poller(제목·라벨)·대시보드(추가 지시)·워커(스레드 id)가 각각
+    다른 키로 쓴다. 통째로 덮으면 서로의 값을 지우므로 항상 병합한다."""
+    row = c.execute("SELECT payload FROM cards WHERE id=?", (card_id,)).fetchone()
+    try:
+        cur = json.loads(row["payload"]) if row and row["payload"] else {}
+    except (TypeError, ValueError):
+        cur = {}
+    cur.update(patch)
+    c.execute("UPDATE cards SET payload=?, updated_at=? WHERE id=?",
+              (json.dumps(cur, ensure_ascii=False), now(), card_id))
+    return cur
 
 
 # ---- seen heads (ADR-003 onboarding backfill skip) ------------------------

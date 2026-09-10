@@ -38,6 +38,7 @@ def _maybe_poll():
         return
     with db.connect() as c:
         poller.poll(c)
+        poller.poll_issues(c)
         db.set_meta(c, "last_poll", str(time.time()))
 
 
@@ -131,11 +132,14 @@ def _process_one(fn, card, label):
                         db.set_status(c, card["id"], card["status"], blocked=card["blocked"])
 
 
-def _stage(statuses, fn, label):
+def _stage(statuses, fn, label, kind=None):
     """Process cards in `statuses` concurrently (cap MAX_CONCURRENT), each in its
-    own transaction; errors isolated. Same-repo git is serialized in worktree.py."""
+    own transaction; errors isolated. Same-repo git is serialized in worktree.py.
+
+    kind는 필수에 가깝다 — cards_in은 status만 보므로, 넘기지 않으면 같은 상태 이름을
+    쓰는 다른 kind의 카드가 이 스테이지로 들어온다."""
     with db.connect() as c:
-        cards = db.cards_in(c, statuses)
+        cards = db.cards_in(c, statuses, kind)
         if label in RETRYABLE_STAGES:  # 실패 직후 같은 tick에서 재시도하지 않게
             cards = [x for x in cards if not _cooling(c, x)]
     if not cards:
@@ -148,21 +152,21 @@ def _stage(statuses, fn, label):
         list(ex.map(lambda card: _process_one(fn, card, label), cards))
 
 
-def _drain(statuses, fn, label, max_waves=30):
+def _drain(statuses, fn, label, max_waves=30, kind=None):
     """Keep processing `statuses` until empty — so cards that arrive mid-tick
     (e.g. clicked while a review runs) get picked up by the same tick, instead of
     waiting for the next one. Up to MAX_CONCURRENT at a time per wave."""
     for _ in range(max_waves):
         with db.connect() as c:
-            has = bool(db.cards_in(c, statuses))
+            has = bool(db.cards_in(c, statuses, kind))
         if not has:
             return
-        _stage(statuses, fn, label)
+        _stage(statuses, fn, label, kind)
 
 
 def _monitor_roots():
     with db.connect() as c:
-        roots = [r for r in db.cards_in(c, ["monitoring"]) if r["kind"] == "root"]
+        roots = db.cards_in(c, ["monitoring"], kind="root")
     for card in roots:
         try:
             with db.connect() as c:
@@ -172,11 +176,11 @@ def _monitor_roots():
                 db.log_event(c, "stage_error", card["key"], {"stage": "monitor_root"})
 
 
-def _wave(statuses, fn, label):
+def _wave(statuses, fn, label, kind=None):
     """리뷰/검증을 한 번에 MAX_CONCURRENT개씩만 처리(드레인 X) — 사이사이
     다운스트림(게이트/댓글)을 끼워넣어 lgtm이 긴 드레인에 막히지 않게."""
     with db.connect() as c:
-        cards = [x for x in db.cards_in(c, statuses) if not _cooling(c, x)][:MAX_CONCURRENT]
+        cards = [x for x in db.cards_in(c, statuses, kind) if not _cooling(c, x)][:MAX_CONCURRENT]
     if not cards:
         return 0
     if len(cards) == 1:
@@ -189,9 +193,9 @@ def _wave(statuses, fn, label):
 
 def _fast_stages():
     """빠른(LLM 없는) 단계 — 게이트 생성/댓글 게시/승인. 자주 돌려도 가벼움."""
-    _stage(["lgtm"], approver.create_gate, "create_gate")
-    _stage(["commenting"], commenter.process, "commenter")
-    _stage(["approving"], approver.process_gate, "approver")
+    _stage(["lgtm"], approver.create_gate, "create_gate", kind="review")
+    _stage(["commenting"], commenter.process, "commenter", kind="review")
+    _stage(["approving"], approver.process_gate, "approver", kind="approve")
 
 
 def run_once():
@@ -202,17 +206,19 @@ def run_once():
 
     # 1) 빠른 정리/진행 먼저 — 느린 리뷰에 막히지 않게 (머지·stale 즉시 archive)
     _monitor_roots()                                                  # 머지/닫힘 PR archive
-    _stage(["reviewing", "verifying", "commenting"], monitor.process_active_stale, "monitor_active_stale")
-    _stage(["commented"], monitor.process_commented, "monitor_commented")
-    _stage(["triage", "failed"], monitor.process_triage, "monitor_triage")
-    _stage(["approve_blocked"], monitor.process_approve_stale, "monitor_approve_stale")
+    _stage(["reviewing", "verifying", "commenting"], monitor.process_active_stale,
+           "monitor_active_stale", kind="review")
+    _stage(["commented"], monitor.process_commented, "monitor_commented", kind="review")
+    _stage(["triage", "failed"], monitor.process_triage, "monitor_triage", kind="review")
+    _stage(["approve_blocked"], monitor.process_approve_stale,
+           "monitor_approve_stale", kind="approve")
     _fast_stages()
 
     # 2) 리뷰/검증을 wave 단위로 — 매 wave 뒤에 게이트/댓글을 끼워넣어, 리뷰가 lgtm을 만들면
     #    같은 tick에서 바로 게이트로 넘어감 (긴 드레인이 lgtm을 막던 문제 해소)
     for _ in range(60):
-        did = _wave(["intake"], reviewer.process, "reviewer")
-        did += _wave(["verifying"], verifier.process, "verifier")
+        did = _wave(["intake"], reviewer.process, "reviewer", kind="review")
+        did += _wave(["verifying"], verifier.process, "verifier", kind="review")
         _fast_stages()
         if did == 0:
             break

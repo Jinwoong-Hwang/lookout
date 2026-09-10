@@ -35,7 +35,7 @@ WRITE_NETWORKS = tuple(ipaddress.ip_network(cidr) for cidr in
                        CFG.get("dashboard_write_networks", ["127.0.0.0/8", "::1/128"]))
 
 LANES = [
-    ("triage", "📥 Triage (리뷰 대기)"),
+    ("triage", "📥 Triage (대기)"),
     ("intake", "⏳ 시작됨"),
     ("reviewing", "🔍 리뷰 중"),
     ("verifying", "🧪 검증 중"),
@@ -46,6 +46,12 @@ LANES = [
     ("approving", "🚀 승인 중"),
     ("done", "🏁 완료 · 머지 대기"),
     ("failed", "⚠️ 실패 (재시도 필요)"),
+    # 이슈 작업 레인 — PR 리뷰 흐름(위)과 상태 이름이 겹치지 않아야 한다.
+    # 겹치면 db.cards_in(kind=)로 걸러도 대시보드 레인에서 섞인다.
+    ("spec", "🗣 설계 토론"),
+    ("implementing", "🛠 구현 중"),
+    ("impl_verify", "🧾 구현 검증"),
+    ("pr_blocked", "🔒 PR 승인 대기"),
 ]
 
 
@@ -59,6 +65,25 @@ def build_board():
             meta = json.loads(card["payload"]) if card["payload"] else {}
             if isinstance(meta, str):  # tolerate legacy double-encoded payloads
                 meta = json.loads(meta)
+            if card["kind"] == "issue":
+                # 이슈에는 head/findings/closure/피드백이 없다. PR용 조회를 태우면
+                # 전부 빈 값이 나오므로 여기서 끊고 작업 카드에 필요한 것만 싣는다.
+                out.append({
+                    "id": card["id"], "kind": "issue", "status": card["status"],
+                    "engine": card["engine"] or "claude",
+                    "repo": card["repo"], "pr": card["pr_number"],
+                    "display": meta.get("display") or f"#{card['pr_number']}",
+                    "title": meta.get("title", ""), "url": meta.get("url", ""),
+                    "author": ", ".join(meta.get("assignees") or []),
+                    "labels": meta.get("labels") or [],
+                    "assignees": meta.get("assignees") or [],
+                    "instruction": meta.get("instruction", ""),
+                    "mode": meta.get("mode", ""),
+                    "head": "", "blocked": card["blocked"],
+                    "findings": [], "comments": [], "dryrun_pending": False,
+                    "feedback": None, "closure": {}, "error": "",
+                })
+                continue
             findings = []
             for f in db.findings_for_card(c, card["id"]):
                 detail = json.loads(f["body"]) if f["body"] else {}
@@ -135,7 +160,10 @@ def build_board():
 ACTIVE_REVIEW = ("intake", "reviewing", "verifying", "commenting")
 
 
-def do_action(action, card_id, engine="claude"):
+WORK_START = {"start_impl": "implementing", "start_debate": "spec"}
+
+
+def do_action(action, card_id, engine="claude", text=None):
     if engine not in ("claude", "codex"):
         engine = "claude"
     kick = False
@@ -151,6 +179,23 @@ def do_action(action, card_id, engine="claude"):
             db.set_engine(c, card["id"], engine)
             db.set_status(c, card["id"], "intake")
             db.log_event(c, "operator_start", card["key"], {"engine": engine})
+            kick = True
+        elif action == "save_instruction" and card["kind"] == "issue":
+            # 시작 전에만 고칠 수 있다 — 워커가 seed를 읽은 뒤 바뀌면 로그와 실제 작업이 어긋난다.
+            if card["status"] != "triage":
+                return False
+            db.merge_payload(c, card["id"], {"instruction": (text or "").strip()})
+        elif action in WORK_START and card["kind"] == "issue":
+            if card["status"] != "triage":
+                return False
+            if not engines.is_ready(engine):
+                db.log_event(c, "work_start_blocked", card["key"], {"engine": engine})
+                return False
+            mode = "debate" if action == "start_debate" else "implement"
+            db.set_engine(c, card["id"], engine)
+            db.merge_payload(c, card["id"], {"mode": mode})
+            db.set_status(c, card["id"], WORK_START[action])
+            db.log_event(c, "work_started", card["key"], {"mode": mode, "engine": engine})
             kick = True
         elif action == "ignore":
             db.set_status(c, card["id"], "archived")
@@ -444,6 +489,13 @@ display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hi
 .dot{width:9px;height:9px;border-radius:50%;display:inline-block}
 .high{background:var(--bad)}.medium{background:var(--warn)}.low{background:var(--accent)}
 .btns{display:flex;gap:7px;margin-top:11px}
+.instr{margin-top:9px}
+.instr textarea{width:100%;box-sizing:border-box;min-height:44px;resize:vertical;
+  background:var(--panel);color:var(--fg);border:1px solid var(--line);border-radius:6px;
+  padding:6px 7px;font:inherit;font-size:11.5px;line-height:1.4}
+.instr textarea::placeholder{color:var(--dim)}
+.instrline{margin-top:6px;font-size:11px;line-height:1.35;color:var(--muted);
+  white-space:pre-wrap;word-break:break-word}
 .rev{display:flex;gap:7px;margin-top:11px}
 .rev button{flex:1}
 .rev button:disabled{background:var(--panel);border-color:var(--line);color:var(--dim);filter:none;cursor:not-allowed}
@@ -578,7 +630,9 @@ const STATUS_META={
   commenting:{c:'#fbbf24',ko:'댓글작성'}, commented:{c:'#4ade80',ko:'댓글완료'},
   lgtm:{c:'#4ade80',ko:'LGTM'}, approve_blocked:{c:'#a78bfa',ko:'승인대기'},
   approving:{c:'#a78bfa',ko:'승인중'}, done:{c:'#6b7688',ko:'완료'},
-  failed:{c:'#fb7185',ko:'실패'}};
+  failed:{c:'#fb7185',ko:'실패'},
+  spec:{c:'#a78bfa',ko:'설계토론'}, implementing:{c:'#fbbf24',ko:'구현중'},
+  impl_verify:{c:'#fbbf24',ko:'구현검증'}, pr_blocked:{c:'#a78bfa',ko:'PR승인대기'}};
 function smeta(s){return STATUS_META[s]||{c:'#6b7688',ko:s};}
 function esc(s){return (s||"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]))}
 function repoShort(r){return (r||'').split('/')[1]||r;}
@@ -714,7 +768,37 @@ function renderByAuthor(){
     sec.appendChild(cc);board.appendChild(sec);
   });
 }
+function issueTile(c){
+  const el=document.createElement('div');el.className='card';
+  const sm=smeta(c.status);el.style.borderLeftColor=stripe(sm.c);
+  const rc=repoColor(c.repo);
+  const repoPill=`<span class="repopill" style="${pill(rc)}"><span class="rdot" style="background:${rc}"></span>${esc(repoShort(c.repo))}</span>`;
+  const statusPill=`<span class="statuspill" style="${pill(sm.c)}">${sm.ko}</span>`;
+  const asg=(c.assignees||[]).map(a=>`<span class="pill">${esc(a)}</span>`).join('');
+  const labs=(c.labels||[]).slice(0,4).map(l=>`<span class="pill">${esc(l)}</span>`).join('');
+  let body='', xbtn='';
+  if(c.status==='triage'){
+    xbtn=`<button class="xbtn" title="목록에서 제외" onclick="ignoreCard(event,${c.id})">✕</button>`;
+    body=`<div class="instr">
+      <textarea id="ins${c.id}" placeholder="추가 지시 (선택) — 이 이슈를 어떻게 처리할지"
+        onclick="event.stopPropagation()" onkeydown="event.stopPropagation()">${esc(c.instruction)}</textarea>
+      <div class="rev">
+        <button class="claude" onclick="startWork(event,${c.id},'implement')">🛠 바로 구현</button>
+        <button class="codex" onclick="startWork(event,${c.id},'debate')">🗣 설계부터</button>
+      </div></div>`;
+  }else if(c.instruction){
+    body=`<div class="instrline">📝 ${esc(c.instruction)}</div>`;
+  }
+  const modePill=c.mode?`<span class="pill">${c.mode==='debate'?'설계부터':'바로구현'}</span>`:'';
+  el.innerHTML=`${xbtn}<div class="pr">${repoPill} <span class="num">${esc(c.display)}</span></div>
+    <div class="title"><a href="${esc(c.url)}" target="_blank" rel="noreferrer"
+      onclick="event.stopPropagation()">${esc(c.title)||'(제목없음)'}</a></div>
+    <div class="row">${statusPill}${asg}${modePill}</div>
+    ${labs?`<div class="row">${labs}</div>`:''}${body}`;
+  return el;
+}
 function tile(c){
+  if(c.kind==='issue')return issueTile(c);
   const el=document.createElement('div');el.className='card';
   const dots=c.findings.map(f=>`<span class="dot ${f.severity||'low'}"></span>`).join('');
   let btns='', xbtn='';
@@ -819,6 +903,19 @@ function showToast(msg,spin){
   t.classList.add('show');clearTimeout(window._tt);
   window._tt=setTimeout(()=>t.classList.remove('show'),2600);
 }
+async function startWork(e,id,mode){e.stopPropagation();
+  const ta=document.getElementById('ins'+id);
+  const text=ta?ta.value:'';
+  showToast(mode==='debate'?'설계 토론 시작 🗣':'구현 시작 🛠',true);
+  const send=(body)=>fetch('/api/action',{method:'POST',
+    headers:{'Content-Type':'application/json','X-Lookout-Action':'1'},
+    body:JSON.stringify(body)}).then(r=>r.json()).catch(()=>({ok:false}));
+  // 지시를 먼저 저장한다 — 시작이 먼저 들어가면 워커가 지시 없는 seed를 읽을 수 있다
+  if(text.trim()&&!(await send({action:'save_instruction',card_id:id,text})).ok){
+    showToast('지시 저장 실패 — 시작하지 않았습니다',false);load();return;}
+  const j=await send({action:mode==='debate'?'start_debate':'start_impl',card_id:id,engine:'claude'});
+  if(j.ok===false)showToast('시작할 수 없습니다 — 엔진 상태를 확인하세요',false);
+  load();}
 function stopReview(e,id){e.stopPropagation();
   if(confirm('이 리뷰를 강제 중지할까요? (진행 중인 분석을 종료하고 목록에서 제외)'))act(e,'stop',id);}
 function reReview(e,id){e.stopPropagation();
@@ -904,7 +1001,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path == "/api/action":
             ok = do_action(data.get("action"), int(data.get("card_id", 0)),
-                           data.get("engine", "claude"))
+                           data.get("engine", "claude"), data.get("text"))
         elif self.path == "/api/finding-action":
             ok = do_finding_action(data.get("action"), int(data.get("finding_id", 0)))
         elif self.path == "/api/mention-action":

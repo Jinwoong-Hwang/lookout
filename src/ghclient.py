@@ -41,6 +41,31 @@ def pr_list_open(repo: str) -> list:
     return json.loads(proc.stdout)
 
 
+def issue_list(repo: str, assignee: str = None, title_prefixes=None,
+               limit: int = 100) -> list:
+    """Open issues for the work board.
+
+    `gh issue list`는 PR을 섞어 주지 않으므로 여기서 얻는 번호는 이슈 번호다.
+    title_prefixes는 서버가 못 걸러주는 조건([FE] 같은 제목 태그)이라 클라이언트에서 건다."""
+    fields = "number,title,url,labels,assignees,updatedAt,author"
+    args = ["issue", "list", "--repo", repo, "--state", "open",
+            "--limit", str(limit), "--json", fields]
+    if assignee:
+        args += ["--assignee", assignee]
+    rows = json.loads(_run(args).stdout)
+    if title_prefixes:
+        rows = [r for r in rows
+                if any((r.get("title") or "").startswith(p) for p in title_prefixes)]
+    return rows
+
+
+def issue_view(repo: str, number: int) -> dict:
+    """본문 포함 단건 조회 — seed를 만들 때만 부른다(목록에는 body가 없다)."""
+    fields = "number,title,body,url,state,labels,assignees,author"
+    proc = _run(["issue", "view", str(number), "--repo", repo, "--json", fields])
+    return json.loads(proc.stdout)
+
+
 def pr_diff(repo: str, pr: int) -> str:
     """Unified diff via the API. Raises DiffTooLarge when the PR exceeds GitHub's
     20k-line diff cap — worktree.local_diff() computes it from the clone instead."""
