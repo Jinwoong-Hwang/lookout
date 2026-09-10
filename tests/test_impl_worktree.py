@@ -169,3 +169,52 @@ class ImplWorktreeBranchReuseTest(ImplWorktreeTest):
         worktree.make_impl_worktree(self.repo, "feature/PH-2")           # 다른 카드
         back = worktree.make_impl_worktree(self.repo, "feature/PH-1")    # 돌아옴
         self.assertEqual(_git(back, "rev-parse", "HEAD"), sha)
+
+
+class ImplSessionLockTest(unittest.TestCase):
+    """워크트리는 repo당 하나를 공유한다. 준비 구간만 락으로 감싸면, 같은 대상
+    저장소의 다른 카드가 편집 중인 트리를 reset --hard 로 지우고 브랜치를 바꿔치기해
+    앞 카드의 커밋이 남의 브랜치에 올라간다."""
+
+    def test_same_repo_turns_are_serialized(self):
+        import threading
+        import time
+        order = []
+
+        def turn(n):
+            with worktree.impl_session("acme/x"):
+                order.append(f"in{n}")
+                time.sleep(0.12)
+                order.append(f"out{n}")
+
+        threads = [threading.Thread(target=turn, args=(i,)) for i in (1, 2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertIn(order, ([f"in1", "out1", "in2", "out2"],
+                              ["in2", "out2", "in1", "out1"]))
+
+    def test_different_repos_do_not_block_each_other(self):
+        import threading
+        import time
+        started = []
+
+        def turn(repo):
+            with worktree.impl_session(repo):
+                started.append(repo)
+                time.sleep(0.2)
+
+        threads = [threading.Thread(target=turn, args=(r,)) for r in ("acme/a", "acme/b")]
+        t0 = time.time()
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertLess(time.time() - t0, 0.38, "다른 repo 끼리 직렬화됐다")
+        self.assertEqual(sorted(started), ["acme/a", "acme/b"])
+
+    def test_lock_is_reentrant_so_make_impl_worktree_nests(self):
+        with worktree.impl_session("acme/x"):
+            with worktree.impl_session("acme/x"):
+                pass   # RLock 이 아니면 여기서 데드락

@@ -103,6 +103,7 @@ def process(c, card):
         repo = target_repo(meta)
     except TargetUnknown as e:
         # 재시도해도 결과가 같다 — 예외로 올려 3번 태우지 않고 바로 사람에게 넘긴다
+        db.merge_payload(c, card["id"], {"failed_from": "implementing"})
         db.set_status(c, card["id"], "failed")
         db.log_event(c, "impl_target_unknown", card["key"],
                      {"error": str(e), "title": meta.get("title")})
@@ -111,6 +112,13 @@ def process(c, card):
     branch = worktree.impl_branch_name(display, meta.get("title") or "")
     issue = ghclient.issue_view(card["repo"], card["pr_number"])
 
+    # 워크트리는 repo당 하나를 공유한다. 준비~커밋 전체를 락 안에서 돌려야 같은 대상
+    # 저장소의 다른 카드가 편집 중인 트리를 리셋하지 못한다.
+    with worktree.impl_session(repo):
+        _run_turn(c, card, meta, display, repo, branch, issue)
+
+
+def _run_turn(c, card, meta, display, repo, branch, issue):
     # 여기서부터 커밋까지가 통째로 무음이었다(설치 수 분 + 엔진 수십 분). 어디까지
     # 갔는지 대시보드에서 보이도록 구간마다 이벤트를 남긴다.
     t0 = time.time()
@@ -143,6 +151,7 @@ def process(c, card):
 
     files = changed_files(wt)
     if not files:
+        db.merge_payload(c, card["id"], {"failed_from": "implementing"})
         db.set_status(c, card["id"], "failed")
         db.log_event(c, "impl_no_changes", card["key"],
                      {"engine": engine, "repo": repo, "branch": branch,

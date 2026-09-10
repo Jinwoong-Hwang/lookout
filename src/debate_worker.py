@@ -69,35 +69,54 @@ def _render_transcript(turns: list[dict]) -> str:
     return text[-TRANSCRIPT_CHARS:] if len(text) > TRANSCRIPT_CHARS else text
 
 
-def _agreement(turns: list[dict]) -> dict:
-    """합의문을 LLM 없이 조립한다.
+def _agreement(turns: list[dict], end_reason: str = "") -> dict:
+    """합의문을 LLM 없이 트랜스크립트에서 조립한다.
 
     한 턴을 더 태워 요약시키는 대신 트랜스크립트에서 뽑는다 — 요약 턴은 비용이고,
-    무엇보다 요약이 대화 내용과 어긋날 수 있다(사람이 그걸 검증할 방법이 없다)."""
+    무엇보다 요약이 대화 내용과 어긋나면 사람이 검증할 방법이 없다.
+
+    **상한으로 끝난 토론을 '합의'로 표시하면 안 된다.** 반박된 안을 사람이 승인하면
+    그대로 구현으로 간다. 그래서 (1) design 은 마지막 *제안자* 안을 쓰고(마지막 턴이
+    반대신문이면 그건 합의안이 아니라 반박이다) (2) 아직 답하지 못한 반대신문 주장을
+    미합의로 올린다."""
     eng = _engine_turns(turns)
     last = eng[-1] if eng else {}
-    proposals = [t for t in eng if (t.get("proposal") or "").strip()]
-    unresolved, seen = [], set()
+    proposals = [t for t in eng if t.get("role") == "proposer" and (t.get("proposal") or "").strip()]
+    unresolved, seen = [], []
+
+    def add(item):
+        key = (item or "").strip()
+        if key and key not in seen:
+            seen.append(key)
+            unresolved.append(key)
+
     for t in eng[-2:]:
         for q in (t.get("open_questions") or []):
-            key = q.strip()
-            if key and key not in seen:
-                seen.add(key)
-                unresolved.append(q)
+            add(q)
+    # 상한·결렬로 끝났고 마지막 발언이 반대신문의 미해결 반박이면 그것이 최대 쟁점이다
+    settled = len(eng) >= 2 and all(t.get("verdict") == "AGREE" for t in eng[-2:])
+    if not settled:
+        for t in reversed(eng):
+            if t.get("role") == "critic" and t.get("verdict") != "AGREE":
+                add(f"[미해결 반박 r{t.get('round')}] {(t.get('claim') or '')[:400]}")
+                break
     verdicts = [t.get("verdict") for t in eng[-2:]]
     return {
         "design": (proposals[-1].get("proposal") if proposals else ""),
+        "design_round": (proposals[-1].get("round") if proposals else None),
         "unresolved": unresolved,
         "risk": last.get("risk", ""),
         "rounds": len(eng),
         "steers": len([t for t in turns if t.get("role") == "operator"]),
         "verdicts": verdicts,
+        "settled": settled,          # 양쪽이 실제로 AGREE 로 끝났는가
+        "end_reason": end_reason,
         "blocked": "BLOCKED" in verdicts,
     }
 
 
 def _finish(c, card, meta, turns, reason: str):
-    agreement = _agreement(turns)
+    agreement = _agreement(turns, reason)
     db.merge_payload(c, card["id"], {"agreement": agreement, "debate_end": reason})
     db.set_status(c, card["id"], "spec_blocked", blocked=1)
     db.log_event(c, "debate_finished", card["key"],
@@ -106,10 +125,12 @@ def _finish(c, card, meta, turns, reason: str):
                   "blocked": agreement["blocked"]})
     display = meta.get("display") or f"#{card['pr_number']}"
     n = len(agreement["unresolved"])
+    head = "설계 합의" if agreement["settled"] else "설계 미합의"
     notify.send(
-        f"Lookout — {display} 설계 합의",
+        f"Lookout — {display} {head}",
         (f"미합의 {n}건" if n else "미합의 없음") + f" · {agreement['rounds']}라운드 · {reason}",
-        subtitle="승인해야 구현이 시작됩니다",
+        subtitle=("승인해야 구현이 시작됩니다" if agreement["settled"]
+                  else "합의 못 함 — 승인 전에 반드시 읽으세요"),
         group="lookout-debate",
     )
 
@@ -144,6 +165,7 @@ def process(c, card):
     try:
         repo, cwd = _context(c, card, meta)
     except impl_worker.TargetUnknown as e:
+        db.merge_payload(c, card["id"], {"failed_from": "spec"})
         db.set_status(c, card["id"], "failed")
         db.log_event(c, "impl_target_unknown", card["key"],
                      {"error": str(e), "title": meta.get("title")})
@@ -156,6 +178,7 @@ def process(c, card):
     if not engines.is_ready(engine):
         # 한쪽 엔진이 없으면 토론이 성립하지 않는다. 같은 엔진으로 대체하면
         # 자기 안을 자기가 반박하는 꼴이라 의미가 없으므로 사람에게 넘긴다.
+        db.merge_payload(c, card["id"], {"failed_from": "spec"})
         db.set_status(c, card["id"], "failed")
         db.log_event(c, "debate_engine_missing", card["key"],
                      {"role": role, "engine": engine})
@@ -176,7 +199,13 @@ def process(c, card):
     )
     db.log_event(c, "debate_turn_started", card["key"],
                  {"round": round_no + 1, "role": role, "engine": engine})
-    raw = engines.run(prompt, engine=engine, cwd=cwd, add_dir=cwd)
+    # 이슈 토론은 공유 워크트리를 쓴다 — 엔진 실행 구간까지 락 안에서 돈다.
+    # 주제 토론(topic_only)은 체크아웃을 읽기만 하므로 락이 필요 없다.
+    if topic_only:
+        raw = engines.run(prompt, engine=engine, cwd=cwd, add_dir=cwd)
+    else:
+        with worktree.impl_session(repo):
+            raw = engines.run(prompt, engine=engine, cwd=cwd, add_dir=cwd)
     try:
         turn = claude_runner.parse_json(raw)
     except claude_runner.ClaudeError:

@@ -37,6 +37,7 @@ def process(c, card):
     repo, branch = meta.get("target_repo"), meta.get("branch")
     display = meta.get("display") or f"#{card['pr_number']}"
     if not repo or not branch:
+        db.merge_payload(c, card["id"], {"failed_from": "pr_opening"})
         db.set_status(c, card["id"], "failed")
         db.log_event(c, "pr_open_no_branch", card["key"], {"payload_keys": list(meta)})
         return

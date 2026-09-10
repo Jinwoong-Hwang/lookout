@@ -45,6 +45,7 @@ def process(c, card):
     meta = json.loads(card["payload"]) if card["payload"] else {}
     repo, branch = meta.get("target_repo"), meta.get("branch")
     if not repo or not branch:
+        db.merge_payload(c, card["id"], {"failed_from": "impl_verify"})
         db.set_status(c, card["id"], "failed")
         db.log_event(c, "impl_verify_no_branch", card["key"], {"payload_keys": list(meta)})
         return
@@ -53,6 +54,7 @@ def process(c, card):
     vengine, fallback = verifier_engine(impl_engine)
     diff, files = branch_diff(repo, branch)
     if not diff.strip():
+        db.merge_payload(c, card["id"], {"failed_from": "impl_verify"})
         db.set_status(c, card["id"], "failed")
         db.log_event(c, "impl_verify_empty_diff", card["key"],
                      {"repo": repo, "branch": branch})
@@ -60,7 +62,6 @@ def process(c, card):
 
     db.log_event(c, "impl_verify_started", card["key"],
                  {"engine": vengine, "fallback": fallback, "branch": branch})
-    wt = worktree.make_impl_worktree(repo, branch, setup=False)
     impl = meta.get("impl") or {}
     prompt = prompt_tpl.render(
         "impl_verify.md",
@@ -71,7 +72,11 @@ def process(c, card):
         IMPL_SUMMARY=(impl.get("summary") or "(요약 없음)"),
         DIFF=diff, FILES=files,
     )
-    verdict = engines.run_json(prompt, engine=vengine, cwd=wt, add_dir=wt)
+    # 워크트리는 repo당 하나를 공유한다 — 다른 카드가 브랜치를 바꿔치기하지 못하게
+    # 워크트리 준비부터 엔진 종료까지 락 안에서 돈다.
+    with worktree.impl_session(repo):
+        wt = worktree.make_impl_worktree(repo, branch, setup=False)
+        verdict = engines.run_json(prompt, engine=vengine, cwd=wt, add_dir=wt)
     blocking = verdict.get("blocking") or []
     out_of_scope = verdict.get("out_of_scope") or []
     approved = bool(verdict.get("approved")) and not blocking
@@ -95,6 +100,7 @@ def process(c, card):
     if rounds >= MAX_IMPL_ROUNDS:
         # 되돌림 예산 소진 — 사람이 보게 failed 레인에 세운다. 계속 돌리면
         # 두 엔진이 서로 미루며 토큰만 태운다.
+        db.merge_payload(c, card["id"], {"failed_from": "impl_verify"})
         db.set_status(c, card["id"], "failed")
         db.log_event(c, "impl_rounds_exhausted", card["key"],
                      {"rounds": rounds, "blocking": len(blocking)})

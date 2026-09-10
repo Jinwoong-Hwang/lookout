@@ -238,6 +238,35 @@ def set_status(c, card_id: int, status: str, blocked=None, assignee=None):
         )
 
 
+def gate(c, card, to_status: str, blocked=None, event: str = None, detail=None) -> bool:
+    """사람 게이트 전이 — 현재 상태를 조건에 넣어 한 번에 바꾼다(CAS).
+
+    읽고→검사하고→쓰는 세 단계로 하면 대시보드가 ThreadingHTTPServer 이고
+    connect() 가 autocommit(아래 connect 참고)이라, 같은 카드에 대한 두 요청이
+    둘 다 검사를 통과해 게이트가 두 번 열린다(중복 클릭·낡은 탭). UPDATE 의 WHERE
+    에 status 를 넣으면 두 번째는 rowcount 0 이 되어 막힌다.
+
+    막혔으면 gate_stale 을 남긴다 — 사람이 눌렀는데 아무 일도 없는 것이 최악이다."""
+    cur = card["status"]
+    if blocked is None:
+        cur_row = c.execute(
+            "UPDATE cards SET status=?, updated_at=? WHERE id=? AND status=?",
+            (to_status, now(), card["id"], cur))
+    else:
+        cur_row = c.execute(
+            "UPDATE cards SET status=?, blocked=?, updated_at=? WHERE id=? AND status=?",
+            (to_status, blocked, now(), card["id"], cur))
+    if cur_row.rowcount != 1:
+        actual = c.execute("SELECT status FROM cards WHERE id=?", (card["id"],)).fetchone()
+        log_event(c, "gate_stale", card["key"],
+                  {"to": to_status, "expected": cur,
+                   "actual": actual["status"] if actual else None})
+        return False
+    if event:
+        log_event(c, event, card["key"], detail)
+    return True
+
+
 def set_engine(c, card_id: int, engine: str):
     c.execute("UPDATE cards SET engine=?, updated_at=? WHERE id=?", (engine, now(), card_id))
 

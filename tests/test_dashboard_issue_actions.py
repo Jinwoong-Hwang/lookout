@@ -365,7 +365,7 @@ class ProgressVisibilityTest(unittest.TestCase):
         import inspect
 
         from src import impl_worker
-        src = inspect.getsource(impl_worker.process)
+        src = inspect.getsource(impl_worker)   # 턴 본문이 _run_turn 으로 갈렸다
         for ev in ("impl_worktree_ready", "impl_engine_started", "impl_engine_done"):
             self.assertIn(ev, src)
 
@@ -543,3 +543,128 @@ class TopicCreationTest(unittest.TestCase):
         self.assertIn('id="composer"', dashboard.HTML)
         self.assertIn("""document.getElementById('composer').style.display=(v==='work')?'':'none';""",
                       dashboard.HTML)
+
+
+class RetryRoutesToFailedStageTest(unittest.TestCase):
+    """실패한 카드를 무조건 implementing 으로 보내면, 설계 승인 전에 실패한 토론
+    카드가 승인을 건너뛰고 코드를 고친다 (토론이 지적한 결함)."""
+
+    def setUp(self):
+        self.c = sqlite3.connect(":memory:")
+        self.c.row_factory = sqlite3.Row
+        self.c.executescript(db.SCHEMA)
+        self.c.execute("ALTER TABLE cards ADD COLUMN engine TEXT")
+        self.saved = {"connect": dashboard.db.connect, "kick": dashboard.kick_tick}
+
+        @contextlib.contextmanager
+        def fake_connect():
+            yield self.c
+
+        dashboard.db.connect = fake_connect
+        dashboard.kick_tick = lambda: None
+
+    def tearDown(self):
+        dashboard.db.connect = self.saved["connect"]
+        dashboard.kick_tick = self.saved["kick"]
+        self.c.close()
+
+    def _card(self, n, **payload):
+        key = keys.issue_key(REPO, n)
+        cid = db.upsert_card(self.c, key, "issue", REPO, n, status="failed",
+                             payload={"display": f"PH-{n}", "title": "t", **payload})
+        return key, cid
+
+    def test_failed_debate_returns_to_spec_not_implementing(self):
+        key, cid = self._card(1, mode="debate", failed_from="spec")
+        self.assertTrue(dashboard.do_action("retry", cid))
+        self.assertEqual(db.get_card(self.c, key)["status"], "spec")
+
+    def test_failed_implementation_returns_to_implementing(self):
+        key, cid = self._card(2, mode="implement", failed_from="implementing")
+        self.assertTrue(dashboard.do_action("retry", cid))
+        self.assertEqual(db.get_card(self.c, key)["status"], "implementing")
+
+    def test_failed_verify_returns_to_verify(self):
+        key, cid = self._card(3, mode="implement", failed_from="impl_verify")
+        self.assertTrue(dashboard.do_action("retry", cid))
+        self.assertEqual(db.get_card(self.c, key)["status"], "impl_verify")
+
+    def test_debate_card_without_marker_still_falls_back_to_spec(self):
+        """예외로 죽어 failed_from 을 남기지 못한 경우 — mode 로 판정한다."""
+        key, cid = self._card(4, mode="debate")
+        self.assertTrue(dashboard.do_action("retry", cid))
+        self.assertEqual(db.get_card(self.c, key)["status"], "spec")
+
+    def test_review_card_is_untouched(self):
+        key = keys.review_key("acme/app", 9, "sha")
+        cid = db.upsert_card(self.c, key, "review", "acme/app", 9,
+                             status="failed", head_sha="sha")
+        self.assertTrue(dashboard.do_action("retry", cid))
+        self.assertEqual(db.get_card(self.c, key)["status"], "intake")
+
+
+class GateIsAtomicTest(unittest.TestCase):
+    """게이트를 '읽고→검사하고→쓰는' 세 단계로 두면 중복 클릭·낡은 탭이 게이트를
+    두 번 연다. connect() 는 autocommit 이고 대시보드는 ThreadingHTTPServer 다."""
+
+    def setUp(self):
+        self.c = sqlite3.connect(":memory:")
+        self.c.row_factory = sqlite3.Row
+        self.c.executescript(db.SCHEMA)
+        self.c.execute("ALTER TABLE cards ADD COLUMN engine TEXT")
+        self.saved = {"connect": dashboard.db.connect, "kick": dashboard.kick_tick}
+
+        @contextlib.contextmanager
+        def fake_connect():
+            yield self.c
+
+        dashboard.db.connect = fake_connect
+        dashboard.kick_tick = lambda: None
+        self.key = keys.issue_key(REPO, 77)
+        self.cid = db.upsert_card(self.c, self.key, "issue", REPO, 77,
+                                  status="spec_blocked", blocked=1,
+                                  payload={"display": "PH-77", "title": "t",
+                                           "agreement": {"design": "d", "rounds": 2}})
+
+    def tearDown(self):
+        dashboard.db.connect = self.saved["connect"]
+        dashboard.kick_tick = self.saved["kick"]
+        self.c.close()
+
+    def _types(self):
+        return [r["type"] for r in self.c.execute("SELECT type FROM events").fetchall()]
+
+    def test_second_approval_is_refused_and_logged(self):
+        card = db.get_card(self.c, self.key)
+        self.assertTrue(db.gate(self.c, card, "implementing", blocked=0,
+                                event="operator_spec_approved"))
+        # 같은(낡은) 카드 스냅샷으로 한 번 더 — 중복 클릭
+        self.assertFalse(db.gate(self.c, card, "implementing", blocked=0,
+                                 event="operator_spec_approved"))
+        self.assertIn("gate_stale", self._types())
+        self.assertEqual(self._types().count("operator_spec_approved"), 1)
+
+    def test_status_only_moves_once_through_do_action(self):
+        self.assertTrue(dashboard.do_action("approve_spec", self.cid))
+        self.assertEqual(db.get_card(self.c, self.key)["status"], "implementing")
+        # 이미 implementing 이므로 두 번째 승인은 상태 검사에서 막힌다
+        self.assertFalse(dashboard.do_action("approve_spec", self.cid))
+        self.assertEqual(self._types().count("operator_spec_approved"), 1)
+
+    def test_pr_gate_is_atomic_too(self):
+        db.set_status(self.c, self.cid, "pr_blocked", blocked=1)
+        card = db.get_card(self.c, self.key)
+        self.assertTrue(db.gate(self.c, card, "pr_opening", blocked=0,
+                                event="operator_pr_approved"))
+        self.assertFalse(db.gate(self.c, card, "pr_opening", blocked=0,
+                                 event="operator_pr_approved"))
+        self.assertEqual(self._types().count("operator_pr_approved"), 1)
+
+    def test_gate_stale_carries_expected_and_actual(self):
+        card = db.get_card(self.c, self.key)
+        db.set_status(self.c, self.cid, "implementing")     # 다른 경로가 먼저 옮김
+        self.assertFalse(db.gate(self.c, card, "pr_opening", event="x"))
+        row = self.c.execute(
+            "SELECT detail FROM events WHERE type='gate_stale'").fetchone()
+        d = json.loads(row["detail"])
+        self.assertEqual((d["expected"], d["actual"]), ("spec_blocked", "implementing"))

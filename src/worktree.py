@@ -6,6 +6,7 @@ The worktree is detached and NEVER pushed; target code is read-only.
 """
 import os
 import base64
+import contextlib
 import re
 import subprocess
 import threading
@@ -162,6 +163,19 @@ def impl_branch_name(display: str, title: str = "") -> str:
 def _branch_exists(repo_dir: str, branch: str) -> bool:
     return _git(repo_dir, "rev-parse", "--verify", "--quiet",
                 f"refs/heads/{branch}", check=False).returncode == 0
+
+
+@contextlib.contextmanager
+def impl_session(repo: str):
+    """구현/토론 턴 전체를 repo 락 안에서 돌린다.
+
+    make_impl_worktree 안에서만 락을 잡으면 워크트리 준비까지만 보호된다. repo당
+    상주 워크트리를 공유하므로, 같은 대상 저장소의 카드가 병렬로 돌 때(tick 은
+    MAX_CONCURRENT 만큼 스레드로 돈다) 뒤 카드의 reset --hard/clean/checkout 이 앞
+    카드의 엔진이 편집 중인 트리를 지우고 브랜치를 바꿔치기한다 — 앞 카드의 커밋이
+    남의 브랜치에 올라간다. 락은 RLock 이라 안쪽 make_impl_worktree 와 중첩된다."""
+    with _repo_lock(repo):
+        yield
 
 
 def make_impl_worktree(repo: str, branch: str, base_ref: str = None,

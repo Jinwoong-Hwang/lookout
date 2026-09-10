@@ -280,3 +280,46 @@ class TopicDebateTest(unittest.TestCase):
         repo, cwd = debate_worker._context(self.c, card, json.loads(card["payload"]))
         self.assertEqual((repo, cwd), ("acme/web", "/wt"))
         self.assertTrue(self.made, "이슈 토론은 구현이 이어받을 워크트리를 만든다")
+
+
+class AgreementAssemblyTest(unittest.TestCase):
+    """상한으로 끝난 토론을 '합의'로 표시하면, 반박된 안을 사람이 승인해 그대로
+    구현으로 보낸다. 토론이 실제로 그 상태로 끝나는 것을 봤다(TOPIC-1, r6)."""
+
+    def _turns(self, *specs):
+        out = []
+        for i, (role, verdict, extra) in enumerate(specs, 1):
+            t = {"role": role, "round": i, "verdict": verdict, "claim": f"c{i}"}
+            t.update(extra)
+            out.append(t)
+        return out
+
+    def test_capped_debate_is_not_marked_settled(self):
+        turns = self._turns(("proposer", "CONTINUE", {"proposal": "안 v1"}),
+                            ("critic", "CONTINUE", {"claim": "이건 깨진다"}))
+        ag = debate_worker._agreement(turns, "라운드 상한")
+        self.assertFalse(ag["settled"])
+        self.assertEqual(ag["end_reason"], "라운드 상한")
+
+    def test_design_comes_from_the_proposer_not_the_last_turn(self):
+        turns = self._turns(("proposer", "CONTINUE", {"proposal": "제안자 안"}),
+                            ("critic", "CONTINUE", {"proposal": "반박 대안"}))
+        ag = debate_worker._agreement(turns, "라운드 상한")
+        self.assertEqual(ag["design"], "제안자 안")   # 마지막 턴은 반박이다
+        self.assertEqual(ag["design_round"], 1)
+
+    def test_unanswered_rebuttal_becomes_an_unresolved_item(self):
+        turns = self._turns(("proposer", "CONTINUE", {"proposal": "안"}),
+                            ("critic", "CONTINUE", {"claim": "G4 가 승인을 건너뛴다"}))
+        ag = debate_worker._agreement(turns, "라운드 상한")
+        self.assertEqual(len(ag["unresolved"]), 1)
+        self.assertIn("미해결 반박 r2", ag["unresolved"][0])
+        self.assertIn("G4 가 승인을 건너뛴다", ag["unresolved"][0])
+
+    def test_real_agreement_has_no_phantom_unresolved(self):
+        turns = self._turns(("proposer", "AGREE", {"proposal": "합의안"}),
+                            ("critic", "AGREE", {}))
+        ag = debate_worker._agreement(turns, "양쪽 합의")
+        self.assertTrue(ag["settled"])
+        self.assertEqual(ag["unresolved"], [])
+        self.assertEqual(ag["design"], "합의안")

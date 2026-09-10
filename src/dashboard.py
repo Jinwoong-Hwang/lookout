@@ -268,7 +268,8 @@ EVENT_LABELS = {
     "debate_finished": "토론 종료", "debate_engine_missing": "엔진 없음(토론 불가)",
     "operator_spec_approved": "설계 승인(사람)", "operator_spec_rejected": "설계 반려(사람)",
     "operator_debate_steer": "설계 피드백(사람) — 토론 재개",
-    "topic_created": "주제 토론 생성", "topic_accepted": "결과 채택(사람)", "operator_retry": "재시도(사람)",
+    "topic_created": "주제 토론 생성", "topic_accepted": "결과 채택(사람)",
+    "gate_stale": "게이트 거부 — 카드 상태가 이미 바뀜(중복/낡은 클릭)", "operator_retry": "재시도(사람)",
     "pr_dryrun": "PR dry-run", "pr_opened": "PR 생성", "pr_open_no_branch": "브랜치 정보 없음",
     "review_quota_paused": "토큰 소진 — 대기열 복귀", "review_gave_up": "재시도 포기",
     "stage_error": "스테이지 오류",
@@ -318,7 +319,15 @@ def do_action(action, card_id, engine="claude", text=None):
             db.set_status(c, card["id"], "archived")
             db.log_event(c, "operator_ignore", card["key"])
         elif action == "retry" and card["status"] == "failed":
-            back = "implementing" if card["kind"] == "issue" else "intake"
+            if card["kind"] == "issue":
+                # 실패한 스테이지로 돌아간다. 무조건 implementing 으로 보내면
+                # 설계 승인 전에 실패한 토론 카드가 승인을 건너뛰고 코드를 고친다.
+                meta_now = json.loads(card["payload"]) if card["payload"] else {}
+                back = meta_now.get("failed_from") or (
+                    "spec" if meta_now.get("mode") in ("debate", "debate_only")
+                    else "implementing")
+            else:
+                back = "intake"
             db.set_status(c, card["id"], back)
             db.log_event(c, "operator_retry", card["key"],
                          {"engine": card["engine"], "to": back})
@@ -331,16 +340,16 @@ def do_action(action, card_id, engine="claude", text=None):
                 # 주제 토론은 구현으로 가지 않는다. 승인 = 결과 채택.
                 if (text or "").strip():
                     db.merge_payload(c, card["id"], {"spec_amendment": (text or "").strip()})
-                db.set_status(c, card["id"], "done", blocked=0)
-                db.log_event(c, "topic_accepted", card["key"])
+                if not db.gate(c, card, "done", blocked=0, event="topic_accepted"):
+                    return False
                 return True
             amendment = (text or "").strip()
             if amendment:
                 # 합의문을 고치지 않고 위에 얹는다 — 토론 기록은 그대로 남아야 한다
                 db.merge_payload(c, card["id"], {"spec_amendment": amendment})
-            db.set_status(c, card["id"], "implementing", blocked=0)
-            db.log_event(c, "operator_spec_approved", card["key"],
-                         {"amended": bool(amendment)})
+            if not db.gate(c, card, "implementing", blocked=0,
+                           event="operator_spec_approved", detail={"amended": bool(amendment)}):
+                return False
             kick = True
         elif action == "resume_debate" and card["kind"] == "issue":
             if card["status"] != "spec_blocked":
@@ -356,8 +365,9 @@ def do_action(action, card_id, engine="claude", text=None):
                 "debate": turns,
                 "debate_bonus": int(meta.get("debate_bonus") or 0) + DEBATE_BONUS,
                 "agreement": {}})
-            db.set_status(c, card["id"], "spec", blocked=0)
-            db.log_event(c, "operator_debate_steer", card["key"], {"steer": steer[:200]})
+            if not db.gate(c, card, "spec", blocked=0, event="operator_debate_steer",
+                           detail={"steer": steer[:200]}):
+                return False
             kick = True
         elif action == "reject_spec" and card["kind"] == "issue":
             if card["status"] != "spec_blocked":
@@ -369,13 +379,13 @@ def do_action(action, card_id, engine="claude", text=None):
                     "debate": meta.get("debate") or [],
                     "agreement": meta.get("agreement") or {}}],
                 "debate": [], "agreement": {}, "mode": ""})
-            db.set_status(c, card["id"], "triage", blocked=0)
-            db.log_event(c, "operator_spec_rejected", card["key"])
+            if not db.gate(c, card, "triage", blocked=0, event="operator_spec_rejected"):
+                return False
         elif action == "unblock" and card["kind"] == "issue":
             if card["status"] != "pr_blocked":
                 return False
-            db.set_status(c, card["id"], "pr_opening", blocked=0)
-            db.log_event(c, "operator_pr_approved", card["key"])
+            if not db.gate(c, card, "pr_opening", blocked=0, event="operator_pr_approved"):
+                return False
             kick = True
         elif action == "unblock" and card["kind"] == "approve":
             db.set_status(c, card["id"], "approving", blocked=0)
@@ -1070,7 +1080,7 @@ function issueTile(c){
   const RUNNING=['spec','implementing','impl_verify','pr_opening'];
   const ag=c.agreement||{};
   const dbPill=(c.debate||[]).length?`<span class="pill">🗣 ${c.debate.length}턴</span>`:'';
-  const agPill=ag.rounds?`<span class="pill" style="${pill(ag.blocked?'#fb7185':(ag.unresolved||[]).length?'#fbbf24':'#4ade80')}">${ag.blocked?'결렬':(ag.unresolved||[]).length?`미합의 ${(ag.unresolved||[]).length}`:'합의'}</span>`:'';
+  const agPill=ag.rounds?`<span class="pill" style="${pill(ag.blocked?'#fb7185':!ag.settled?'#fbbf24':(ag.unresolved||[]).length?'#fbbf24':'#4ade80')}">${ag.blocked?'결렬':!ag.settled?`미합의(${esc(ag.end_reason||'')})`:(ag.unresolved||[]).length?`합의·잔여 ${(ag.unresolved||[]).length}`:'합의'}</span>`:'';
   const agePill=RUNNING.includes(c.status)?`<span class="pill" title="이 상태로 머문 시간">⏱ ${ago(c.updated_at)}</span>`:'';
   let facts='';
   if(c.branch)facts=`<span>🌿 ${esc(c.branch)}</span>${c.commit?`<code>${esc(c.commit)}</code>`:''}`
@@ -1219,8 +1229,10 @@ function openIssueModal(c){
   }
   const AG=c.agreement||{};
   if(AG.design||AG.rounds){
-    html+=`<div class="lbl">합의된 설계 · ${AG.rounds||0}라운드${AG.blocked?' · 결렬':''}</div>`
-      +`<div class="pre">${esc(AG.design||'(합의안 없음)')}</div>`;
+    html+=`<div class="lbl">${AG.settled?'합의된 설계':'⚠️ 합의되지 않은 설계'} · ${AG.rounds||0}라운드`
+      +`${AG.end_reason?' · '+esc(AG.end_reason):''}${AG.blocked?' · 결렬':''}${AG.design_round?` · r${AG.design_round} 제안`:''}</div>`;
+    if(!AG.settled)html+=`<div class="errline warn">양쪽이 AGREE 로 끝나지 않았습니다 — 아래 안은 마지막 제안자 안이고 반대신문이 남아 있습니다. 승인하면 그대로 구현됩니다.</div>`;
+    html+=`<div class="pre">${esc(AG.design||'(합의안 없음)')}</div>`;
     if((AG.unresolved||[]).length)
       html+=`<div class="lbl2">미합의 — 승인 전에 결정해야 합니다</div><div class="pre">`
         +(AG.unresolved||[]).map(q=>`<div>· ${esc(q)}</div>`).join('')+`</div>`;
@@ -1228,7 +1240,7 @@ function openIssueModal(c){
     if(AG.steers)html+=`<div class="lbl2">사람 개입 ${AG.steers}회</div>`;
     if(c.spec_amendment)html+=`<div class="lbl2">운영자 수정 지시 (구현의 최우선 기준)</div><div class="pre">${esc(c.spec_amendment)}</div>`;
     if(c.status==='spec_blocked')
-      html+=`<div class="btns"><button class="go" onclick="approveSpec(event,${c.id})">${c.debate_only?'✅ 결과 채택 — 완료로':'✅ 설계 승인 — 구현 시작'}</button>`
+      html+=`<div class="btns"><button class="go" onclick="approveSpec(event,${c.id})">${c.debate_only?'✅ 결과 채택 — 완료로':(AG.settled?'✅ 설계 승인 — 구현 시작':'⚠️ 미합의인데 승인 — 구현 시작')}</button>`
         +`<button onclick="rejectSpec(event,${c.id})">↩︎ 반려</button></div>`;
   }
   if((c.debate||[]).length){
