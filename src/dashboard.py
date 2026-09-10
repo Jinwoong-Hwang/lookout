@@ -516,6 +516,26 @@ header{position:sticky;top:0;z-index:20;padding:13px 22px;display:flex;align-ite
 background:var(--header-bg);backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
 h1{font-size:17px;margin:0;font-weight:750;letter-spacing:-.01em}
 .sub{color:var(--muted);font-size:12.5px}
+.shell{flex:1 1 auto;min-height:0;display:flex}
+.side{flex:0 0 194px;min-width:0;border-right:1px solid var(--line);background:var(--panel);
+  padding:12px 10px 18px;display:flex;flex-direction:column;gap:2px;overflow-y:auto}
+.side .grp{font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--dim);
+  padding:12px 11px 5px;font-weight:700}
+.side button{width:100%;text-align:left;border:none;background:transparent;color:var(--muted);
+  padding:8px 11px;border-radius:9px;font:inherit;font-size:13px;display:flex;
+  align-items:center;justify-content:space-between;gap:8px}
+.side button:hover{background:var(--panel2);color:var(--ink)}
+.side button.active{background:var(--btn-accent-bg);color:var(--btn-accent-fg);font-weight:700}
+.side .cnt{background:var(--panel2);border-radius:20px;padding:1px 8px;font-size:11px;color:var(--muted)}
+.side button.active .cnt{background:rgba(0,0,0,.14);color:inherit}
+.main{flex:1 1 auto;min-width:0;min-height:0;display:flex;flex-direction:column}
+@media (max-width:860px){
+  .shell{flex-direction:column}
+  .side{flex:0 0 auto;flex-direction:row;flex-wrap:wrap;border-right:none;
+    border-bottom:1px solid var(--line);padding:8px 10px}
+  .side .grp{display:none}
+  .side button{width:auto}
+}
 .board{flex:1 1 auto;min-height:0;display:flex;gap:12px;padding:18px;overflow-x:auto;overflow-y:hidden;align-items:stretch}
 .board.stack{display:block;overflow-y:auto;overflow-x:hidden}
 .toggle{display:flex;gap:6px;margin-left:6px}
@@ -632,15 +652,26 @@ background:transparent;border:none;padding:3px 5px;border-radius:6px;opacity:.4}
 .unreaddot{width:8px;height:8px;border-radius:50%;background:var(--accent);flex:0 0 auto;margin-top:5px}
 </style></head><body>
 <header><h1>👁 Lookout</h1>
-<div class="toggle"><button id="tLane" class="active" onclick="setView('lane')">레인별</button><button id="tAuthor" onclick="setView('author')">사람별</button><button id="tFeedback" onclick="setView('feedback')">리뷰 피드백</button><button id="tWork" onclick="setView('work')">🛠 작업</button></div>
 <button id="refreshBtn" onclick="refresh()">🔄 PR 가져오기</button>
 <span class="sub" id="sub">로딩…</span>
 <span class="sub" id="engStat" style="margin-left:14px"></span>
 <button id="themeBtn" onclick="cycleTheme()" title="테마 전환 (시스템 · 라이트 · 다크)" style="margin-left:auto">🖥 시스템</button>
 <span class="sub" style="margin-left:12px">5초마다 자동 새로고침</span></header>
+<div class="shell">
+<nav class="side">
+  <div class="grp">PR 리뷰</div>
+  <button id="tLane" class="active" onclick="setView('lane')"><span>🗂 레인별</span><span class="cnt" id="cLane">0</span></button>
+  <button id="tAuthor" onclick="setView('author')"><span>👤 사람별</span><span class="cnt" id="cAuthor">0</span></button>
+  <button id="tFeedback" onclick="setView('feedback')"><span>💬 리뷰 피드백</span><span class="cnt" id="cFeedback">0</span></button>
+  <div class="grp">작업</div>
+  <button id="tWork" onclick="setView('work')"><span>🛠 이슈 보드</span><span class="cnt" id="cWork">0</span></button>
+</nav>
+<div class="main">
 <div class="filterbar" id="filterbar"></div>
 <section class="mentions" id="mentions" style="display:none"></section>
 <div class="board" id="board"></div>
+</div>
+</div>
 <div class="ov" id="ov"><div class="modal" id="modal"></div></div>
 <script>
 const LANES=__LANES__;const WORK_LANES=__WORK_LANES__;
@@ -713,18 +744,29 @@ function renderFilter(){
     h+=`<button class="chip ${on?'on':''}" style="${onStyle}" onclick="setRepo('${r}')"><span class="rdot" style="background:${col}"></span>${esc(repoShort(r))} <b>${n}</b></button>`;});
   bar.innerHTML=h;
 }
+const VIEW_TABS=[['tLane','lane'],['tAuthor','author'],['tFeedback','feedback'],['tWork','work']];
 function setView(v){VIEW=v;
-  for(const [id,name] of [['tLane','lane'],['tAuthor','author'],['tFeedback','feedback'],['tWork','work']])
+  for(const [id,name] of VIEW_TABS)
     document.getElementById(id).classList.toggle('active',v===name);
   document.getElementById('refreshBtn').textContent=(v==='work')?'🔄 이슈 가져오기':'🔄 PR 가져오기';
   renderFilter();render();}
+function renderSideCounts(){
+  const review=DATA.filter(c=>c.kind!=='issue').length;
+  const work=DATA.filter(c=>c.kind==='issue').length;
+  document.getElementById('cLane').textContent=review;
+  document.getElementById('cAuthor').textContent=review;
+  document.getElementById('cFeedback').textContent=FEEDBACK.length;
+  document.getElementById('cWork').textContent=work;
+}
 async function load(){
   const [rb,re,rf]=await Promise.all([fetch('/api/board'),fetch('/api/engines'),fetch('/api/feedback')]);
   DATA=await rb.json();
   try{FEEDBACK=await rf.json();}catch(e){FEEDBACK=[];}
   try{ENGINES=await re.json();}catch(e){}
-  document.getElementById('sub').textContent=DATA.length+'개 카드';
+  document.getElementById('sub').textContent=
+    (VIEW==='work'?scopedData().length+'개 이슈':scopedData().length+'개 카드');
   renderEngStat();
+  renderSideCounts();
   renderFilter();
   render();
   if(SHOW_MENTIONS)loadMentions();

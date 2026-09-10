@@ -204,3 +204,31 @@ class RefreshScopeTest(unittest.TestCase):
         db.upsert_card(self.c, keys.issue_key(REPO, 2), "issue", REPO, 2, status="triage")
         self.assertEqual(dashboard.refresh_poll("work")["total"], 1)
         self.assertEqual(dashboard.refresh_poll("review")["total"], 1)
+
+
+class SideNavTest(unittest.TestCase):
+    """뷰 전환은 사이드 메뉴로, repo 필터바는 종전 위치·마크업 그대로."""
+
+    def setUp(self):
+        self.html = dashboard.HTML
+
+    def test_view_switch_moved_out_of_the_header(self):
+        header = self.html[self.html.index("<header>"):self.html.index("</header>")]
+        self.assertNotIn('class="toggle"', header)
+        self.assertIn('<nav class="side">', self.html)
+
+    def test_side_menu_groups_review_and_work(self):
+        for el in ("tLane", "tAuthor", "tFeedback", "tWork"):
+            self.assertIn(f'id="{el}"', self.html)
+        self.assertIn(">PR 리뷰<", self.html)
+        self.assertIn(">작업<", self.html)
+
+    def test_repo_filterbar_is_untouched_and_inside_main(self):
+        self.assertIn('<div class="filterbar" id="filterbar"></div>', self.html)
+        self.assertLess(self.html.index('<div class="main">'),
+                        self.html.index('id="filterbar"'))
+
+    def test_board_and_mentions_stay_with_the_filter_in_main(self):
+        main = self.html[self.html.index('<div class="main">'):self.html.index("</nav>") + 10000]
+        for el in ('id="filterbar"', 'id="mentions"', 'id="board"'):
+            self.assertIn(el, main)
