@@ -18,6 +18,19 @@ class CodexError(RuntimeError):
     pass
 
 
+# 프롬프트는 **stdin** 으로 넘긴다. argv 로 주면 2KB 정도만 넘어도 codex 프로세스가
+# 신호로 즉사한다(rc=-9, stderr 비어 있음). 플래그·훅·모델과 무관하게 재현되고
+# 리뷰 프롬프트는 진작 그 크기를 넘는다. `-` 는 codex 가 문서화한 stdin 경로다.
+STDIN_MARKER = "-"
+
+
+def _signal_hint(rc: int) -> str:
+    if rc >= 0:
+        return ""
+    return (f" [신호 {-rc} 로 종료 — 프롬프트를 argv 로 넘기면 큰 입력에서 즉사한다."
+            f" stdin({STDIN_MARKER}) 경로를 쓰는지 확인]")
+
+
 # codex는 stderr 앞부분에 배너/MCP 연결 실패/훅 로그를 쏟고, 진짜 실패 사유(usage
 # limit, 인증 만료 등)는 맨 끝 줄에 찍는다. 앞에서 자르면 모든 실패가 똑같은
 # "rmcp transport closed"로 보여 원인 파악이 불가능해진다 — 잡음을 걷고 뒤에서 남긴다.
@@ -53,12 +66,13 @@ def run_impl(prompt: str, cwd: str, timeout: int = 3600) -> str:
     ]
     if MODEL:
         args += ["-m", MODEL]
-    args.append(prompt)
+    args.append(STDIN_MARKER)
     try:
-        proc = subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=timeout,
-                              env=config.subprocess_env())
+        proc = subprocess.run(args, cwd=cwd, input=prompt, capture_output=True, text=True,
+                              timeout=timeout, env=config.subprocess_env())
         if proc.returncode != 0:
-            raise CodexError(f"codex impl failed (rc={proc.returncode}): {_clean_stderr(proc.stderr)}")
+            raise CodexError(f"codex impl failed (rc={proc.returncode}): "
+                             f"{_clean_stderr(proc.stderr)}{_signal_hint(proc.returncode)}")
         with open(out_path, encoding="utf-8") as f:
             text = f.read().strip()
         return text or proc.stdout
@@ -84,12 +98,13 @@ def run(prompt: str, cwd: str = None, add_dir: str = None, timeout: int = 1200) 
         args += ["-C", cwd]
     if MODEL:
         args += ["-m", MODEL]
-    args.append(prompt)
+    args.append(STDIN_MARKER)
     try:
-        proc = subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=timeout,
-                              env=config.subprocess_env())
+        proc = subprocess.run(args, cwd=cwd, input=prompt, capture_output=True, text=True,
+                              timeout=timeout, env=config.subprocess_env())
         if proc.returncode != 0:
-            raise CodexError(f"codex failed (rc={proc.returncode}): {_clean_stderr(proc.stderr)}")
+            raise CodexError(f"codex failed (rc={proc.returncode}): "
+                             f"{_clean_stderr(proc.stderr)}{_signal_hint(proc.returncode)}")
         with open(out_path, encoding="utf-8") as f:
             text = f.read().strip()
         return text or proc.stdout
