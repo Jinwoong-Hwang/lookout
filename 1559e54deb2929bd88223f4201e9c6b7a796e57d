@@ -1,0 +1,19 @@
+.gitignore
+  h_03b13cada2edad 6
+config.example.json
+  h_03b13cada2edad 26-39
+src/worktree.py
+  h_03b13cada2edad 9,80-203
+tests/test_impl_worktree.py
+  h_03b13cada2edad 1-144
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "1559e54deb2929bd88223f4201e9c6b7a796e57d",
+  "prompts": {},
+  "humans": {
+    "h_03b13cada2edad": {
+      "author": "woong@zigbang.com"
+    }
+  }
+}
