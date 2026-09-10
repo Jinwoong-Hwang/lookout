@@ -6,6 +6,7 @@ The worktree is detached and NEVER pushed; target code is read-only.
 """
 import os
 import base64
+import re
 import subprocess
 import threading
 
@@ -74,6 +75,130 @@ def ensure_clone(repo: str) -> str:
             if proc.returncode != 0:
                 raise RuntimeError(f"clone {repo} failed: {proc.stderr.strip()[:300]}")
     return repo_dir
+
+
+# ── 구현용 워크트리 (쓰기) ────────────────────────────────────────────────
+# 리뷰용(make_worktree)과 함수를 갈라 둔다. 같은 함수에 플래그를 붙이면 리뷰 경로가
+# 실수로 쓰기 가능한 워크트리를 받을 수 있고, 그건 ADR-009를 조용히 깨는 길이다.
+
+IMPL_WT_NAME = "impl"   # repo당 상주 워크트리 1개
+
+
+class ImplRepoUnknown(RuntimeError):
+    """구현 대상 repo의 로컬 체크아웃 경로가 설정에 없다."""
+
+
+def _impl_base_dir() -> str:
+    return config.path(CFG.get("impl_workspace_dir", "workspaces"))
+
+
+def impl_parent(repo: str) -> str:
+    """구현 워크트리의 부모가 될 로컬 체크아웃.
+
+    캐시 클론(repos/)은 --filter=blob:none이라 빌드·테스트가 온전히 돌지 않는다.
+    사용자 체크아웃을 부모로 쓰면 오브젝트 스토어를 공유해 재클론이 없고(zigbang-client
+    .git만 2.6G) partial filter도 없다."""
+    raw = (CFG.get("impl_repo_paths") or {}).get(repo)
+    if not raw:
+        raise ImplRepoUnknown(f"{repo}: impl_repo_paths에 로컬 체크아웃 경로가 없다")
+    path = os.path.expanduser(raw)
+    if not os.path.exists(os.path.join(path, ".git")):
+        raise ImplRepoUnknown(f"{repo}: {path} 는 git 체크아웃이 아니다")
+    return path
+
+
+def impl_worktree_path(repo: str) -> str:
+    return os.path.join(_impl_base_dir(), _slug(repo), IMPL_WT_NAME)
+
+
+def _impl_base_ref(repo_dir: str, repo: str) -> str:
+    configured = (CFG.get("impl_base_ref") or {}).get(repo)
+    if configured:
+        return configured
+    ref = _git(repo_dir, "symbolic-ref", "refs/remotes/origin/HEAD", check=False).stdout.strip()
+    return ref.replace("refs/remotes/", "") if ref else "origin/HEAD"
+
+
+def _assert_bot_worktree(path: str):
+    """reset --hard / clean 을 돌리기 전 가드.
+
+    우리가 만든 워크스페이스 안이 아니면 절대 손대지 않는다 — 사용자 체크아웃에서
+    이게 돌면 작업 중인 변경이 사라진다."""
+    base = os.path.realpath(_impl_base_dir())
+    real = os.path.realpath(path)
+    if not real.startswith(base + os.sep):
+        raise RuntimeError(f"refusing to reset a worktree outside {base}: {real}")
+    if not os.path.exists(os.path.join(real, ".git")):
+        raise RuntimeError(f"not a git worktree: {real}")
+
+
+def run_impl_setup(repo: str, wt: str) -> bool:
+    """새 워크트리에서 한 번 돌리는 설치 명령(운영자 설정)."""
+    cmd = (CFG.get("impl_setup_cmd") or {}).get(repo)
+    if not cmd:
+        return False
+    proc = subprocess.run(cmd, shell=True, cwd=wt, capture_output=True, text=True,
+                          timeout=int(CFG.get("impl_setup_timeout", 1800)),
+                          env=config.subprocess_env())
+    if proc.returncode != 0:
+        raise RuntimeError(f"impl setup failed ({cmd}): {proc.stderr.strip()[-300:]}")
+    return True
+
+
+def impl_branch_name(display: str, title: str = "") -> str:
+    """대상 repo의 브랜치 관례를 그대로 따른다.
+
+    실측(zigbang/ceo-client origin/master): feature/PH-1682,
+    feature/PH-1262-tax-invoice-history, feat/PH-1572/... — PH 번호가 이미 브랜치명에
+    쓰인다. 봇 전용 프리픽스(lookout/*)를 쓰면 브랜치 보호 규칙이나 CI 글롭(feature/*)에서
+    빠질 수 있으므로 관례를 벗어나지 않는다. 한국어 제목은 슬러그가 비므로 번호만 남는다."""
+    tmpl = CFG.get("impl_branch_template") or "feature/{display}-{slug}"
+    # 앞머리 [FE][CEO_APP] 같은 태그는 라우팅 메타데이터라 브랜치명에 넣지 않는다
+    body = re.sub(r"^(\s*\[[^\]]*\])+", "", title or "")
+    slug = re.sub(r"[^a-z0-9]+", "-", body.lower()).strip("-")[:40].strip("-")
+    return re.sub(r"[-/]+$", "", tmpl.format(display=display, slug=slug))
+
+
+def make_impl_worktree(repo: str, branch: str, base_ref: str = None,
+                       setup: bool = True) -> str:
+    """repo당 상주 구현 워크트리를 준비하고 `branch`로 세운다.
+
+    이슈마다 새 워크트리를 파면 node_modules를 매번 새로 설치해야 한다(zigbang-client는
+    체크아웃 21G 중 대부분이 그것). 그래서 repo당 하나를 두고 브랜치만 갈아 쓴다.
+    동시 작업은 _repo_lock으로 직렬화된다."""
+    parent = impl_parent(repo)
+    wt = impl_worktree_path(repo)
+    fresh = False
+    with _repo_lock(repo):
+        base = base_ref or _impl_base_ref(parent, repo)
+        _git(parent, "fetch", "--quiet", "origin")
+        if os.path.exists(os.path.join(wt, ".git")):
+            _assert_bot_worktree(wt)
+            # 지난 작업 잔여물 정리. -x 는 쓰지 않는다 — node_modules(ignored)를
+            # 지워버리면 상주 워크트리를 두는 이유가 없어진다.
+            _git(wt, "reset", "--hard", check=False)
+            _git(wt, "clean", "-fd", check=False)
+            _git(wt, "checkout", "-B", branch, base)
+        else:
+            os.makedirs(os.path.dirname(wt), exist_ok=True)
+            _git(parent, "worktree", "prune")
+            _git(parent, "worktree", "add", "-B", branch, wt, base)
+            fresh = True
+    if fresh and setup:
+        run_impl_setup(repo, wt)
+    return wt
+
+
+def remove_impl_worktree(repo: str):
+    """워크트리만 지운다. 브랜치는 남긴다 — PR이 그 브랜치를 가리키고 있을 수 있다."""
+    wt = impl_worktree_path(repo)
+    if not os.path.exists(os.path.join(wt, ".git")):
+        return
+    _assert_bot_worktree(wt)
+    parent = impl_parent(repo)
+    with _repo_lock(repo):
+        _git(parent, "worktree", "remove", "--force", wt, check=False)
+        _git(parent, "worktree", "prune", check=False)
 
 
 def make_worktree(repo: str, pr: int, head_sha: str) -> str:

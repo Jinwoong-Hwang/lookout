@@ -23,6 +23,20 @@
   "slack_user_id": "",
   "slack_workspace": "",
 
+  "_impl": "구현 워커가 쓰는 로컬 체크아웃. 캐시 클론(repos/)은 --filter=blob:none이라 빌드·테스트에 부적합하므로, 오브젝트 스토어를 공유하는 실제 체크아웃을 부모로 쓴다.",
+  "impl_repo_paths": {
+    "your-org/your-repo": "~/path/to/your-repo"
+  },
+  "_impl_workspace_dir": "구현 워크트리를 모아두는 곳(HERMES_HOME 기준). repo 폴더 안에 두면 jest/eslint/tsc/yarn이 긁는다.",
+  "impl_workspace_dir": "workspaces",
+  "_impl_base_ref": "브랜치를 딸 기준. 비우면 origin/HEAD를 따라간다.",
+  "impl_base_ref": {},
+  "_impl_setup_cmd": "새 워크트리에서 한 번 돌릴 설치 명령. repo -> 셸 명령.",
+  "impl_setup_cmd": {},
+  "_impl_branch_template": "브랜치 이름. {display}=PH-1767, {slug}=제목 슬러그. 대상 repo 관례를 따를 것(예: feature/PH-1682).",
+  "impl_branch_template": "feature/{display}-{slug}",
+  "impl_setup_timeout": 1800,
+
   "_issues": "(선택) 작업 진입점 — 할당된 GitHub 이슈를 triage 카드로 올린다. issue_repos가 비면 이 기능은 꺼진다.",
   "issue_repos": ["your-org/product-hub"],
   "_issue_assignee": "gh --assignee 값. '@me'면 내게 할당된 것만. 비우면 필터 없음(대량 주의).",

@@ -3,6 +3,7 @@ config.json
 db/
 worktrees/
 repos/
+workspaces/
 logs/
 
 # 빌드 산출물
