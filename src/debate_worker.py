@@ -11,7 +11,7 @@ import hashlib
 import json
 import re
 
-from . import (claude_runner, db, engines, ghclient, impl_worker, notify,
+from . import (claude_runner, config, db, engines, ghclient, impl_worker, notify,
                prompt_tpl, worktree)
 from .config import CFG
 
@@ -114,11 +114,35 @@ def _finish(c, card, meta, turns, reason: str):
     )
 
 
+def _context(c, card, meta) -> tuple[str, str]:
+    """(대상 repo, 엔진이 볼 디렉터리).
+
+    이슈 카드는 구현으로 이어지므로 구현 브랜치·워크트리를 미리 만들어 그 위에서
+    토론한다. 주제 카드(debate_only)는 구현으로 가지 않으니 브랜치를 만들지 않고
+    체크아웃을 그대로 읽는다 — 토론 단계는 양쪽 다 read-only 라서 안전하다."""
+    if meta.get("mode") == "debate_only":
+        repo = (meta.get("target_repo") or "").strip()
+        if not repo:
+            return "", config.HERMES_HOME
+        try:
+            return repo, worktree.impl_parent(repo)
+        except worktree.ImplRepoUnknown:
+            return repo, config.HERMES_HOME
+    repo = impl_worker.target_repo(meta)          # TargetUnknown 은 호출부가 처리
+    display = meta.get("display") or f"#{card['pr_number']}"
+    branch = worktree.impl_branch_name(display, meta.get("title") or "")
+    db.merge_payload(c, card["id"], {"branch": branch})
+    # 설치는 건너뛴다 — 토론은 읽기만 하고, 구현 스테이지가 같은 워크트리를 이어받아
+    # 그때 설치한다.
+    return repo, worktree.make_impl_worktree(repo, branch, setup=False)
+
+
 def process(c, card):
     meta = json.loads(card["payload"]) if card["payload"] else {}
     display = meta.get("display") or f"#{card['pr_number']}"
+    topic_only = meta.get("mode") == "debate_only"
     try:
-        repo = impl_worker.target_repo(meta)
+        repo, cwd = _context(c, card, meta)
     except impl_worker.TargetUnknown as e:
         db.set_status(c, card["id"], "failed")
         db.log_event(c, "impl_target_unknown", card["key"],
@@ -137,23 +161,22 @@ def process(c, card):
                      {"role": role, "engine": engine})
         return
 
-    branch = worktree.impl_branch_name(display, meta.get("title") or "")
-    issue = ghclient.issue_view(card["repo"], card["pr_number"])
-    # 토론은 코드를 읽기만 한다. 설치는 필요 없으니 setup=False —
-    # 구현 스테이지가 같은 워크트리·브랜치를 이어받아 그때 설치한다.
-    wt = worktree.make_impl_worktree(repo, branch, setup=False)
+    if topic_only:
+        body = meta.get("topic") or ""
+    else:
+        body = (ghclient.issue_view(card["repo"], card["pr_number"]).get("body") or "")
 
     prompt = prompt_tpl.render(
         f"debate.{role}.md",
-        DISPLAY=display, TITLE=meta.get("title") or issue.get("title") or "",
-        TARGET_REPO=repo,
-        BODY=(issue.get("body") or "(본문 없음)")[:BODY_CHARS],
+        DISPLAY=display, TITLE=meta.get("title") or "",
+        TARGET_REPO=repo or "(특정 저장소 없음 — 주어진 주제만으로 논의)",
+        BODY=(body or "(본문 없음)")[:BODY_CHARS],
         INSTRUCTION=(meta.get("instruction") or "(없음)"),
         ROUND=round_no + 1, TRANSCRIPT=_render_transcript(turns),
     )
     db.log_event(c, "debate_turn_started", card["key"],
                  {"round": round_no + 1, "role": role, "engine": engine})
-    raw = engines.run(prompt, engine=engine, cwd=wt, add_dir=wt)
+    raw = engines.run(prompt, engine=engine, cwd=cwd, add_dir=cwd)
     try:
         turn = claude_runner.parse_json(raw)
     except claude_runner.ClaudeError:
@@ -162,8 +185,10 @@ def process(c, card):
     turn.update({"round": round_no + 1, "role": role, "engine": engine,
                  "hash": _claim_hash(turn)})
     turns.append(turn)
-    db.merge_payload(c, card["id"], {"debate": turns, "target_repo": repo,
-                                     "branch": branch, "worktree": wt})
+    patch = {"debate": turns, "worktree": cwd}
+    if repo:
+        patch["target_repo"] = repo
+    db.merge_payload(c, card["id"], patch)
     db.log_event(c, "debate_turn", card["key"],
                  {"round": turn["round"], "role": role, "engine": engine,
                   "verdict": turn.get("verdict"), "claim": (turn.get("claim") or "")[:200]})

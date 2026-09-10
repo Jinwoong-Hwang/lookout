@@ -14,7 +14,8 @@ import ipaddress
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from . import commenter, db, engines, feedback, ghclient, poller, profiles, router, worktree
+from . import (commenter, db, engines, feedback, ghclient, keys, poller, profiles,
+               router, worktree)
 from .config import CFG
 
 
@@ -119,6 +120,8 @@ def build_board():
                     "verify": meta.get("verify") or {},
                     "agreement": meta.get("agreement") or {},
                     "spec_amendment": meta.get("spec_amendment", ""),
+                    "topic": meta.get("topic", ""),
+                    "debate_only": meta.get("mode") == "debate_only",
                     "debate": meta.get("debate") or [],
                     "pr_url": meta.get("pr_url", ""),
                     "pr_dryrun": bool(meta.get("pr_dryrun")),
@@ -264,7 +267,8 @@ EVENT_LABELS = {
     "debate_turn_started": "토론 턴 시작", "debate_turn": "토론 턴",
     "debate_finished": "토론 종료", "debate_engine_missing": "엔진 없음(토론 불가)",
     "operator_spec_approved": "설계 승인(사람)", "operator_spec_rejected": "설계 반려(사람)",
-    "operator_debate_steer": "설계 피드백(사람) — 토론 재개", "operator_retry": "재시도(사람)",
+    "operator_debate_steer": "설계 피드백(사람) — 토론 재개",
+    "topic_created": "주제 토론 생성", "topic_accepted": "결과 채택(사람)", "operator_retry": "재시도(사람)",
     "pr_dryrun": "PR dry-run", "pr_opened": "PR 생성", "pr_open_no_branch": "브랜치 정보 없음",
     "review_quota_paused": "토큰 소진 — 대기열 복귀", "review_gave_up": "재시도 포기",
     "stage_error": "스테이지 오류",
@@ -322,6 +326,14 @@ def do_action(action, card_id, engine="claude", text=None):
         elif action == "approve_spec" and card["kind"] == "issue":
             if card["status"] != "spec_blocked":
                 return False
+            meta_now = json.loads(card["payload"]) if card["payload"] else {}
+            if meta_now.get("mode") == "debate_only":
+                # 주제 토론은 구현으로 가지 않는다. 승인 = 결과 채택.
+                if (text or "").strip():
+                    db.merge_payload(c, card["id"], {"spec_amendment": (text or "").strip()})
+                db.set_status(c, card["id"], "done", blocked=0)
+                db.log_event(c, "topic_accepted", card["key"])
+                return True
             amendment = (text or "").strip()
             if amendment:
                 # 합의문을 고치지 않고 위에 얹는다 — 토론 기록은 그대로 남아야 한다
@@ -441,6 +453,32 @@ def do_finding_action(action, finding_id):
     if kick:
         kick_tick()
     return True
+
+
+TOPIC_REPO = "-"          # 이슈가 없으니 repo/pr_number 는 센티넬 (컬럼이 NOT NULL)
+
+
+def create_topic(text: str, repo: str = "") -> dict:
+    """이슈에 매달리지 않은 순수 토론 카드.
+
+    구현으로 가지 않는다 — 산출물은 합의문 하나다. 설계 스테이지를 그대로 쓰되
+    승인은 '결과 채택'이라 done 으로 끝난다."""
+    topic = (text or "").strip()
+    if not topic:
+        return {"ok": False, "reason": "주제가 비었습니다"}
+    title = topic.splitlines()[0][:90]
+    with db.connect() as c:
+        seq = c.execute("SELECT COUNT(*) n FROM cards WHERE repo=?",
+                        (TOPIC_REPO,)).fetchone()["n"] + 1
+        key = keys.topic_key(seq, db.now())
+        card_id = db.upsert_card(
+            c, key, "issue", TOPIC_REPO, 0, status="spec",
+            payload={"display": f"TOPIC-{seq}", "title": title, "topic": topic,
+                     "mode": "debate_only", "target_repo": (repo or "").strip(),
+                     "labels": [], "assignees": []})
+        db.log_event(c, "topic_created", key, {"title": title, "repo": repo or "(없음)"})
+    kick_tick()
+    return {"ok": True, "card_id": card_id, "display": f"TOPIC-{seq}"}
 
 
 def refresh_poll(scope: str = "review"):
@@ -682,6 +720,14 @@ display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hi
   background:var(--panel);color:var(--fg);border:1px solid var(--line);border-radius:6px;
   padding:6px 7px;font:inherit;font-size:11.5px;line-height:1.4}
 .instr textarea::placeholder{color:var(--dim)}
+.composer{padding:12px 22px;border-bottom:1px solid var(--line);background:var(--panel)}
+.composer textarea{width:100%;box-sizing:border-box;min-height:52px;resize:vertical;
+  background:var(--panel2);color:var(--ink);border:1px solid var(--line);border-radius:9px;
+  padding:8px 10px;font:inherit;font-size:12.5px;line-height:1.45}
+.composer .crow{display:flex;gap:8px;margin-top:8px;align-items:center}
+.composer input{flex:1 1 auto;min-width:0;background:var(--panel2);color:var(--ink);
+  border:1px solid var(--line);border-radius:9px;padding:7px 10px;font:inherit;font-size:12.5px}
+.composer button{flex:0 0 auto}
 .tl{margin-top:6px;border:1px solid var(--line);border-radius:9px;overflow:hidden}
 .tlrow{display:grid;grid-template-columns:66px 116px 1fr;gap:8px;padding:5px 10px;
   font-size:11.5px;border-bottom:1px solid var(--line);align-items:baseline}
@@ -790,6 +836,13 @@ background:transparent;border:none;padding:3px 5px;border-radius:6px;opacity:.4}
 </nav>
 <div class="main">
 <div class="filterbar" id="filterbar"></div>
+<section class="composer" id="composer" style="display:none">
+  <textarea id="topicText" placeholder="주제를 던지면 두 엔진이 토론해서 결론만 돌려줍니다 — 이슈 없이도 됩니다 (예: 이 파이프라인의 취약점은 무엇인가)"></textarea>
+  <div class="crow">
+    <input id="topicRepo" placeholder="읽을 저장소 (선택) — 예: zigbang/ceo-client">
+    <button class="go" onclick="newTopic()">🗣 토론 시작</button>
+  </div>
+</section>
 <section class="mentions" id="mentions" style="display:none"></section>
 <div class="board" id="board"></div>
 </div>
@@ -877,6 +930,7 @@ function setView(v){VIEW=v;
   for(const [id,name] of VIEW_TABS)
     document.getElementById(id).classList.toggle('active',v===name);
   document.getElementById('refreshBtn').textContent=(v==='work')?'🔄 이슈 가져오기':'🔄 PR 가져오기';
+  document.getElementById('composer').style.display=(v==='work')?'':'none';
   renderFilter();render();}
 function renderSideCounts(){
   const review=DATA.filter(c=>c.kind!=='issue').length;
@@ -1040,7 +1094,7 @@ function issueTile(c){
       <textarea id="spec${c.id}" placeholder="합의에 대한 피드백 (선택) — 승인 시 수정 지시로, 다시 토론 시 방향 지시로 쓰입니다"
         onclick="event.stopPropagation()" onkeydown="event.stopPropagation()"></textarea>
       <div class="rev">
-        <button class="claude" onclick="approveSpec(event,${c.id})">✅ 승인</button>
+        <button class="claude" onclick="approveSpec(event,${c.id})">${c.debate_only?'✅ 결과 채택':'✅ 승인'}</button>
         <button class="codex" onclick="resumeDebate(event,${c.id})">🔁 다시 토론</button>
       </div>
       <div class="rev"><button onclick="rejectSpec(event,${c.id})">↩︎ 반려</button></div>
@@ -1174,7 +1228,7 @@ function openIssueModal(c){
     if(AG.steers)html+=`<div class="lbl2">사람 개입 ${AG.steers}회</div>`;
     if(c.spec_amendment)html+=`<div class="lbl2">운영자 수정 지시 (구현의 최우선 기준)</div><div class="pre">${esc(c.spec_amendment)}</div>`;
     if(c.status==='spec_blocked')
-      html+=`<div class="btns"><button class="go" onclick="approveSpec(event,${c.id})">✅ 설계 승인 — 구현 시작</button>`
+      html+=`<div class="btns"><button class="go" onclick="approveSpec(event,${c.id})">${c.debate_only?'✅ 결과 채택 — 완료로':'✅ 설계 승인 — 구현 시작'}</button>`
         +`<button onclick="rejectSpec(event,${c.id})">↩︎ 반려</button></div>`;
   }
   if((c.debate||[]).length){
@@ -1282,6 +1336,17 @@ function rejectSpec(e,id){e.stopPropagation();
   if(confirm('설계를 반려하고 대기로 되돌릴까요? 토론 기록은 보관됩니다.'))act(e,'reject_spec',id);}
 function approvePr(e,id){e.stopPropagation();
   if(confirm('이 브랜치를 push하고 draft PR을 올릴까요? (ready 전환은 직접 하셔야 합니다)'))act(e,'unblock',id);}
+async function newTopic(){
+  const ta=document.getElementById('topicText'), ri=document.getElementById('topicRepo');
+  const text=ta.value.trim();
+  if(!text){showToast('주제를 입력하세요',false);return;}
+  showToast('토론 시작 🗣',true);
+  const r=await fetch('/api/new-topic',{method:'POST',
+    headers:{'Content-Type':'application/json','X-Lookout-Action':'1'},
+    body:JSON.stringify({text,repo:ri.value.trim()})}).then(x=>x.json()).catch(()=>({ok:false}));
+  if(r.ok){ta.value='';showToast(r.display+' 토론 시작 🗣',true);}
+  else showToast('시작할 수 없습니다 — '+(r.reason||''),false);
+  load();}
 function stopReview(e,id){e.stopPropagation();
   if(confirm('이 리뷰를 강제 중지할까요? (진행 중인 분석을 종료하고 목록에서 제외)'))act(e,'stop',id);}
 function reReview(e,id){e.stopPropagation();
@@ -1367,6 +1432,10 @@ class Handler(BaseHTTPRequestHandler):
         data = json.loads(self.rfile.read(n) or "{}")
         if self.path == "/api/refresh":
             self._send(200, json.dumps(refresh_poll(data.get("scope", "review"))))
+            return
+        if self.path == "/api/new-topic":
+            self._send(200, json.dumps(create_topic(data.get("text", ""),
+                                                    data.get("repo", ""))))
             return
         if self.path == "/api/action":
             ok = do_action(data.get("action"), int(data.get("card_id", 0)),

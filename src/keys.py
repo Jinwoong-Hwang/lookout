@@ -27,6 +27,12 @@ def issue_key(repo: str, number: int) -> str:
     return f"issue-work:{repo}#{number}"
 
 
+def topic_key(seq: int, ts: float) -> str:
+    """이슈에 매달리지 않은 순수 토론 카드. repo#번호가 없으므로 시각+순번으로
+    유일성을 만든다."""
+    return f"topic:{int(ts)}-{seq}"
+
+
 def finding_fp(repo: str, pr: int, file: str, line, rule: str) -> str:
     """Stable fingerprint for dedupe across re-reviews (head-independent)."""
     return f"{repo}#{pr}:{file}:{line}:{rule}"

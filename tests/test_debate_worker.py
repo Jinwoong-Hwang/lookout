@@ -151,7 +151,7 @@ class DebateWorkerTest(unittest.TestCase):
         self.assertIn("engines.run(", src)
         self.assertNotIn("run_impl", src)
         # 설치는 돌리지 않는다 — 토론은 코드를 읽기만 한다
-        self.assertIn("setup=False", src)
+        self.assertIn("setup=False", inspect.getsource(debate_worker._context))
 
     def test_prompt_carries_the_transcript_from_round_two(self):
         self._reply({"claim": "안 v1", "proposal": "P1", "verdict": "CONTINUE"},
@@ -227,3 +227,56 @@ class OperatorSteerTest(DebateWorkerTest):
         ag = self._payload()["agreement"]
         self.assertEqual(ag["rounds"], 2)     # operator 턴은 라운드가 아니다
         self.assertEqual(ag["steers"], 1)
+
+
+class TopicDebateTest(unittest.TestCase):
+    """이슈 없이 주제만으로도 토론이 돌아야 한다. 구현으로는 가지 않는다."""
+
+    def setUp(self):
+        self.c = sqlite3.connect(":memory:")
+        self.c.row_factory = sqlite3.Row
+        self.c.executescript(db.SCHEMA)
+        self.c.execute("ALTER TABLE cards ADD COLUMN engine TEXT")
+        self.saved = {"parent": worktree.impl_parent, "mk": worktree.make_impl_worktree}
+        self.made = []
+        worktree.make_impl_worktree = lambda *a, **k: self.made.append(a) or "/wt"
+        worktree.impl_parent = lambda r: "/checkouts/" + r.split("/")[-1]
+
+    def tearDown(self):
+        worktree.impl_parent = self.saved["parent"]
+        worktree.make_impl_worktree = self.saved["mk"]
+        self.c.close()
+
+    def _card(self, **meta):
+        base = {"display": "TOPIC-1", "title": "t", "topic": "주제",
+                "mode": "debate_only"}
+        base.update(meta)
+        key = keys.topic_key(1, 1000.0)
+        db.upsert_card(self.c, key, "issue", "-", 0, status="spec", payload=base)
+        return db.get_card(self.c, key)
+
+    def test_topic_with_a_repo_reads_the_checkout_without_making_a_branch(self):
+        card = self._card(target_repo="acme/web")
+        repo, cwd = debate_worker._context(self.c, card, json.loads(card["payload"]))
+        self.assertEqual((repo, cwd), ("acme/web", "/checkouts/web"))
+        self.assertEqual(self.made, [], "주제 토론은 구현 브랜치를 만들지 않는다")
+
+    def test_topic_without_a_repo_falls_back_to_lookout_itself(self):
+        card = self._card()
+        repo, cwd = debate_worker._context(self.c, card, json.loads(card["payload"]))
+        self.assertEqual(repo, "")
+        self.assertEqual(cwd, debate_worker.config.HERMES_HOME)
+
+    def test_unconfigured_repo_does_not_stop_the_debate(self):
+        worktree.impl_parent = lambda _r: (_ for _ in ()).throw(
+            worktree.ImplRepoUnknown("설정 없음"))
+        card = self._card(target_repo="acme/unknown")
+        repo, cwd = debate_worker._context(self.c, card, json.loads(card["payload"]))
+        self.assertEqual(repo, "acme/unknown")
+        self.assertEqual(cwd, debate_worker.config.HERMES_HOME)
+
+    def test_issue_card_still_gets_a_branch_and_worktree(self):
+        card = self._card(mode="debate", target_repo="acme/web", display="PH-9")
+        repo, cwd = debate_worker._context(self.c, card, json.loads(card["payload"]))
+        self.assertEqual((repo, cwd), ("acme/web", "/wt"))
+        self.assertTrue(self.made, "이슈 토론은 구현이 이어받을 워크트리를 만든다")

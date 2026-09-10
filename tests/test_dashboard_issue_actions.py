@@ -483,3 +483,63 @@ class SpecFeedbackTest(unittest.TestCase):
         self.assertIn("합의안", text)
         self.assertIn("운영자 수정 지시", text)
         self.assertIn("라우트에서 풀어라", text)
+
+
+class TopicCreationTest(unittest.TestCase):
+    """주제만 던져 토론시키는 경로 — 이슈 폴러와 무관하게 사람이 만든다."""
+
+    def setUp(self):
+        self.c = sqlite3.connect(":memory:")
+        self.c.row_factory = sqlite3.Row
+        self.c.executescript(db.SCHEMA)
+        self.c.execute("ALTER TABLE cards ADD COLUMN engine TEXT")
+        self.saved = {"connect": dashboard.db.connect, "kick": dashboard.kick_tick}
+
+        @contextlib.contextmanager
+        def fake_connect():
+            yield self.c
+
+        dashboard.db.connect = fake_connect
+        dashboard.kick_tick = lambda: None
+
+    def tearDown(self):
+        dashboard.db.connect = self.saved["connect"]
+        dashboard.kick_tick = self.saved["kick"]
+        self.c.close()
+
+    def _rows(self):
+        return self.c.execute("SELECT * FROM cards").fetchall()
+
+    def test_topic_card_starts_in_the_debate_lane(self):
+        out = dashboard.create_topic("이 파이프라인의 취약점은?\n두 번째 줄", "acme/web")
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["display"], "TOPIC-1")
+        row = self._rows()[0]
+        payload = json.loads(row["payload"])
+        self.assertEqual(row["status"], "spec")
+        self.assertEqual((row["repo"], row["pr_number"]), (dashboard.TOPIC_REPO, 0))
+        self.assertEqual(payload["mode"], "debate_only")
+        self.assertEqual(payload["title"], "이 파이프라인의 취약점은?")   # 첫 줄이 제목
+        self.assertIn("두 번째 줄", payload["topic"])                    # 본문은 전체
+
+    def test_empty_topic_is_refused(self):
+        self.assertFalse(dashboard.create_topic("   ")["ok"])
+        self.assertEqual(self._rows(), [])
+
+    def test_sequence_increments_per_topic(self):
+        dashboard.create_topic("a")
+        self.assertEqual(dashboard.create_topic("b")["display"], "TOPIC-2")
+
+    def test_accepting_a_topic_result_goes_to_done_not_implementing(self):
+        out = dashboard.create_topic("주제")
+        cid = out["card_id"]
+        db.set_status(self.c, cid, "spec_blocked", blocked=1)
+        self.assertTrue(dashboard.do_action("approve_spec", cid, text="이 결론 채택"))
+        row = self.c.execute("SELECT * FROM cards WHERE id=?", (cid,)).fetchone()
+        self.assertEqual(row["status"], "done")
+        self.assertEqual(json.loads(row["payload"])["spec_amendment"], "이 결론 채택")
+
+    def test_composer_shows_only_in_the_work_view(self):
+        self.assertIn('id="composer"', dashboard.HTML)
+        self.assertIn("""document.getElementById('composer').style.display=(v==='work')?'':'none';""",
+                      dashboard.HTML)
