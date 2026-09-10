@@ -35,7 +35,7 @@ WRITE_NETWORKS = tuple(ipaddress.ip_network(cidr) for cidr in
                        CFG.get("dashboard_write_networks", ["127.0.0.0/8", "::1/128"]))
 
 LANES = [
-    ("triage", "📥 Triage (대기)"),
+    ("triage", "📥 Triage (리뷰 대기)"),
     ("intake", "⏳ 시작됨"),
     ("reviewing", "🔍 리뷰 중"),
     ("verifying", "🧪 검증 중"),
@@ -46,13 +46,20 @@ LANES = [
     ("approving", "🚀 승인 중"),
     ("done", "🏁 완료 · 머지 대기"),
     ("failed", "⚠️ 실패 (재시도 필요)"),
-    # 이슈 작업 레인 — PR 리뷰 흐름(위)과 상태 이름이 겹치지 않아야 한다.
-    # 겹치면 db.cards_in(kind=)로 걸러도 대시보드 레인에서 섞인다.
+]
+
+# 이슈 작업 보드 — 리뷰 보드와 **다른 뷰**다. 같은 보드에 레인을 붙이면 컬럼이
+# 16개가 되고 Triage에 PR 카드와 이슈 카드가 섞인다. 리뷰 흐름은 그대로 둔다.
+# 상태 이름은 리뷰 레인과 겹치지 않아야 한다(db.cards_in은 status만 보므로).
+WORK_LANES = [
+    ("triage", "📥 대기 (내 이슈)"),
     ("spec", "🗣 설계 토론"),
     ("implementing", "🛠 구현 중"),
     ("impl_verify", "🧾 구현 검증"),
     ("pr_blocked", "🔒 PR 승인 대기"),
     ("pr_opening", "🚀 PR 올리는 중"),
+    ("done", "🏁 완료"),
+    ("failed", "⚠️ 실패 (재시도 필요)"),
 ]
 
 
@@ -321,12 +328,19 @@ def do_finding_action(action, finding_id):
     return True
 
 
-def refresh_poll():
-    """Run the poller now (bypass the interval) — pull new PRs/heads into triage."""
+def refresh_poll(scope: str = "review"):
+    """Run the poller now (bypass the interval).
+
+    보고 있는 보드만 갱신한다 — 작업 뷰에서 '이슈 가져오기'를 눌렀는데 PR 폴링이
+    돌면 리뷰 카드가 예고 없이 늘어난다."""
+    kind = "issue" if scope == "work" else "review"
     with db.connect() as c:
-        before = len(db.cards_in(c, ["triage"]))
-        poller.poll(c)
-        after = len(db.cards_in(c, ["triage"]))
+        before = len(db.cards_in(c, ["triage"], kind=kind))
+        if scope == "work":
+            poller.poll_issues(c)
+        else:
+            poller.poll(c)
+        after = len(db.cards_in(c, ["triage"], kind=kind))
     return {"added": max(0, after - before), "total": after}
 
 
@@ -618,7 +632,7 @@ background:transparent;border:none;padding:3px 5px;border-radius:6px;opacity:.4}
 .unreaddot{width:8px;height:8px;border-radius:50%;background:var(--accent);flex:0 0 auto;margin-top:5px}
 </style></head><body>
 <header><h1>👁 Lookout</h1>
-<div class="toggle"><button id="tLane" class="active" onclick="setView('lane')">레인별</button><button id="tAuthor" onclick="setView('author')">사람별</button><button id="tFeedback" onclick="setView('feedback')">리뷰 피드백</button></div>
+<div class="toggle"><button id="tLane" class="active" onclick="setView('lane')">레인별</button><button id="tAuthor" onclick="setView('author')">사람별</button><button id="tFeedback" onclick="setView('feedback')">리뷰 피드백</button><button id="tWork" onclick="setView('work')">🛠 작업</button></div>
 <button id="refreshBtn" onclick="refresh()">🔄 PR 가져오기</button>
 <span class="sub" id="sub">로딩…</span>
 <span class="sub" id="engStat" style="margin-left:14px"></span>
@@ -629,7 +643,7 @@ background:transparent;border:none;padding:3px 5px;border-radius:6px;opacity:.4}
 <div class="board" id="board"></div>
 <div class="ov" id="ov"><div class="modal" id="modal"></div></div>
 <script>
-const LANES=__LANES__;
+const LANES=__LANES__;const WORK_LANES=__WORK_LANES__;
 // Slack 미연동 — 멘션 섹션 숨김. Slack 연결 시 true 로 바꾸면 부활.
 const SHOW_MENTIONS=false;
 // ── 테마 (시스템/라이트/다크) — 클릭 순환, localStorage 저장 ──
@@ -679,9 +693,13 @@ function repoShort(r){return (r||'').split('/')[1]||r;}
 const REPO_COLORS=['#2dd4bf','#a78bfa','#fbbf24','#60a5fa','#4ade80','#fb7185'];
 function repoColor(r){let h=0;for(const ch of (r||''))h=(h*31+ch.charCodeAt(0))>>>0;return REPO_COLORS[h%REPO_COLORS.length];}
 function setRepo(r){REPO=r;renderFilter();render();}
-function viewData(){return REPO==='all'?DATA:DATA.filter(c=>c.repo===REPO);}
+// 리뷰 뷰는 이슈 카드를 보지 않고, 작업 뷰는 이슈 카드만 본다. 한 보드에 섞으면
+// Triage에 PR과 이슈가 뒤엉킨다.
+function scopedData(){return VIEW==='work'?DATA.filter(c=>c.kind==='issue')
+                                          :DATA.filter(c=>c.kind!=='issue');}
+function viewData(){const src=scopedData();return REPO==='all'?src:src.filter(c=>c.repo===REPO);}
 function viewFeedbackData(){return REPO==='all'?FEEDBACK:FEEDBACK.filter(f=>f.repo===REPO);}
-function filterSource(){return VIEW==='feedback'?FEEDBACK:DATA;}
+function filterSource(){return VIEW==='feedback'?FEEDBACK:scopedData();}
 function normalizeRepo(){const src=filterSource();if(REPO!=='all'&&!src.some(x=>x.repo===REPO))REPO='all';}
 function renderFilter(){
   normalizeRepo();
@@ -696,9 +714,9 @@ function renderFilter(){
   bar.innerHTML=h;
 }
 function setView(v){VIEW=v;
-  document.getElementById('tLane').classList.toggle('active',v==='lane');
-  document.getElementById('tAuthor').classList.toggle('active',v==='author');
-  document.getElementById('tFeedback').classList.toggle('active',v==='feedback');
+  for(const [id,name] of [['tLane','lane'],['tAuthor','author'],['tFeedback','feedback'],['tWork','work']])
+    document.getElementById(id).classList.toggle('active',v===name);
+  document.getElementById('refreshBtn').textContent=(v==='work')?'🔄 이슈 가져오기':'🔄 PR 가져오기';
   renderFilter();render();}
 async function load(){
   const [rb,re,rf]=await Promise.all([fetch('/api/board'),fetch('/api/engines'),fetch('/api/feedback')]);
@@ -754,7 +772,8 @@ async function mAct(id,action){
   await fetch('/api/mention-action',{method:'POST',headers:{'Content-Type':'application/json','X-Lookout-Action':'1'},body:JSON.stringify({action,mention_id:id})});
   loadMentions();
 }
-function render(){VIEW==='feedback'?renderFeedback():VIEW==='author'?renderByAuthor():renderLanes();}
+function render(){VIEW==='feedback'?renderFeedback():VIEW==='author'?renderByAuthor()
+    :renderLanes(VIEW==='work'?WORK_LANES:LANES);}
 function renderFeedback(){
   const list=viewFeedbackData();
   const board=document.getElementById('board');board.className='board stack';board.innerHTML='';
@@ -777,14 +796,15 @@ function feedbackItem(f){
   el.onclick=()=>openFeedbackModal(f);
   return el;
 }
-function renderLanes(){
+function renderLanes(lanes){
+  lanes=lanes||LANES;
   const board=document.getElementById('board');
   LANE_SCROLL={left:board.scrollLeft};
   board.querySelectorAll('.col .cards').forEach(cards=>LANE_SCROLL[cards.dataset.lane]=cards.scrollTop);
-  const byLane={};LANES.forEach(([k])=>byLane[k]=[]);
+  const byLane={};lanes.forEach(([k])=>byLane[k]=[]);
   viewData().forEach(c=>{if(byLane[c.status])byLane[c.status].push(c)});
   board.className='board';board.innerHTML='';
-  for(const [key,label] of LANES){
+  for(const [key,label] of lanes){
     const list=byLane[key]||[];
     const col=document.createElement('div');col.className='col';
     col.innerHTML=`<h2><span class="lh"><span class="dot" style="background:${smeta(key).c}"></span>${label}</span><span class="n">${list.length}</span></h2>`;
@@ -989,7 +1009,9 @@ async function refresh(){
   const b=document.getElementById('refreshBtn');const old=b.textContent;
   b.textContent='가져오는 중…';b.disabled=true;
   try{
-    const r=await fetch('/api/refresh',{method:'POST',headers:{'X-Lookout-Action':'1'}});const j=await r.json();
+    const r=await fetch('/api/refresh',{method:'POST',
+      headers:{'Content-Type':'application/json','X-Lookout-Action':'1'},
+      body:JSON.stringify({scope:VIEW==='work'?'work':'review'})});const j=await r.json();
     await load();
     b.textContent=j.added>0?`+${j.added}건 추가`:'최신 상태';
   }catch(e){b.textContent='실패';}
@@ -1014,7 +1036,8 @@ class Handler(BaseHTTPRequestHandler):
         path = parsed.path
         params = parse_qs(parsed.query)
         if path == "/" or path.startswith("/index"):
-            html = HTML.replace("__LANES__", json.dumps(LANES, ensure_ascii=False))
+            html = (HTML.replace("__LANES__", json.dumps(LANES, ensure_ascii=False))
+                        .replace("__WORK_LANES__", json.dumps(WORK_LANES, ensure_ascii=False)))
             self._send(200, html, "text/html; charset=utf-8")
         elif path == "/api/board":
             self._send(200, json.dumps(build_board(), ensure_ascii=False))
@@ -1054,7 +1077,7 @@ class Handler(BaseHTTPRequestHandler):
         n = int(self.headers.get("Content-Length", 0))
         data = json.loads(self.rfile.read(n) or "{}")
         if self.path == "/api/refresh":
-            self._send(200, json.dumps(refresh_poll()))
+            self._send(200, json.dumps(refresh_poll(data.get("scope", "review"))))
             return
         if self.path == "/api/action":
             ok = do_action(data.get("action"), int(data.get("card_id", 0)),
