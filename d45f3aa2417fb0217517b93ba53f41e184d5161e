@@ -1,0 +1,15 @@
+src/dashboard.py
+  h_03b13cada2edad 874-875,881-893,895-896,903-906,909-914,993-1028
+tests/test_dashboard_issue_actions.py
+  h_03b13cada2edad 3-5,7-8,240-293
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "d45f3aa2417fb0217517b93ba53f41e184d5161e",
+  "prompts": {},
+  "humans": {
+    "h_03b13cada2edad": {
+      "author": "woong@zigbang.com"
+    }
+  }
+}
