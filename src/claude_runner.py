@@ -16,6 +16,19 @@ EFFORT = CFG.get("claude_effort")  # low|medium|high|xhigh|max, None = 기본
 READONLY_ALLOWED = ["Read", "Grep", "Glob"]
 DISALLOWED = ["Write", "Edit", "Bash", "NotebookEdit", "WebFetch", "WebSearch"]
 
+# 구현 단계는 편집이 필요하다. 다만 Bash를 통째로 열면 엔진이 커밋·푸시를 할 수
+# 있고, 그러면 "커밋은 브로커가 한다"는 설계가 무의미해진다. 테스트·빌드 계열만
+# 패턴으로 열고 git은 읽기 전용 서브커맨드만 허용한다.
+IMPL_ALLOWED = [
+    "Read", "Grep", "Glob", "Edit", "Write", "MultiEdit", "NotebookEdit",
+    "Bash(yarn *)", "Bash(npm *)", "Bash(npx *)", "Bash(pnpm *)",
+    "Bash(node *)", "Bash(python3 *)", "Bash(pytest *)", "Bash(jest *)",
+    "Bash(tsc *)", "Bash(eslint *)", "Bash(prettier *)", "Bash(make *)",
+    "Bash(ls *)", "Bash(cat *)", "Bash(rg *)", "Bash(find *)",
+    "Bash(git status*)", "Bash(git diff*)", "Bash(git log*)", "Bash(git show*)",
+]
+IMPL_DISALLOWED = ["WebFetch", "WebSearch"]
+
 
 class ClaudeError(RuntimeError):
     pass
@@ -48,6 +61,34 @@ def run(prompt: str, cwd: str = None, add_dir: str = None, timeout: int = 900,
     try:
         env = json.loads(proc.stdout)
         return env.get("result", proc.stdout)
+    except json.JSONDecodeError:
+        return proc.stdout
+
+
+def run_impl(prompt: str, cwd: str, timeout: int = 3600,
+             model: str = None, effort: str = None) -> str:
+    """구현용 — 편집 허용, 커밋·푸시 불가(IMPL_ALLOWED 참고).
+
+    run()과 함수를 갈라 둔다. 같은 함수에 플래그를 붙이면 리뷰 경로가 실수로 쓰기
+    권한을 받을 수 있고, 그건 ADR-009를 조용히 깨는 길이다."""
+    args = [
+        CLAUDE, "-p", prompt,
+        "--output-format", "json",
+        "--model", model or MODEL,
+        "--permission-mode", "bypassPermissions",
+        "--add-dir", cwd,
+        "--allowedTools", *(CFG.get("impl_allowed_tools") or IMPL_ALLOWED),
+        "--disallowedTools", *IMPL_DISALLOWED,
+    ]
+    eff = EFFORT if effort is None else effort
+    if eff:
+        args += ["--effort", eff]
+    proc = subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=timeout,
+                          env=config.subprocess_env())
+    if proc.returncode != 0:
+        raise ClaudeError(f"claude impl failed (rc={proc.returncode}): {proc.stderr.strip()[-500:]}")
+    try:
+        return json.loads(proc.stdout).get("result", proc.stdout)
     except json.JSONDecodeError:
         return proc.stdout
 

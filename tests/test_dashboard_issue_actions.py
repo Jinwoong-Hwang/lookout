@@ -103,3 +103,40 @@ class DashboardIssueActionTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class IssueRetryRoutingTest(unittest.TestCase):
+    """failed 재시도는 자기 레인으로 돌아가야 한다 — intake로 보내면 리뷰 레인이라
+    kind 게이트 때문에 아무도 집어가지 않고 카드가 영원히 선다."""
+
+    def setUp(self):
+        self.c = sqlite3.connect(":memory:")
+        self.c.row_factory = sqlite3.Row
+        self.c.executescript(db.SCHEMA)
+        self.c.execute("ALTER TABLE cards ADD COLUMN engine TEXT")
+        self.saved = {"connect": dashboard.db.connect, "kick": dashboard.kick_tick}
+
+        @contextlib.contextmanager
+        def fake_connect():
+            yield self.c
+
+        dashboard.db.connect = fake_connect
+        dashboard.kick_tick = lambda: None
+
+    def tearDown(self):
+        dashboard.db.connect = self.saved["connect"]
+        dashboard.kick_tick = self.saved["kick"]
+        self.c.close()
+
+    def test_issue_card_retries_into_implementing(self):
+        key = keys.issue_key(REPO, 9)
+        cid = db.upsert_card(self.c, key, "issue", REPO, 9, status="failed")
+        self.assertTrue(dashboard.do_action("retry", cid))
+        self.assertEqual(db.get_card(self.c, key)["status"], "implementing")
+
+    def test_review_card_still_retries_into_intake(self):
+        key = keys.review_key("acme/app", 9, "sha")
+        cid = db.upsert_card(self.c, key, "review", "acme/app", 9,
+                             status="failed", head_sha="sha")
+        self.assertTrue(dashboard.do_action("retry", cid))
+        self.assertEqual(db.get_card(self.c, key)["status"], "intake")

@@ -38,6 +38,37 @@ def _clean_stderr(text: str, limit: int = 500) -> str:
     return (" | ".join(out) or (text or "").strip())[-limit:]
 
 
+def run_impl(prompt: str, cwd: str, timeout: int = 3600) -> str:
+    """구현용 — workspace-write 샌드박스. 네트워크가 막혀 push가 불가능하고,
+    쓰기는 워크트리 안으로 제한된다. run()(read-only)과 일부러 분리한다."""
+    out_fd, out_path = tempfile.mkstemp(suffix=".txt", prefix="codex_impl_")
+    os.close(out_fd)
+    args = [
+        CODEX, "exec",
+        "--sandbox", "workspace-write",
+        "--skip-git-repo-check",
+        "--color", "never",
+        "-C", cwd,
+        "-o", out_path,
+    ]
+    if MODEL:
+        args += ["-m", MODEL]
+    args.append(prompt)
+    try:
+        proc = subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=timeout,
+                              env=config.subprocess_env())
+        if proc.returncode != 0:
+            raise CodexError(f"codex impl failed (rc={proc.returncode}): {_clean_stderr(proc.stderr)}")
+        with open(out_path, encoding="utf-8") as f:
+            text = f.read().strip()
+        return text or proc.stdout
+    finally:
+        try:
+            os.remove(out_path)
+        except OSError:
+            pass
+
+
 def run(prompt: str, cwd: str = None, add_dir: str = None, timeout: int = 1200) -> str:
     out_fd, out_path = tempfile.mkstemp(suffix=".txt", prefix="codex_")
     os.close(out_fd)

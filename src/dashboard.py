@@ -66,6 +66,27 @@ def build_board():
             if isinstance(meta, str):  # tolerate legacy double-encoded payloads
                 meta = json.loads(meta)
             if card["kind"] == "issue":
+                impl_err = ""
+                if card["status"] == "failed":
+                    ev = c.execute(
+                        "SELECT type, detail FROM events WHERE key=? AND type IN"
+                        " ('impl_target_unknown','impl_no_changes','review_gave_up')"
+                        " ORDER BY id DESC LIMIT 1", (card["key"],)).fetchone()
+                    if ev:
+                        d = json.loads(ev["detail"]) if ev["detail"] else {}
+                        head = {"impl_target_unknown": "대상 저장소 미정 — 카드에서 고르세요",
+                                "impl_no_changes": "엔진이 아무 파일도 바꾸지 않음",
+                                "review_gave_up": "구현 실패"}.get(ev["type"], ev["type"])
+                        tail = (d.get("error") or d.get("summary") or "").strip()
+                        impl_err = f"{head} — {tail[:200]}" if tail else head
+                elif card["status"] == "triage":
+                    q = c.execute(
+                        "SELECT detail FROM events WHERE key=? AND type='review_quota_paused'"
+                        " ORDER BY id DESC LIMIT 1", (card["key"],)).fetchone()
+                    if q and q["detail"]:
+                        d = json.loads(q["detail"])
+                        impl_err = (f"⏸ {d.get('engine','')} 토큰 소진으로 대기열 복귀"
+                                    + (f" · {d.get('retry_at')} 이후 재시도" if d.get("retry_at") else ""))
                 # 이슈에는 head/findings/closure/피드백이 없다. PR용 조회를 태우면
                 # 전부 빈 값이 나오므로 여기서 끊고 작업 카드에 필요한 것만 싣는다.
                 out.append({
@@ -79,9 +100,14 @@ def build_board():
                     "assignees": meta.get("assignees") or [],
                     "instruction": meta.get("instruction", ""),
                     "mode": meta.get("mode", ""),
+                    "target_repo": meta.get("target_repo", ""),
+                    "branch": meta.get("branch", ""),
+                    "commit": meta.get("commit", ""),
+                    "changed": meta.get("changed") or [],
+                    "impl": meta.get("impl") or {},
                     "head": "", "blocked": card["blocked"],
                     "findings": [], "comments": [], "dryrun_pending": False,
-                    "feedback": None, "closure": {}, "error": "",
+                    "feedback": None, "closure": {}, "error": impl_err,
                 })
                 continue
             findings = []
@@ -201,8 +227,10 @@ def do_action(action, card_id, engine="claude", text=None):
             db.set_status(c, card["id"], "archived")
             db.log_event(c, "operator_ignore", card["key"])
         elif action == "retry" and card["status"] == "failed":
-            db.set_status(c, card["id"], "intake")
-            db.log_event(c, "operator_retry", card["key"], {"engine": card["engine"]})
+            back = "implementing" if card["kind"] == "issue" else "intake"
+            db.set_status(c, card["id"], back)
+            db.log_event(c, "operator_retry", card["key"],
+                         {"engine": card["engine"], "to": back})
             kick = True
         elif action == "unblock" and card["kind"] == "approve":
             db.set_status(c, card["id"], "approving", blocked=0)
@@ -777,6 +805,7 @@ function issueTile(c){
   const asg=(c.assignees||[]).map(a=>`<span class="pill">${esc(a)}</span>`).join('');
   const labs=(c.labels||[]).slice(0,4).map(l=>`<span class="pill">${esc(l)}</span>`).join('');
   let body='', xbtn='';
+  if(c.status==='failed')xbtn=`<button class="xbtn" title="목록에서 제외" onclick="ignoreCard(event,${c.id})">✕</button>`;
   if(c.status==='triage'){
     xbtn=`<button class="xbtn" title="목록에서 제외" onclick="ignoreCard(event,${c.id})">✕</button>`;
     body=`<div class="instr">
@@ -786,8 +815,13 @@ function issueTile(c){
         <button class="claude" onclick="startWork(event,${c.id},'implement')">🛠 바로 구현</button>
         <button class="codex" onclick="startWork(event,${c.id},'debate')">🗣 설계부터</button>
       </div></div>`;
-  }else if(c.instruction){
-    body=`<div class="instrline">📝 ${esc(c.instruction)}</div>`;
+  }else{
+    if(c.instruction)body+=`<div class="instrline">📝 ${esc(c.instruction)}</div>`;
+    if(c.branch)body+=`<div class="instrline">🌿 <code>${esc(c.branch)}</code>${c.commit?` · <code>${esc(c.commit)}</code>`:''}${c.changed&&c.changed.length?` · ${c.changed.length}개 파일`:''}</div>`;
+    if(c.impl&&c.impl.summary)body+=`<div class="instrline">🛠 ${esc(c.impl.summary)}</div>`;
+    if(c.impl&&c.impl.done===false)body+=`<div class="errline warn">부분 구현 — 엔진이 done=false 로 보고</div>`;
+    if(c.error)body+=`<div class="errline" title="${esc(c.error)}">${esc(c.error)}</div>`;
+    if(c.status==='failed')body+=`<div class="btns"><button class="go" onclick="act(event,'retry',${c.id})">↻ 재시도</button></div>`;
   }
   const modePill=c.mode?`<span class="pill">${c.mode==='debate'?'설계부터':'바로구현'}</span>`:'';
   el.innerHTML=`${xbtn}<div class="pr">${repoPill} <span class="num">${esc(c.display)}</span></div>

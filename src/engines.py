@@ -49,6 +49,12 @@ def run(prompt: str, engine: str = "claude", **kw) -> str:
     return claude_runner.run(prompt, **kw)
 
 
+def run_impl(prompt: str, engine: str = "claude", **kw) -> str:
+    if engine == "codex":
+        return codex_runner.run_impl(prompt, **kw)
+    return claude_runner.run_impl(prompt, **kw)
+
+
 def run_json(prompt: str, engine: str = "claude", **kw):
     text = run(prompt, engine=engine, **kw)
     return claude_runner.parse_json(text)

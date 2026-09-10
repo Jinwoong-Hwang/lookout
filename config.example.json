@@ -33,6 +33,12 @@
   "impl_base_ref": {},
   "_impl_setup_cmd": "새 워크트리에서 한 번 돌릴 설치 명령. repo -> 셸 명령.",
   "impl_setup_cmd": {},
+  "_impl_target_map": "이슈 제목 태그 -> 구현 대상 저장소. 태그 표기(TALK-CEO/TALK_CEO)는 영숫자만 비교하므로 아무 표기나 적어도 된다. 못 맞히면 카드에서 사람이 고른다.",
+  "impl_target_map": {
+    "CEO_APP": "your-org/ceo-client",
+    "TALK_CEO": "your-org/ceo-client"
+  },
+
   "_impl_branch_template": "브랜치 이름. {display}=PH-1767, {slug}=제목 슬러그. 대상 repo 관례를 따를 것(예: feature/PH-1682).",
   "impl_branch_template": "feature/{display}-{slug}",
   "impl_setup_timeout": 1800,
