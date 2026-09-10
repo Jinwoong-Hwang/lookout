@@ -668,3 +668,94 @@ class GateIsAtomicTest(unittest.TestCase):
             "SELECT detail FROM events WHERE type='gate_stale'").fetchone()
         d = json.loads(row["detail"])
         self.assertEqual((d["expected"], d["actual"]), ("spec_blocked", "implementing"))
+
+
+class TopicPromotionTest(unittest.TestCase):
+    """주제 토론 결과를 게이트에서 고른다 — 구현으로 승격하거나 완료로 닫는다.
+    승격 경로가 없으면 결론이 나와도 사람이 손으로 옮겨야 한다."""
+
+    def setUp(self):
+        self.c = sqlite3.connect(":memory:")
+        self.c.row_factory = sqlite3.Row
+        self.c.executescript(db.SCHEMA)
+        self.c.execute("ALTER TABLE cards ADD COLUMN engine TEXT")
+        self.saved = {"connect": dashboard.db.connect, "kick": dashboard.kick_tick,
+                      "paths": dashboard.CFG.get("impl_repo_paths")}
+
+        @contextlib.contextmanager
+        def fake_connect():
+            yield self.c
+
+        dashboard.db.connect = fake_connect
+        dashboard.kick_tick = lambda: None
+        dashboard.CFG["impl_repo_paths"] = {"acme/web": "/checkouts/web"}
+        self.key = keys.topic_key(1, 1000.0)
+        self.cid = db.upsert_card(
+            self.c, self.key, "issue", dashboard.TOPIC_REPO, 0,
+            status="spec_blocked", blocked=1,
+            payload={"display": "TOPIC-1", "title": "취약점?", "mode": "debate_only",
+                     "topic": "취약점?", "agreement": {"design": "이렇게 고쳐라",
+                                                     "rounds": 6, "settled": False}})
+
+    def tearDown(self):
+        dashboard.db.connect = self.saved["connect"]
+        dashboard.kick_tick = self.saved["kick"]
+        if self.saved["paths"] is None:
+            dashboard.CFG.pop("impl_repo_paths", None)
+        else:
+            dashboard.CFG["impl_repo_paths"] = self.saved["paths"]
+        self.c.close()
+
+    def _card(self):
+        return db.get_card(self.c, self.key)
+
+    def _payload(self):
+        return json.loads(self._card()["payload"])
+
+    def _types(self):
+        return [r["type"] for r in self.c.execute("SELECT type FROM events").fetchall()]
+
+    def test_promote_moves_to_implementing_with_the_agreement_kept(self):
+        self.assertTrue(dashboard.do_action("implement_topic", self.cid,
+                                            text="www 쪽만", repo="acme/web"))
+        card, payload = self._card(), self._payload()
+        self.assertEqual(card["status"], "implementing")
+        self.assertEqual(card["blocked"], 0)
+        self.assertEqual(payload["target_repo"], "acme/web")
+        self.assertEqual(payload["mode"], "implement")     # 이제 일반 작업이다
+        self.assertEqual(payload["spec_amendment"], "www 쪽만")
+        self.assertEqual(payload["agreement"]["design"], "이렇게 고쳐라")  # 보존
+        self.assertIn("topic_promoted", self._types())
+
+    def test_close_path_still_goes_to_done(self):
+        self.assertTrue(dashboard.do_action("approve_spec", self.cid))
+        self.assertEqual(self._card()["status"], "done")
+        self.assertIn("topic_accepted", self._types())
+
+    def test_unconfigured_repo_is_refused_with_a_logged_reason(self):
+        self.assertFalse(dashboard.do_action("implement_topic", self.cid,
+                                            repo="acme/not-configured"))
+        self.assertEqual(self._card()["status"], "spec_blocked")
+        self.assertIn("topic_promote_blocked", self._types())
+
+    def test_missing_repo_is_refused(self):
+        self.assertFalse(dashboard.do_action("implement_topic", self.cid, repo=""))
+        self.assertEqual(self._card()["status"], "spec_blocked")
+
+    def test_promote_only_from_the_gate(self):
+        db.set_status(self.c, self.cid, "spec")
+        self.assertFalse(dashboard.do_action("implement_topic", self.cid, repo="acme/web"))
+
+    def test_issue_cards_are_not_promotable_this_way(self):
+        key = keys.issue_key(REPO, 5)
+        cid = db.upsert_card(self.c, key, "issue", REPO, 5, status="spec_blocked",
+                             blocked=1, payload={"display": "PH-5", "mode": "debate"})
+        self.assertFalse(dashboard.do_action("implement_topic", cid, repo="acme/web"))
+
+    def test_gate_offers_both_choices_in_the_ui(self):
+        self.assertIn("🛠 이 결론으로 구현", dashboard.HTML)
+        self.assertIn("✅ 완료로 닫기", dashboard.HTML)
+        self.assertIn("function implementTopic", dashboard.HTML)
+
+    def test_legacy_agreement_without_settled_is_flagged(self):
+        self.assertIn("합의 여부 미기록", dashboard.HTML)

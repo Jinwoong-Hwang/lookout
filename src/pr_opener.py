@@ -58,8 +58,13 @@ def process(c, card):
 
     worktree._git(parent, "push", "--quiet", "-u", "origin", branch)
     url = ghclient.pr_create_draft(repo, base, branch, title, body)
-    ghclient.issue_comment(card["repo"], card["pr_number"],
-                           f"구현 PR(draft): {url}\n\n브랜치 `{branch}`")
+    if card["pr_number"]:
+        # 주제 카드(repo='-', pr_number=0)는 코멘트할 이슈가 없다
+        ghclient.issue_comment(card["repo"], card["pr_number"],
+                               f"구현 PR(draft): {url} · 브랜치 `{branch}`")
+    else:
+        db.log_event(c, "pr_issue_comment_skipped", card["key"],
+                     {"reason": "이슈 없는 주제 카드"})
     db.merge_payload(c, card["id"], {"pr_url": url})
     db.set_status(c, card["id"], "done")
     db.log_event(c, "pr_opened", card["key"], {"repo": repo, "branch": branch, "url": url})

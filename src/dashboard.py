@@ -269,6 +269,8 @@ EVENT_LABELS = {
     "operator_spec_approved": "설계 승인(사람)", "operator_spec_rejected": "설계 반려(사람)",
     "operator_debate_steer": "설계 피드백(사람) — 토론 재개",
     "topic_created": "주제 토론 생성", "topic_accepted": "결과 채택(사람)",
+    "topic_promoted": "주제 결론 → 구현 승격(사람)",
+    "topic_promote_blocked": "승격 차단 — 대상 저장소 미설정",
     "gate_stale": "게이트 거부 — 카드 상태가 이미 바뀜(중복/낡은 클릭)", "operator_retry": "재시도(사람)",
     "pr_dryrun": "PR dry-run", "pr_opened": "PR 생성", "pr_open_no_branch": "브랜치 정보 없음",
     "review_quota_paused": "토큰 소진 — 대기열 복귀", "review_gave_up": "재시도 포기",
@@ -276,7 +278,7 @@ EVENT_LABELS = {
 }
 
 
-def do_action(action, card_id, engine="claude", text=None):
+def do_action(action, card_id, engine="claude", text=None, repo=None):
     if engine not in ("claude", "codex"):
         engine = "claude"
     kick = False
@@ -349,6 +351,25 @@ def do_action(action, card_id, engine="claude", text=None):
                 db.merge_payload(c, card["id"], {"spec_amendment": amendment})
             if not db.gate(c, card, "implementing", blocked=0,
                            event="operator_spec_approved", detail={"amended": bool(amendment)}):
+                return False
+            kick = True
+        elif action == "implement_topic" and card["kind"] == "issue":
+            # 주제 토론의 결론을 실제 작업으로 승격한다. 대상 저장소가 없으면
+            # 구현 워커가 "대상 미정"으로 죽으므로 여기서 막는다.
+            meta_now = json.loads(card["payload"]) if card["payload"] else {}
+            if card["status"] != "spec_blocked" or meta_now.get("mode") != "debate_only":
+                return False
+            target = (repo or meta_now.get("target_repo") or "").strip()
+            if not target or not (CFG.get("impl_repo_paths") or {}).get(target):
+                db.log_event(c, "topic_promote_blocked", card["key"],
+                             {"repo": target, "reason": "impl_repo_paths 에 없는 저장소"})
+                return False
+            patch = {"target_repo": target, "mode": "implement"}
+            if (text or "").strip():
+                patch["spec_amendment"] = (text or "").strip()
+            db.merge_payload(c, card["id"], patch)
+            if not db.gate(c, card, "implementing", blocked=0,
+                           event="topic_promoted", detail={"repo": target}):
                 return False
             kick = True
         elif action == "resume_debate" and card["kind"] == "issue":
@@ -730,6 +751,9 @@ display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hi
   background:var(--panel);color:var(--fg);border:1px solid var(--line);border-radius:6px;
   padding:6px 7px;font:inherit;font-size:11.5px;line-height:1.4}
 .instr textarea::placeholder{color:var(--dim)}
+.instr input{width:100%;box-sizing:border-box;margin-top:7px;background:var(--panel);
+  color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:6px 7px;
+  font:inherit;font-size:11.5px}
 .composer{padding:12px 22px;border-bottom:1px solid var(--line);background:var(--panel)}
 .composer textarea{width:100%;box-sizing:border-box;min-height:52px;resize:vertical;
   background:var(--panel2);color:var(--ink);border:1px solid var(--line);border-radius:9px;
@@ -1080,7 +1104,7 @@ function issueTile(c){
   const RUNNING=['spec','implementing','impl_verify','pr_opening'];
   const ag=c.agreement||{};
   const dbPill=(c.debate||[]).length?`<span class="pill">🗣 ${c.debate.length}턴</span>`:'';
-  const agPill=ag.rounds?`<span class="pill" style="${pill(ag.blocked?'#fb7185':!ag.settled?'#fbbf24':(ag.unresolved||[]).length?'#fbbf24':'#4ade80')}">${ag.blocked?'결렬':!ag.settled?`미합의(${esc(ag.end_reason||'')})`:(ag.unresolved||[]).length?`합의·잔여 ${(ag.unresolved||[]).length}`:'합의'}</span>`:'';
+  const agPill=ag.rounds?`<span class="pill" style="${pill(ag.blocked?'#fb7185':!ag.settled?'#fbbf24':(ag.unresolved||[]).length?'#fbbf24':'#4ade80')}">${ag.blocked?'결렬':(ag.settled===null||ag.settled===undefined)?'합의여부 미기록':!ag.settled?`미합의(${esc(ag.end_reason||'')})`:(ag.unresolved||[]).length?`합의·잔여 ${(ag.unresolved||[]).length}`:'합의'}</span>`:'';
   const agePill=RUNNING.includes(c.status)?`<span class="pill" title="이 상태로 머문 시간">⏱ ${ago(c.updated_at)}</span>`:'';
   let facts='';
   if(c.branch)facts=`<span>🌿 ${esc(c.branch)}</span>${c.commit?`<code>${esc(c.commit)}</code>`:''}`
@@ -1103,8 +1127,14 @@ function issueTile(c){
     btns=`<div class="instr">
       <textarea id="spec${c.id}" placeholder="합의에 대한 피드백 (선택) — 승인 시 수정 지시로, 다시 토론 시 방향 지시로 쓰입니다"
         onclick="event.stopPropagation()" onkeydown="event.stopPropagation()"></textarea>
+      ${c.debate_only?`<input id="trepo${c.id}" placeholder="구현할 저장소 (예: zigbang/ceo-client)"
+        value="${esc(c.target_repo||'')}" onclick="event.stopPropagation()"
+        onkeydown="event.stopPropagation()">`:''}
       <div class="rev">
-        <button class="claude" onclick="approveSpec(event,${c.id})">${c.debate_only?'✅ 결과 채택':'✅ 승인'}</button>
+        ${c.debate_only
+          ?`<button class="claude" onclick="implementTopic(event,${c.id})">🛠 이 결론으로 구현</button>
+            <button onclick="approveSpec(event,${c.id})">✅ 완료로 닫기</button>`
+          :`<button class="claude" onclick="approveSpec(event,${c.id})">✅ 승인</button>`}
         <button class="codex" onclick="resumeDebate(event,${c.id})">🔁 다시 토론</button>
       </div>
       <div class="rev"><button onclick="rejectSpec(event,${c.id})">↩︎ 반려</button></div>
@@ -1229,9 +1259,10 @@ function openIssueModal(c){
   }
   const AG=c.agreement||{};
   if(AG.design||AG.rounds){
-    html+=`<div class="lbl">${AG.settled?'합의된 설계':'⚠️ 합의되지 않은 설계'} · ${AG.rounds||0}라운드`
+    html+=`<div class="lbl">${AG.settled?'합의된 설계':(AG.settled===null||AG.settled===undefined?'⚠️ 합의 여부 미기록':'⚠️ 합의되지 않은 설계')} · ${AG.rounds||0}라운드`
       +`${AG.end_reason?' · '+esc(AG.end_reason):''}${AG.blocked?' · 결렬':''}${AG.design_round?` · r${AG.design_round} 제안`:''}</div>`;
-    if(!AG.settled)html+=`<div class="errline warn">양쪽이 AGREE 로 끝나지 않았습니다 — 아래 안은 마지막 제안자 안이고 반대신문이 남아 있습니다. 승인하면 그대로 구현됩니다.</div>`;
+    if(AG.settled===null||AG.settled===undefined)html+=`<div class="errline warn">합의 여부가 기록되지 않은 구버전 카드입니다 — 아래 안이 합의된 것인지 판단할 수 없습니다. 토론 기록을 직접 읽으세요.</div>`;
+    else if(!AG.settled)html+=`<div class="errline warn">양쪽이 AGREE 로 끝나지 않았습니다 — 아래 안은 마지막 제안자 안이고 반대신문이 남아 있습니다. 승인하면 그대로 구현됩니다.</div>`;
     html+=`<div class="pre">${esc(AG.design||'(합의안 없음)')}</div>`;
     if((AG.unresolved||[]).length)
       html+=`<div class="lbl2">미합의 — 승인 전에 결정해야 합니다</div><div class="pre">`
@@ -1240,7 +1271,7 @@ function openIssueModal(c){
     if(AG.steers)html+=`<div class="lbl2">사람 개입 ${AG.steers}회</div>`;
     if(c.spec_amendment)html+=`<div class="lbl2">운영자 수정 지시 (구현의 최우선 기준)</div><div class="pre">${esc(c.spec_amendment)}</div>`;
     if(c.status==='spec_blocked')
-      html+=`<div class="btns"><button class="go" onclick="approveSpec(event,${c.id})">${c.debate_only?'✅ 결과 채택 — 완료로':(AG.settled?'✅ 설계 승인 — 구현 시작':'⚠️ 미합의인데 승인 — 구현 시작')}</button>`
+      html+=`<div class="btns">${c.debate_only?`<button class="go" onclick="implementTopic(event,${c.id})">🛠 이 결론으로 구현</button><button onclick="approveSpec(event,${c.id})">✅ 완료로 닫기</button>`:`<button class="go" onclick="approveSpec(event,${c.id})">${AG.settled?'✅ 설계 승인 — 구현 시작':'⚠️ 미합의인데 승인 — 구현 시작'}</button>`}`
         +`<button onclick="rejectSpec(event,${c.id})">↩︎ 반려</button></div>`;
   }
   if((c.debate||[]).length){
@@ -1335,6 +1366,15 @@ async function approveSpec(e,id){e.stopPropagation();
   showToast(t?'설계 승인(수정 지시 포함) ✅':'설계 승인 — 구현을 시작합니다 ✅',true);
   const j=await sendAction({action:'approve_spec',card_id:id,text:t});
   if(j.ok===false)showToast('승인할 수 없습니다',false);
+  load();}
+async function implementTopic(e,id){e.stopPropagation();
+  const ri=document.getElementById('trepo'+id), repo=ri?ri.value.trim():'';
+  if(!repo){showToast('구현할 저장소를 입력하세요 (config 의 impl_repo_paths 에 있는 것)',false);return;}
+  const t=specText(id);
+  if(!confirm('이 결론으로 '+repo+' 에서 구현을 시작할까요?'+(t?' 추가 지시: '+t:'')))return;
+  showToast('구현 시작 🛠',true);
+  const j=await sendAction({action:'implement_topic',card_id:id,repo,text:t});
+  if(j.ok===false)showToast('시작할 수 없습니다 — 저장소가 impl_repo_paths 에 있는지 확인하세요',false);
   load();}
 async function resumeDebate(e,id){e.stopPropagation();
   const t=specText(id);
@@ -1451,7 +1491,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path == "/api/action":
             ok = do_action(data.get("action"), int(data.get("card_id", 0)),
-                           data.get("engine", "claude"), data.get("text"))
+                           data.get("engine", "claude"), data.get("text"),
+                           data.get("repo"))
         elif self.path == "/api/finding-action":
             ok = do_finding_action(data.get("action"), int(data.get("finding_id", 0)))
         elif self.path == "/api/mention-action":
