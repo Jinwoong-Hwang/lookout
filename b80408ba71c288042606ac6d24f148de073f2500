@@ -1,0 +1,35 @@
+config.example.json
+  h_03b13cada2edad 36-38
+prompts/impl.md
+  h_03b13cada2edad 17-21
+prompts/impl_verify.md
+  h_03b13cada2edad 1-61
+src/dashboard.py
+  h_03b13cada2edad 55,109-112,240-245,674-675,835-843,974-975
+src/ghclient.py
+  h_03b13cada2edad 94-106
+src/impl_verifier.py
+  h_03b13cada2edad 1-108
+src/pr_opener.py
+  h_03b13cada2edad 1-64
+src/tick.py
+  h_03b13cada2edad 16-18,48,201,227
+src/worktree.py
+  h_03b13cada2edad 162-166,173-177,184,191-194,198-201
+tests/test_impl_verify_and_pr.py
+  h_03b13cada2edad 1-195
+tests/test_impl_worktree.py
+  h_03b13cada2edad 145-171
+tests/test_tick_wiring.py
+  h_03b13cada2edad 6,20-21,34-37,47-64,75-85
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "b80408ba71c288042606ac6d24f148de073f2500",
+  "prompts": {},
+  "humans": {
+    "h_03b13cada2edad": {
+      "author": "woong@zigbang.com"
+    }
+  }
+}
