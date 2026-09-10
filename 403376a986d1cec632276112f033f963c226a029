@@ -1,0 +1,23 @@
+src/dashboard.py
+  h_03b13cada2edad 120-128,207-224,228-249,274-278,285,623-629,782-787,954-955,969,978,1091-1097
+src/impl_verifier.py
+  h_03b13cada2edad 61-62
+src/impl_worker.py
+  h_03b13cada2edad 10,90-93,95-96,108-109,111-112
+tests/test_dashboard_issue_actions.py
+  h_03b13cada2edad 70-95,316-342
+tests/test_impl_worker.py
+  h_03b13cada2edad 135-149
+tests/test_tick_wiring.py
+  h_03b13cada2edad 6,61-78
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "403376a986d1cec632276112f033f963c226a029",
+  "prompts": {},
+  "humans": {
+    "h_03b13cada2edad": {
+      "author": "woong@zigbang.com"
+    }
+  }
+}
