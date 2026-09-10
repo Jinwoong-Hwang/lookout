@@ -67,12 +67,37 @@ class DashboardIssueActionTest(unittest.TestCase):
         types = [r["type"] for r in self.c.execute("SELECT type FROM events").fetchall()]
         self.assertIn("work_started", types)
 
-    def test_start_debate_is_refused_while_no_worker_exists(self):
-        """워커 없이 spec 으로 보내면 카드가 조용히 선다 — 거부하고 이유를 남긴다."""
-        self.assertFalse(dashboard.do_action("start_debate", self.card_id, "codex"))
-        self.assertEqual(self._card()["status"], "triage")
+    def test_start_debate_moves_to_spec_with_mode(self):
+        self.assertTrue(dashboard.do_action("start_debate", self.card_id, "claude"))
+        self.assertEqual(self._card()["status"], "spec")
+        self.assertEqual(self._payload()["mode"], "debate")
+
+    def test_spec_gate_needs_human_approval_before_implementing(self):
+        db.set_status(self.c, self.card_id, "spec_blocked", blocked=1)
+        db.merge_payload(self.c, self.card_id,
+                         {"agreement": {"design": "이렇게 한다", "rounds": 4}})
+        self.assertTrue(dashboard.do_action("approve_spec", self.card_id))
+        card = self._card()
+        self.assertEqual(card["status"], "implementing")
+        self.assertEqual(card["blocked"], 0)
         types = [r["type"] for r in self.c.execute("SELECT type FROM events").fetchall()]
-        self.assertIn("work_start_unavailable", types)
+        self.assertIn("operator_spec_approved", types)
+
+    def test_spec_approval_is_rejected_outside_the_gate(self):
+        self.assertFalse(dashboard.do_action("approve_spec", self.card_id))  # triage
+        self.assertEqual(self._card()["status"], "triage")
+
+    def test_rejecting_a_design_keeps_the_record_and_resets_the_debate(self):
+        db.set_status(self.c, self.card_id, "spec_blocked", blocked=1)
+        db.merge_payload(self.c, self.card_id, {
+            "debate": [{"round": 1, "claim": "a"}],
+            "agreement": {"design": "버린 안", "rounds": 1}})
+        self.assertTrue(dashboard.do_action("reject_spec", self.card_id))
+        card, payload = self._card(), self._payload()
+        self.assertEqual(card["status"], "triage")
+        self.assertEqual(payload["debate"], [])        # 다시 시작하면 새로
+        self.assertEqual(payload["agreement"], {})
+        self.assertEqual(payload["debate_prev"][0]["agreement"]["design"], "버린 안")
 
     def test_timeline_is_exposed_with_human_labels(self):
         dashboard.do_action("start_impl", self.card_id, "claude")
@@ -318,9 +343,12 @@ class IssueCardShapeTest(unittest.TestCase):
 class ProgressVisibilityTest(unittest.TestCase):
     """진행 중 구간이 무음이면 멈춘 건지 도는 건지 알 수 없다."""
 
-    def test_debate_button_is_disabled_with_a_reason(self):
-        self.assertIn('disabled title="토론 워커 미구현', dashboard.HTML)
-        self.assertNotIn("startWork(event,${c.id},'debate')", dashboard.HTML)
+    def test_nothing_is_silently_gated(self):
+        """비활성 버튼이 있으면 반드시 이유가 붙어야 한다. WORK_START_PENDING 이
+        비어 있으면 열려 있어야 할 것이 다 열린 상태다."""
+        self.assertEqual(dashboard.WORK_START_PENDING, {})
+        self.assertIn("startWork(event,${c.id},'debate')", dashboard.HTML)
+        self.assertIn("startWork(event,${c.id},'implement')", dashboard.HTML)
 
     def test_running_states_show_an_elapsed_badge(self):
         self.assertIn("const RUNNING=['spec','implementing','impl_verify','pr_opening']",

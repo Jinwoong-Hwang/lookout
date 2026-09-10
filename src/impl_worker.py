@@ -27,8 +27,9 @@ def _norm(tag: str) -> str:
 def target_repo(meta: dict) -> str:
     """대상 저장소. 사람이 고른 payload.target_repo가 최우선.
 
-    없으면 제목 태그로 추정한다. 라벨은 쓸 수 없다 — 실측에서 [FE] 이슈들은 라벨이
-    비어 있고, Service::/Platform:: 같은 풍부한 라벨은 앱 버그 이슈에만 붙는다.
+    없으면 제목 태그, 그 다음 라벨을 본다. 라벨만 믿을 수는 없다 — 실측에서 [FE]
+    이슈들은 라벨이 비어 있고 Service::/Platform:: 같은 라벨은 앱·기획 이슈에만
+    붙는다. 그래서 제목 태그를 먼저 보고 라벨은 태그가 없는 이슈를 구제하는 보조로 쓴다.
     태그 표기가 TALK-CEO / TALK_CEO 로 흔들리므로 영숫자만 남겨 비교한다."""
     explicit = (meta.get("target_repo") or "").strip()
     if explicit:
@@ -38,8 +39,26 @@ def target_repo(meta: dict) -> str:
         hit = tmap.get(_norm(tag))
         if hit:
             return hit
+    for label in (meta.get("labels") or []):
+        # Service::ZB → ZB. 접두어 없는 라벨도 그대로 시도한다.
+        hit = tmap.get(_norm(label.split("::")[-1]))
+        if hit:
+            return hit
     raise TargetUnknown(
-        "제목 태그로 대상 저장소를 정할 수 없다 — 카드에서 직접 고르거나 impl_target_map에 추가")
+        "제목 태그·라벨로 대상 저장소를 정할 수 없다 — 카드에서 고르거나 impl_target_map에 추가")
+
+
+def _agreement_text(meta: dict) -> str:
+    """설계 토론을 거친 카드면 승인된 합의문을 프롬프트에 싣는다."""
+    ag = meta.get("agreement") or {}
+    if not ag.get("design"):
+        return "(설계 토론 없이 바로 구현)"
+    parts = [ag["design"]]
+    if ag.get("unresolved"):
+        parts.append("남은 결정(사람이 승인 시 확인함): " + " / ".join(ag["unresolved"]))
+    if ag.get("risk"):
+        parts.append("알려진 위험: " + ag["risk"])
+    return "\n\n".join(parts)
 
 
 def _git(wt: str, *args, check: bool = True) -> str:
@@ -102,6 +121,8 @@ def process(c, card):
         TARGET_REPO=repo, URL=meta.get("url") or issue.get("url") or "",
         BODY=(issue.get("body") or "(본문 없음)")[:BODY_CHARS],
         INSTRUCTION=(meta.get("instruction") or "(없음)"),
+        AGREEMENT=_agreement_text(meta),
+        FEEDBACK=(meta.get("feedback") or "(없음 — 첫 라운드)"),
         BRANCH=branch,
     )
     engine = card["engine"] or "claude"

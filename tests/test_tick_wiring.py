@@ -50,13 +50,13 @@ class TickWiringTest(unittest.TestCase):
         owners = {}
         for node in self._stage_calls():
             call = ast.unparse(node)
-            for lane in ("implementing", "impl_verify", "pr_opening"):
+            for lane in ("spec", "implementing", "impl_verify", "pr_opening"):
                 if f"'{lane}'" in call:
                     owners.setdefault(lane, []).append(call)
         for lane, calls in owners.items():
             self.assertEqual(len(calls), 1, f"{lane} 소유자가 {len(calls)}개")
             self.assertIn("kind='issue'", calls[0])
-        self.assertEqual(set(owners), {"implementing", "impl_verify", "pr_opening"})
+        self.assertEqual(set(owners), {"spec", "implementing", "impl_verify", "pr_opening"})
 
     def test_dashboard_can_only_start_stages_that_have_a_worker(self):
         """대시보드가 여는 시작 스테이지에 소유 워커가 없으면 카드가 그 레인에
@@ -77,7 +77,7 @@ class TickWiringTest(unittest.TestCase):
                              f"{action} → {status}: 워커가 붙었으니 WORK_START 로 옮길 것")
 
     def test_verify_and_pr_stages_are_retryable(self):
-        for stage in ("impl_verifier", "pr_opener"):
+        for stage in ("impl_verifier", "pr_opener", "debate_worker"):
             self.assertIn(stage, tick.RETRYABLE_STAGES)
 
     def test_impl_worker_is_retryable_so_failures_land_in_failed_lane(self):
@@ -89,6 +89,14 @@ class TickWiringTest(unittest.TestCase):
         work = {"spec", "implementing", "impl_verify", "pr_blocked"}
         self.assertFalse(work & REVIEW_LANES)
         self.assertFalse(work & APPROVE_LANES)
+
+    def test_human_gates_have_no_worker(self):
+        """spec_blocked·pr_blocked 는 사람이 눌러야 넘어가는 상태다. 워커가 붙으면
+        사람 게이트가 무력화된다."""
+        src = inspect.getsource(tick)
+        for gate in ("spec_blocked", "pr_blocked"):
+            self.assertNotIn(f"'{gate}'", src)
+            self.assertNotIn(f'"{gate}"', src)
 
     def test_verifier_is_read_only(self):
         """검증자는 run_json(read-only)을 쓴다. run_impl을 쓰면 양쪽이 편집 권한을

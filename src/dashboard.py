@@ -54,6 +54,7 @@ LANES = [
 WORK_LANES = [
     ("triage", "📥 대기 (내 이슈)"),
     ("spec", "🗣 설계 토론"),
+    ("spec_blocked", "🧑‍⚖️ 설계 승인 대기"),
     ("implementing", "🛠 구현 중"),
     ("impl_verify", "🧾 구현 검증"),
     ("pr_blocked", "🔒 PR 승인 대기"),
@@ -116,6 +117,8 @@ def build_board():
                     "changed": meta.get("changed") or [],
                     "impl": meta.get("impl") or {},
                     "verify": meta.get("verify") or {},
+                    "agreement": meta.get("agreement") or {},
+                    "debate": meta.get("debate") or [],
                     "pr_url": meta.get("pr_url", ""),
                     "pr_dryrun": bool(meta.get("pr_dryrun")),
                     "rounds": meta.get("impl_rounds") or 1,
@@ -240,9 +243,9 @@ ACTIVE_REVIEW = ("intake", "reviewing", "verifying", "commenting")
 
 # 대시보드가 시작시킬 수 있는 스테이지 = tick 에 집어가는 워커가 있는 스테이지.
 # 워커 없이 열면 카드가 그 레인에 조용히 서고 아무 일도 일어나지 않는다.
-WORK_START = {"start_impl": "implementing"}
-# 아직 워커가 없어 막아둔 것. tick 에 스테이지를 붙일 때 WORK_START 로 옮긴다.
-WORK_START_PENDING = {"start_debate": ("spec", "토론 워커 미구현 — 곧 붙습니다")}
+WORK_START = {"start_impl": "implementing", "start_debate": "spec"}
+# 워커가 없어 막아둘 것이 생기면 여기에 둔다(버튼 비활성 + 서버 거부).
+WORK_START_PENDING: dict[str, tuple[str, str]] = {}
 
 # events 를 카드 모달에 사람이 읽을 수 있게 뿌리기 위한 라벨
 EVENT_LABELS = {
@@ -255,7 +258,10 @@ EVENT_LABELS = {
     "impl_verify_started": "교차 검증 시작", "impl_verified": "교차 검증 완료",
     "impl_rework": "재구현으로 되돌림", "impl_rounds_exhausted": "라운드 예산 소진",
     "impl_verify_no_branch": "브랜치 정보 없음", "impl_verify_empty_diff": "diff 없음",
-    "operator_pr_approved": "PR 승인(사람)", "operator_retry": "재시도(사람)",
+    "operator_pr_approved": "PR 승인(사람)",
+    "debate_turn_started": "토론 턴 시작", "debate_turn": "토론 턴",
+    "debate_finished": "토론 종료", "debate_engine_missing": "엔진 없음(토론 불가)",
+    "operator_spec_approved": "설계 승인(사람)", "operator_spec_rejected": "설계 반려(사람)", "operator_retry": "재시도(사람)",
     "pr_dryrun": "PR dry-run", "pr_opened": "PR 생성", "pr_open_no_branch": "브랜치 정보 없음",
     "review_quota_paused": "토큰 소진 — 대기열 복귀", "review_gave_up": "재시도 포기",
     "stage_error": "스테이지 오류",
@@ -295,7 +301,7 @@ def do_action(action, card_id, engine="claude", text=None):
             if not engines.is_ready(engine):
                 db.log_event(c, "work_start_blocked", card["key"], {"engine": engine})
                 return False
-            mode = "implement"
+            mode = "debate" if action == "start_debate" else "implement"
             db.set_engine(c, card["id"], engine)
             db.merge_payload(c, card["id"], {"mode": mode})
             db.set_status(c, card["id"], WORK_START[action])
@@ -310,6 +316,24 @@ def do_action(action, card_id, engine="claude", text=None):
             db.log_event(c, "operator_retry", card["key"],
                          {"engine": card["engine"], "to": back})
             kick = True
+        elif action == "approve_spec" and card["kind"] == "issue":
+            if card["status"] != "spec_blocked":
+                return False
+            db.set_status(c, card["id"], "implementing", blocked=0)
+            db.log_event(c, "operator_spec_approved", card["key"])
+            kick = True
+        elif action == "reject_spec" and card["kind"] == "issue":
+            if card["status"] != "spec_blocked":
+                return False
+            # 기록은 남기고 다시 대기로. 재시작 시 이전 라운드가 이어붙지 않게 비운다.
+            meta = json.loads(card["payload"]) if card["payload"] else {}
+            db.merge_payload(c, card["id"], {
+                "debate_prev": (meta.get("debate_prev") or []) + [{
+                    "debate": meta.get("debate") or [],
+                    "agreement": meta.get("agreement") or {}}],
+                "debate": [], "agreement": {}, "mode": ""})
+            db.set_status(c, card["id"], "triage", blocked=0)
+            db.log_event(c, "operator_spec_rejected", card["key"])
         elif action == "unblock" and card["kind"] == "issue":
             if card["status"] != "pr_blocked":
                 return False
@@ -788,7 +812,7 @@ const STATUS_META={
   lgtm:{c:'#4ade80',ko:'LGTM'}, approve_blocked:{c:'#a78bfa',ko:'승인대기'},
   approving:{c:'#a78bfa',ko:'승인중'}, done:{c:'#6b7688',ko:'완료'},
   failed:{c:'#fb7185',ko:'실패'},
-  spec:{c:'#a78bfa',ko:'설계토론'}, implementing:{c:'#fbbf24',ko:'구현중'},
+  spec:{c:'#a78bfa',ko:'설계토론'}, spec_blocked:{c:'#a78bfa',ko:'설계승인대기'}, implementing:{c:'#fbbf24',ko:'구현중'},
   impl_verify:{c:'#fbbf24',ko:'구현검증'}, pr_blocked:{c:'#a78bfa',ko:'PR승인대기'},
   pr_opening:{c:'#a78bfa',ko:'PR생성중'}};
 function smeta(s){return STATUS_META[s]||{c:'#6b7688',ko:s};}
@@ -965,6 +989,9 @@ function issueTile(c){
   const vPill=v.engine?`<span class="pill" style="${pill(v.approved?'#4ade80':'#fb7185')}">🧾 ${esc(v.engine)} ${v.approved?'통과':'블로커 '+nb}</span>`:'';
   const roundPill=(c.rounds>1)?`<span class="pill">${c.rounds}R</span>`:'';
   const RUNNING=['spec','implementing','impl_verify','pr_opening'];
+  const ag=c.agreement||{};
+  const dbPill=(c.debate||[]).length?`<span class="pill">🗣 ${c.debate.length}턴</span>`:'';
+  const agPill=ag.rounds?`<span class="pill" style="${pill(ag.blocked?'#fb7185':(ag.unresolved||[]).length?'#fbbf24':'#4ade80')}">${ag.blocked?'결렬':(ag.unresolved||[]).length?`미합의 ${(ag.unresolved||[]).length}`:'합의'}</span>`:'';
   const agePill=RUNNING.includes(c.status)?`<span class="pill" title="이 상태로 머문 시간">⏱ ${ago(c.updated_at)}</span>`:'';
   let facts='';
   if(c.branch)facts=`<span>🌿 ${esc(c.branch)}</span>${c.commit?`<code>${esc(c.commit)}</code>`:''}`
@@ -979,16 +1006,21 @@ function issueTile(c){
         onclick="event.stopPropagation()" onkeydown="event.stopPropagation()">${esc(c.instruction)}</textarea>
       <div class="rev">
         <button class="claude" onclick="startWork(event,${c.id},'implement')">🛠 바로 구현</button>
-        <button class="codex" disabled title="토론 워커 미구현 — 곧 붙습니다">🗣 설계부터</button>
+        <button class="codex" onclick="startWork(event,${c.id},'debate')">🗣 설계부터</button>
       </div></div>`;
   }else if(c.status==='failed'){
     btns=`<div class="btns"><button class="go" onclick="act(event,'retry',${c.id})">↻ 재시도</button></div>`;
+  }else if(c.status==='spec_blocked'){
+    btns=`<div class="rev">
+      <button class="claude" onclick="approveSpec(event,${c.id})">✅ 설계 승인</button>
+      <button class="codex" onclick="rejectSpec(event,${c.id})">↩︎ 반려</button>
+    </div>`;
   }else if(c.status==='pr_blocked'){
     btns=`<div class="btns"><button class="go" onclick="approvePr(event,${c.id})">🚀 PR 올리기 승인</button></div>`;
   }
   el.innerHTML=`${xbtn}<div class="pr">${repoPill} <span class="num">${esc(c.display)}</span></div>
     <div class="title">${esc(c.title)||'(제목없음)'}</div>
-    <div class="row">${statusPill}${asg}${modePill}${enginePill}${vPill}${roundPill}${agePill}</div>
+    <div class="row">${statusPill}${asg}${modePill}${enginePill}${vPill}${dbPill}${agPill}${roundPill}${agePill}</div>
     ${facts?`<div class="row">${facts}</div>`:''}
     ${(c.instruction&&c.status!=='triage')?`<div class="instrline">📝 ${esc(c.instruction)}</div>`:''}
     ${c.error?`<div class="errline ${c.status==='triage'?'warn':''}" title="${esc(c.error)}">${esc(c.error)}</div>`:''}${btns}`;
@@ -1101,14 +1133,37 @@ function openIssueModal(c){
     if((v.out_of_scope||[]).length)
       html+=`<div class="lbl2">스코프 밖 변경</div><div class="pre">${esc((v.out_of_scope||[]).join(', '))}</div>`;
   }
+  const AG=c.agreement||{};
+  if(AG.design||AG.rounds){
+    html+=`<div class="lbl">합의된 설계 · ${AG.rounds||0}라운드${AG.blocked?' · 결렬':''}</div>`
+      +`<div class="pre">${esc(AG.design||'(합의안 없음)')}</div>`;
+    if((AG.unresolved||[]).length)
+      html+=`<div class="lbl2">미합의 — 승인 전에 결정해야 합니다</div><div class="pre">`
+        +(AG.unresolved||[]).map(q=>`<div>· ${esc(q)}</div>`).join('')+`</div>`;
+    if(AG.risk)html+=`<div class="lbl2">위험</div><div class="pre">${esc(AG.risk)}</div>`;
+    if(c.status==='spec_blocked')
+      html+=`<div class="btns"><button class="go" onclick="approveSpec(event,${c.id})">✅ 설계 승인 — 구현 시작</button>`
+        +`<button onclick="rejectSpec(event,${c.id})">↩︎ 반려</button></div>`;
+  }
+  if((c.debate||[]).length){
+    html+=`<div class="lbl">토론 기록 · ${c.debate.length}턴</div>`;
+    c.debate.forEach(t=>{const col=t.role==='proposer'?'#e19267':'#8faedc';
+      html+=`<div class="finding" style="border-left-color:${stripe(col)}">
+        <div class="ft">r${t.round} · ${t.role==='proposer'?'제안':'반대신문'}(${esc(t.engine||'')}) · ${esc(t.verdict||'')}</div>
+        <div class="pre">${esc(t.claim||'')}</div>
+        ${(t.evidence||[]).length?`<div class="lbl2">근거</div><div class="pre">${esc((t.evidence||[]).join(', '))}</div>`:''}
+        ${t.proposal?`<div class="lbl2">안</div><div class="pre">${esc(t.proposal)}</div>`:''}
+      </div>`});
+  }
   if(c.branch&&c.parent_repo_path){
     const mine=`~/orca/workspaces/${esc(repoShort(c.target_repo||''))}/${esc(c.branch.split('/').pop())}`;
     html+=`<div class="lbl">직접 돌려보기</div>`
       +`<div class="pre">봇 워크트리 (다른 카드가 시작하면 브랜치가 갈립니다 — 오래 붙잡지 마세요)`
       +`<div><code>${esc(c.worktree||'(아직 없음)')}</code></div></div>`
-      +`<div class="lbl2">내 워크트리를 따로 파기 (권장)</div>`
-      +`<div class="pre"><div><code>git -C ${esc(c.parent_repo_path)} worktree add ${mine} ${esc(c.branch)}</code></div>`
-      +`<div>또는 <code>orca worktree create --repo path:${esc(c.parent_repo_path)} --name ${esc(c.branch.split('/').pop())} --setup run</code> (yarn install 까지)</div></div>`;
+      +`<div class="lbl2">내 워크트리를 따로 파기 (권장 — orca)</div>`
+      +`<div class="pre"><div><code>orca worktree create --repo path:${esc(c.parent_repo_path)} --name ${esc(c.branch.split('/').pop())} --setup run</code></div>`
+      +`<div class="tdet">setup hook 으로 yarn install 까지 돌고, 봇이 브랜치를 갈아도 영향받지 않습니다</div>`
+      +`<div style="margin-top:6px">git 로 직접: <code>git -C ${esc(c.parent_repo_path)} worktree add ${mine} ${esc(c.branch)}</code></div></div>`;
   }
   if((c.timeline||[]).length){
     html+=`<div class="lbl">진행 기록 · ${c.timeline.length}건</div><div class="tl">`;
@@ -1138,7 +1193,7 @@ function openFeedbackModal(f){
 }
 function closeM(){document.getElementById('ov').classList.remove('show')}
 document.getElementById('ov').onclick=e=>{if(e.target.id==='ov')closeM()};
-const ACT_MSG={start:'리뷰 시작 — 곧 분석을 시작합니다 ⏳',rereview:'재리뷰 시작 — 곧 분석을 시작합니다 🔄',unblock:'승인 진행 중 🔓',ignore:'목록에서 제외됨',stop:'리뷰 중지됨 🛑'};
+const ACT_MSG={approve_spec:'설계 승인 — 구현을 시작합니다 ✅',reject_spec:'설계 반려 — 대기로 되돌렸습니다',start:'리뷰 시작 — 곧 분석을 시작합니다 ⏳',rereview:'재리뷰 시작 — 곧 분석을 시작합니다 🔄',unblock:'승인 진행 중 🔓',ignore:'목록에서 제외됨',stop:'리뷰 중지됨 🛑'};
 async function act(e,action,id,engine){e.stopPropagation();
   showToast(ACT_MSG[action]||'처리됨', action!=='ignore');
   let j={};
@@ -1166,6 +1221,10 @@ async function startWork(e,id,mode){e.stopPropagation();
   const j=await send({action:mode==='debate'?'start_debate':'start_impl',card_id:id,engine:'claude'});
   if(j.ok===false)showToast('시작할 수 없습니다 — 엔진 상태를 확인하세요',false);
   load();}
+function approveSpec(e,id){e.stopPropagation();
+  if(confirm('이 설계로 구현을 시작할까요? (미합의 항목이 있으면 모달에서 먼저 확인하세요)'))act(e,'approve_spec',id);}
+function rejectSpec(e,id){e.stopPropagation();
+  if(confirm('설계를 반려하고 대기로 되돌릴까요? 토론 기록은 보관됩니다.'))act(e,'reject_spec',id);}
 function approvePr(e,id){e.stopPropagation();
   if(confirm('이 브랜치를 push하고 draft PR을 올릴까요? (ready 전환은 직접 하셔야 합니다)'))act(e,'unblock',id);}
 function stopReview(e,id){e.stopPropagation();
