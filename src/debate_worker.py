@@ -21,9 +21,27 @@ TRANSCRIPT_CHARS = 9000   # 상대 발언 전체가 아니라 요약만 넘긴�
 ROLES = {"proposer": "claude", "critic": "codex"}
 
 
+ENGINE_ROLES = ("proposer", "critic")
+
+
 def _role(round_no: int) -> str:
     """짝수 라운드 제안자, 홀수 라운드 반대신문."""
     return "proposer" if round_no % 2 == 0 else "critic"
+
+
+def _engine_turns(turns: list[dict]) -> list[dict]:
+    """사람이 끼워넣은 턴(role="operator")은 역할 교대에서 세지 않는다 —
+    세면 사람이 한마디 할 때마다 같은 엔진이 두 번 연달아 말한다."""
+    return [t for t in turns if t.get("role") in ENGINE_ROLES]
+
+
+def _since_steer(turns: list[dict]) -> list[dict]:
+    """마지막 사람 개입 이후의 턴만. 사람이 방향을 틀면 새 국면이므로 그 전의
+    주장과 같아졌다고 '새 정보 없음'으로 끝내면 안 된다."""
+    for i in range(len(turns) - 1, -1, -1):
+        if turns[i].get("role") == "operator":
+            return turns[i + 1:]
+    return turns
 
 
 def _claim_hash(turn: dict) -> str:
@@ -36,6 +54,10 @@ def _render_transcript(turns: list[dict]) -> str:
         return "(첫 라운드입니다)"
     out = []
     for t in turns:
+        if t.get("role") == "operator":
+            out.append("### 🧑 운영자 개입 — 이 지시가 양쪽 주장보다 우선한다\n"
+                       + (t.get("claim") or ""))
+            continue
         out.append(
             f"### r{t['round']} · {t['role']}({t['engine']}) · {t.get('verdict', '?')}\n"
             f"CLAIM: {t.get('claim', '')}\n"
@@ -52,21 +74,23 @@ def _agreement(turns: list[dict]) -> dict:
 
     한 턴을 더 태워 요약시키는 대신 트랜스크립트에서 뽑는다 — 요약 턴은 비용이고,
     무엇보다 요약이 대화 내용과 어긋날 수 있다(사람이 그걸 검증할 방법이 없다)."""
-    last = turns[-1] if turns else {}
-    proposals = [t for t in turns if (t.get("proposal") or "").strip()]
+    eng = _engine_turns(turns)
+    last = eng[-1] if eng else {}
+    proposals = [t for t in eng if (t.get("proposal") or "").strip()]
     unresolved, seen = [], set()
-    for t in turns[-2:]:
+    for t in eng[-2:]:
         for q in (t.get("open_questions") or []):
             key = q.strip()
             if key and key not in seen:
                 seen.add(key)
                 unresolved.append(q)
-    verdicts = [t.get("verdict") for t in turns[-2:]]
+    verdicts = [t.get("verdict") for t in eng[-2:]]
     return {
         "design": (proposals[-1].get("proposal") if proposals else ""),
         "unresolved": unresolved,
         "risk": last.get("risk", ""),
-        "rounds": len(turns),
+        "rounds": len(eng),
+        "steers": len([t for t in turns if t.get("role") == "operator"]),
         "verdicts": verdicts,
         "blocked": "BLOCKED" in verdicts,
     }
@@ -102,7 +126,7 @@ def process(c, card):
         return
 
     turns = meta.get("debate") or []
-    round_no = len(turns)
+    round_no = len(_engine_turns(turns))
     role = _role(round_no)
     engine = (CFG.get("debate_roles") or ROLES).get(role, ROLES[role])
     if not engines.is_ready(engine):
@@ -145,7 +169,7 @@ def process(c, card):
                   "verdict": turn.get("verdict"), "claim": (turn.get("claim") or "")[:200]})
 
     # ── 3중 종료 ─────────────────────────────────────────────────
-    same_role = [t for t in turns[:-1] if t.get("role") == role]
+    same_role = [t for t in _since_steer(turns)[:-1] if t.get("role") == role]
     if any(t.get("hash") == turn["hash"] for t in same_role):
         # 새 정보 없음 — 무한 예의 루프의 유일한 방어선
         _finish(c, card, meta, turns, "새 정보 없음")
@@ -153,10 +177,11 @@ def process(c, card):
     if turn.get("verdict") == "BLOCKED":
         _finish(c, card, meta, turns, "결렬")
         return
-    if len(turns) >= 2 and all(t.get("verdict") == "AGREE" for t in turns[-2:]):
+    recent = _engine_turns(turns)[-2:]
+    if len(recent) == 2 and all(t.get("verdict") == "AGREE" for t in recent):
         _finish(c, card, meta, turns, "양쪽 합의")
         return
-    if len(turns) >= MAX_ROUNDS:
+    if len(_engine_turns(turns)) >= MAX_ROUNDS + int(meta.get("debate_bonus") or 0):
         _finish(c, card, meta, turns, "라운드 상한")
         return
     # 계속 — 카드는 spec 에 머물고 다음 wave 가 반대 역할로 집어간다

@@ -54,8 +54,12 @@ def _agreement_text(meta: dict) -> str:
     if not ag.get("design"):
         return "(설계 토론 없이 바로 구현)"
     parts = [ag["design"]]
+    if meta.get("spec_amendment"):
+        # 사람이 승인하면서 붙인 수정 지시 — 합의문보다 우선한다
+        parts.append("운영자 수정 지시(최우선, 합의문과 충돌하면 이쪽): "
+                     + meta["spec_amendment"])
     if ag.get("unresolved"):
-        parts.append("남은 결정(사람이 승인 시 확인함): " + " / ".join(ag["unresolved"]))
+        parts.append("남은 결정: " + " / ".join(ag["unresolved"]))
     if ag.get("risk"):
         parts.append("알려진 위험: " + ag["risk"])
     return "\n\n".join(parts)

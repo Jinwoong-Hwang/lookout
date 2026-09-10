@@ -417,3 +417,69 @@ class WorktreeHandoffTest(unittest.TestCase):
                                dashboard.HTML.index("function openFeedbackModal")]
         self.assertIn("브랜치가 갈립니다", modal)
         self.assertIn("worktree add", modal)
+
+
+class SpecFeedbackTest(unittest.TestCase):
+    """게이트에서 승인/반려만 되면 합의에 손을 댈 수 없다."""
+
+    def setUp(self):
+        self.c = sqlite3.connect(":memory:")
+        self.c.row_factory = sqlite3.Row
+        self.c.executescript(db.SCHEMA)
+        self.c.execute("ALTER TABLE cards ADD COLUMN engine TEXT")
+        self.saved = {"connect": dashboard.db.connect, "kick": dashboard.kick_tick}
+
+        @contextlib.contextmanager
+        def fake_connect():
+            yield self.c
+
+        dashboard.db.connect = fake_connect
+        dashboard.kick_tick = lambda: None
+        self.key = keys.issue_key(REPO, 1816)
+        self.card_id = db.upsert_card(
+            self.c, self.key, "issue", REPO, 1816, status="spec_blocked", blocked=1,
+            payload={"display": "PH-1816", "title": "t",
+                     "debate": [{"round": 1, "role": "proposer", "claim": "안"}],
+                     "agreement": {"design": "합의안", "rounds": 2}})
+
+    def tearDown(self):
+        dashboard.db.connect = self.saved["connect"]
+        dashboard.kick_tick = self.saved["kick"]
+        self.c.close()
+
+    def _card(self):
+        return db.get_card(self.c, self.key)
+
+    def _payload(self):
+        return json.loads(self._card()["payload"])
+
+    def test_approve_with_amendment_keeps_the_agreement_intact(self):
+        self.assertTrue(dashboard.do_action("approve_spec", self.card_id,
+                                           text="  가드는 라우트에서  "))
+        payload = self._payload()
+        self.assertEqual(payload["spec_amendment"], "가드는 라우트에서")
+        self.assertEqual(payload["agreement"]["design"], "합의안")   # 원문 보존
+        self.assertEqual(self._card()["status"], "implementing")
+
+    def test_resume_debate_appends_an_operator_turn_and_raises_the_cap(self):
+        self.assertTrue(dashboard.do_action("resume_debate", self.card_id,
+                                           text="이 쟁점 더 다퉈라"))
+        card, payload = self._card(), self._payload()
+        self.assertEqual(card["status"], "spec")
+        self.assertEqual(card["blocked"], 0)
+        self.assertEqual(payload["debate"][-1],
+                         {"role": "operator", "claim": "이 쟁점 더 다퉈라"})
+        self.assertEqual(payload["debate_bonus"], dashboard.DEBATE_BONUS)
+        self.assertEqual(payload["agreement"], {})   # 다시 만들어야 한다
+
+    def test_resume_debate_without_feedback_is_refused(self):
+        self.assertFalse(dashboard.do_action("resume_debate", self.card_id, text="   "))
+        self.assertEqual(self._card()["status"], "spec_blocked")
+
+    def test_amendment_reaches_the_implementation_prompt(self):
+        from src import impl_worker
+        text = impl_worker._agreement_text(
+            {"agreement": {"design": "합의안"}, "spec_amendment": "라우트에서 풀어라"})
+        self.assertIn("합의안", text)
+        self.assertIn("운영자 수정 지시", text)
+        self.assertIn("라우트에서 풀어라", text)

@@ -118,6 +118,7 @@ def build_board():
                     "impl": meta.get("impl") or {},
                     "verify": meta.get("verify") or {},
                     "agreement": meta.get("agreement") or {},
+                    "spec_amendment": meta.get("spec_amendment", ""),
                     "debate": meta.get("debate") or [],
                     "pr_url": meta.get("pr_url", ""),
                     "pr_dryrun": bool(meta.get("pr_dryrun")),
@@ -244,6 +245,7 @@ ACTIVE_REVIEW = ("intake", "reviewing", "verifying", "commenting")
 # 대시보드가 시작시킬 수 있는 스테이지 = tick 에 집어가는 워커가 있는 스테이지.
 # 워커 없이 열면 카드가 그 레인에 조용히 서고 아무 일도 일어나지 않는다.
 WORK_START = {"start_impl": "implementing", "start_debate": "spec"}
+DEBATE_BONUS = 2   # 사람이 개입할 때 늘려주는 라운드 수
 # 워커가 없어 막아둘 것이 생기면 여기에 둔다(버튼 비활성 + 서버 거부).
 WORK_START_PENDING: dict[str, tuple[str, str]] = {}
 
@@ -261,7 +263,8 @@ EVENT_LABELS = {
     "operator_pr_approved": "PR 승인(사람)",
     "debate_turn_started": "토론 턴 시작", "debate_turn": "토론 턴",
     "debate_finished": "토론 종료", "debate_engine_missing": "엔진 없음(토론 불가)",
-    "operator_spec_approved": "설계 승인(사람)", "operator_spec_rejected": "설계 반려(사람)", "operator_retry": "재시도(사람)",
+    "operator_spec_approved": "설계 승인(사람)", "operator_spec_rejected": "설계 반려(사람)",
+    "operator_debate_steer": "설계 피드백(사람) — 토론 재개", "operator_retry": "재시도(사람)",
     "pr_dryrun": "PR dry-run", "pr_opened": "PR 생성", "pr_open_no_branch": "브랜치 정보 없음",
     "review_quota_paused": "토큰 소진 — 대기열 복귀", "review_gave_up": "재시도 포기",
     "stage_error": "스테이지 오류",
@@ -319,8 +322,30 @@ def do_action(action, card_id, engine="claude", text=None):
         elif action == "approve_spec" and card["kind"] == "issue":
             if card["status"] != "spec_blocked":
                 return False
+            amendment = (text or "").strip()
+            if amendment:
+                # 합의문을 고치지 않고 위에 얹는다 — 토론 기록은 그대로 남아야 한다
+                db.merge_payload(c, card["id"], {"spec_amendment": amendment})
             db.set_status(c, card["id"], "implementing", blocked=0)
-            db.log_event(c, "operator_spec_approved", card["key"])
+            db.log_event(c, "operator_spec_approved", card["key"],
+                         {"amended": bool(amendment)})
+            kick = True
+        elif action == "resume_debate" and card["kind"] == "issue":
+            if card["status"] != "spec_blocked":
+                return False
+            steer = (text or "").strip()
+            if not steer:
+                return False
+            meta = json.loads(card["payload"]) if card["payload"] else {}
+            turns = (meta.get("debate") or []) + [{"role": "operator", "claim": steer}]
+            # 라운드 예산을 늘려준다 — 상한에 걸려 끝난 토론을 그냥 재개하면
+            # 첫 턴에서 다시 상한에 걸린다.
+            db.merge_payload(c, card["id"], {
+                "debate": turns,
+                "debate_bonus": int(meta.get("debate_bonus") or 0) + DEBATE_BONUS,
+                "agreement": {}})
+            db.set_status(c, card["id"], "spec", blocked=0)
+            db.log_event(c, "operator_debate_steer", card["key"], {"steer": steer[:200]})
             kick = True
         elif action == "reject_spec" and card["kind"] == "issue":
             if card["status"] != "spec_blocked":
@@ -1011,9 +1036,14 @@ function issueTile(c){
   }else if(c.status==='failed'){
     btns=`<div class="btns"><button class="go" onclick="act(event,'retry',${c.id})">↻ 재시도</button></div>`;
   }else if(c.status==='spec_blocked'){
-    btns=`<div class="rev">
-      <button class="claude" onclick="approveSpec(event,${c.id})">✅ 설계 승인</button>
-      <button class="codex" onclick="rejectSpec(event,${c.id})">↩︎ 반려</button>
+    btns=`<div class="instr">
+      <textarea id="spec${c.id}" placeholder="합의에 대한 피드백 (선택) — 승인 시 수정 지시로, 다시 토론 시 방향 지시로 쓰입니다"
+        onclick="event.stopPropagation()" onkeydown="event.stopPropagation()"></textarea>
+      <div class="rev">
+        <button class="claude" onclick="approveSpec(event,${c.id})">✅ 승인</button>
+        <button class="codex" onclick="resumeDebate(event,${c.id})">🔁 다시 토론</button>
+      </div>
+      <div class="rev"><button onclick="rejectSpec(event,${c.id})">↩︎ 반려</button></div>
     </div>`;
   }else if(c.status==='pr_blocked'){
     btns=`<div class="btns"><button class="go" onclick="approvePr(event,${c.id})">🚀 PR 올리기 승인</button></div>`;
@@ -1141,13 +1171,20 @@ function openIssueModal(c){
       html+=`<div class="lbl2">미합의 — 승인 전에 결정해야 합니다</div><div class="pre">`
         +(AG.unresolved||[]).map(q=>`<div>· ${esc(q)}</div>`).join('')+`</div>`;
     if(AG.risk)html+=`<div class="lbl2">위험</div><div class="pre">${esc(AG.risk)}</div>`;
+    if(AG.steers)html+=`<div class="lbl2">사람 개입 ${AG.steers}회</div>`;
+    if(c.spec_amendment)html+=`<div class="lbl2">운영자 수정 지시 (구현의 최우선 기준)</div><div class="pre">${esc(c.spec_amendment)}</div>`;
     if(c.status==='spec_blocked')
       html+=`<div class="btns"><button class="go" onclick="approveSpec(event,${c.id})">✅ 설계 승인 — 구현 시작</button>`
         +`<button onclick="rejectSpec(event,${c.id})">↩︎ 반려</button></div>`;
   }
   if((c.debate||[]).length){
     html+=`<div class="lbl">토론 기록 · ${c.debate.length}턴</div>`;
-    c.debate.forEach(t=>{const col=t.role==='proposer'?'#e19267':'#8faedc';
+    c.debate.forEach(t=>{
+      if(t.role==='operator'){
+        html+=`<div class="finding" style="border-left-color:${stripe('#2dd4bf')}">
+          <div class="ft">🧑 운영자 개입</div><div class="pre">${esc(t.claim||'')}</div></div>`;
+        return;}
+      const col=t.role==='proposer'?'#e19267':'#8faedc';
       html+=`<div class="finding" style="border-left-color:${stripe(col)}">
         <div class="ft">r${t.round} · ${t.role==='proposer'?'제안':'반대신문'}(${esc(t.engine||'')}) · ${esc(t.verdict||'')}</div>
         <div class="pre">${esc(t.claim||'')}</div>
@@ -1221,8 +1258,26 @@ async function startWork(e,id,mode){e.stopPropagation();
   const j=await send({action:mode==='debate'?'start_debate':'start_impl',card_id:id,engine:'claude'});
   if(j.ok===false)showToast('시작할 수 없습니다 — 엔진 상태를 확인하세요',false);
   load();}
-function approveSpec(e,id){e.stopPropagation();
-  if(confirm('이 설계로 구현을 시작할까요? (미합의 항목이 있으면 모달에서 먼저 확인하세요)'))act(e,'approve_spec',id);}
+function specText(id){const t=document.getElementById('spec'+id);return t?t.value.trim():'';}
+async function sendAction(body){
+  return fetch('/api/action',{method:'POST',
+    headers:{'Content-Type':'application/json','X-Lookout-Action':'1'},
+    body:JSON.stringify(body)}).then(r=>r.json()).catch(()=>({ok:false}));}
+async function approveSpec(e,id){e.stopPropagation();
+  const t=specText(id);
+  if(!confirm(t?'이 수정 지시를 얹어 구현을 시작할까요? — '+t:'합의된 설계 그대로 구현을 시작할까요?'))return;
+  showToast(t?'설계 승인(수정 지시 포함) ✅':'설계 승인 — 구현을 시작합니다 ✅',true);
+  const j=await sendAction({action:'approve_spec',card_id:id,text:t});
+  if(j.ok===false)showToast('승인할 수 없습니다',false);
+  load();}
+async function resumeDebate(e,id){e.stopPropagation();
+  const t=specText(id);
+  if(!t){showToast('피드백을 입력해야 다시 토론할 수 있습니다',false);return;}
+  if(!confirm('이 피드백을 넣고 토론을 재개할까요? — '+t))return;
+  showToast('토론 재개 🔁',true);
+  const j=await sendAction({action:'resume_debate',card_id:id,text:t});
+  if(j.ok===false)showToast('재개할 수 없습니다',false);
+  load();}
 function rejectSpec(e,id){e.stopPropagation();
   if(confirm('설계를 반려하고 대기로 되돌릴까요? 토론 기록은 보관됩니다.'))act(e,'reject_spec',id);}
 function approvePr(e,id){e.stopPropagation();

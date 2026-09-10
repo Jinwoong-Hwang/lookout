@@ -165,3 +165,65 @@ class DebateWorkerTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OperatorSteerTest(DebateWorkerTest):
+    """합의에 사람이 피드백을 줄 수 있어야 한다 — 승인하며 수정 지시를 얹거나,
+    방향을 주고 토론을 재개하거나."""
+
+    def _steer(self, text="가드는 미들웨어가 아니라 라우트에서 풀어라"):
+        meta = self._payload()
+        db.merge_payload(self.c, self.card_id, {
+            "debate": (meta.get("debate") or []) + [{"role": "operator", "claim": text}],
+            "debate_bonus": int(meta.get("debate_bonus") or 0) + 2, "agreement": {}})
+        db.set_status(self.c, self.card_id, "spec", blocked=0)
+
+    def test_operator_turn_does_not_shift_the_role_rotation(self):
+        self._reply({"claim": "안 v1", "verdict": "CONTINUE"},
+                    {"claim": "반박", "verdict": "CONTINUE"})
+        self._round()          # r1 proposer
+        self._steer()          # 사람 개입
+        self._round()          # 개입 뒤에도 다음은 critic 이어야 한다
+        roles = [t["role"] for t in self._payload()["debate"]]
+        self.assertEqual(roles, ["proposer", "operator", "critic"])
+        self.assertEqual(self.turns, ["claude", "codex"])
+
+    def test_steer_appears_in_the_next_prompt_as_authoritative(self):
+        self._reply({"claim": "안 v1", "verdict": "CONTINUE"},
+                    {"claim": "반박", "verdict": "CONTINUE"})
+        self._round()
+        self._steer("라우트에서 풀어라")
+        self._round()
+        _name, kw = self.prompts[-1]
+        self.assertIn("운영자 개입", kw["TRANSCRIPT"])
+        self.assertIn("라우트에서 풀어라", kw["TRANSCRIPT"])
+
+    def test_same_claim_before_a_steer_does_not_end_the_debate(self):
+        """사람이 방향을 틀면 새 국면이다. 개입 전 주장과 같아졌다고 끝내면
+        피드백이 무시된 채 종료된다."""
+        same = {"claim": "같은 주장", "verdict": "CONTINUE"}
+        self._reply(same, {"claim": "반박", "verdict": "CONTINUE"}, dict(same))
+        self._round(); self._round()
+        self._steer()
+        self._round()
+        self.assertEqual(self._card()["status"], "spec")   # 계속 돈다
+
+    def test_bonus_rounds_let_a_capped_debate_resume(self):
+        self._reply(*[{"claim": f"c{i}", "verdict": "CONTINUE"}
+                      for i in range(debate_worker.MAX_ROUNDS + 2)])
+        for _ in range(debate_worker.MAX_ROUNDS):
+            self._round()
+        self.assertEqual(self._card()["status"], "spec_blocked")   # 상한
+        self._steer()                                              # +2 라운드
+        self._round()
+        self.assertEqual(self._card()["status"], "spec")           # 다시 돈다
+
+    def test_agreement_counts_engine_rounds_only(self):
+        self._reply({"claim": "안", "proposal": "P", "verdict": "AGREE"},
+                    {"claim": "ok", "verdict": "AGREE"})
+        self._round()
+        self._steer()
+        self._round()
+        ag = self._payload()["agreement"]
+        self.assertEqual(ag["rounds"], 2)     # operator 턴은 라운드가 아니다
+        self.assertEqual(ag["steers"], 1)
