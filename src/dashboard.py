@@ -871,47 +871,47 @@ function renderByAuthor(){
   });
 }
 function issueTile(c){
+  // 리뷰 카드(tile)와 같은 골격: .pr / .title(평문) / .row 배지 / .row 사실 / 버튼.
+  // 제목을 <a>로 감싸면 밑줄·색 때문에 목록에서 읽기 어렵다 — 링크는 모달로 옮겼다.
   const el=document.createElement('div');el.className='card';
   const sm=smeta(c.status);el.style.borderLeftColor=stripe(sm.c);
   const rc=repoColor(c.repo);
   const repoPill=`<span class="repopill" style="${pill(rc)}"><span class="rdot" style="background:${rc}"></span>${esc(repoShort(c.repo))}</span>`;
   const statusPill=`<span class="statuspill" style="${pill(sm.c)}">${sm.ko}</span>`;
-  const asg=(c.assignees||[]).map(a=>`<span class="pill">${esc(a)}</span>`).join('');
-  const labs=(c.labels||[]).slice(0,4).map(l=>`<span class="pill">${esc(l)}</span>`).join('');
-  let body='', xbtn='';
-  if(c.status==='failed')xbtn=`<button class="xbtn" title="목록에서 제외" onclick="ignoreCard(event,${c.id})">✕</button>`;
-  if(c.status==='triage'){
+  const asg=(c.assignees||[]).slice(0,2).map(a=>`<span class="pill">${esc(a)}</span>`).join('');
+  const modePill=c.mode?`<span class="pill">${c.mode==='debate'?'설계부터':'바로구현'}</span>`:'';
+  const enginePill=(c.status!=='triage')?`<span class="pill">${esc(c.engine)}</span>`:'';
+  const v=c.verify||{};
+  const nb=(v.blocking||[]).length;
+  const vPill=v.engine?`<span class="pill" style="${pill(v.approved?'#4ade80':'#fb7185')}">🧾 ${esc(v.engine)} ${v.approved?'통과':'블로커 '+nb}</span>`:'';
+  const roundPill=(c.rounds>1)?`<span class="pill">${c.rounds}R</span>`:'';
+  let facts='';
+  if(c.branch)facts=`<span>🌿 ${esc(c.branch)}</span>${c.commit?`<code>${esc(c.commit)}</code>`:''}`
+    +`${(c.changed||[]).length?`<span>${c.changed.length}개 파일</span>`:''}`;
+  else if((c.labels||[]).length)facts=(c.labels||[]).slice(0,3).map(l=>`<span class="pill">${esc(l)}</span>`).join('');
+  let xbtn='', btns='';
+  if(c.status==='triage'||c.status==='failed')
     xbtn=`<button class="xbtn" title="목록에서 제외" onclick="ignoreCard(event,${c.id})">✕</button>`;
-    body=`<div class="instr">
+  if(c.status==='triage'){
+    btns=`<div class="instr">
       <textarea id="ins${c.id}" placeholder="추가 지시 (선택) — 이 이슈를 어떻게 처리할지"
         onclick="event.stopPropagation()" onkeydown="event.stopPropagation()">${esc(c.instruction)}</textarea>
       <div class="rev">
         <button class="claude" onclick="startWork(event,${c.id},'implement')">🛠 바로 구현</button>
         <button class="codex" onclick="startWork(event,${c.id},'debate')">🗣 설계부터</button>
       </div></div>`;
-  }else{
-    if(c.instruction)body+=`<div class="instrline">📝 ${esc(c.instruction)}</div>`;
-    if(c.branch)body+=`<div class="instrline">🌿 <code>${esc(c.branch)}</code>${c.commit?` · <code>${esc(c.commit)}</code>`:''}${c.changed&&c.changed.length?` · ${c.changed.length}개 파일`:''}</div>`;
-    if(c.impl&&c.impl.summary)body+=`<div class="instrline">🛠 ${esc(c.impl.summary)}</div>`;
-    if(c.impl&&c.impl.done===false)body+=`<div class="errline warn">부분 구현 — 엔진이 done=false 로 보고</div>`;
-    if(c.verify&&c.verify.engine){
-      const v=c.verify, n=(v.blocking||[]).length;
-      body+=`<div class="instrline">🧾 ${esc(v.engine)} 검증${v.fallback?' (동일 엔진 폴백)':''} · ${v.approved?'통과':`블로커 ${n}건`}${c.rounds>1?` · ${c.rounds}라운드`:''}</div>`;
-      (v.blocking||[]).slice(0,3).forEach(b=>{body+=`<div class="errline" title="${esc(b.problem)}">${esc(b.file)}:${esc(b.line)} — ${esc(b.problem)}</div>`});
-      (v.out_of_scope||[]).length&&(body+=`<div class="errline warn">스코프 밖 변경: ${esc((v.out_of_scope||[]).join(', '))}</div>`);
-    }
-    if(c.status==='pr_blocked')body+=`<div class="btns"><button class="go" onclick="approvePr(event,${c.id})">🚀 PR 올리기 승인</button></div>`;
-    if(c.pr_url)body+=`<div class="instrline">🔗 <a href="${esc(c.pr_url)}" target="_blank" rel="noreferrer" onclick="event.stopPropagation()">${esc(c.pr_url)}</a></div>`;
-    else if(c.pr_dryrun)body+=`<div class="instrline">🧪 dry-run — PR 본문만 생성됨 (dry_run_pr=true)</div>`;
-    if(c.error)body+=`<div class="errline" title="${esc(c.error)}">${esc(c.error)}</div>`;
-    if(c.status==='failed')body+=`<div class="btns"><button class="go" onclick="act(event,'retry',${c.id})">↻ 재시도</button></div>`;
+  }else if(c.status==='failed'){
+    btns=`<div class="btns"><button class="go" onclick="act(event,'retry',${c.id})">↻ 재시도</button></div>`;
+  }else if(c.status==='pr_blocked'){
+    btns=`<div class="btns"><button class="go" onclick="approvePr(event,${c.id})">🚀 PR 올리기 승인</button></div>`;
   }
-  const modePill=c.mode?`<span class="pill">${c.mode==='debate'?'설계부터':'바로구현'}</span>`:'';
   el.innerHTML=`${xbtn}<div class="pr">${repoPill} <span class="num">${esc(c.display)}</span></div>
-    <div class="title"><a href="${esc(c.url)}" target="_blank" rel="noreferrer"
-      onclick="event.stopPropagation()">${esc(c.title)||'(제목없음)'}</a></div>
-    <div class="row">${statusPill}${asg}${modePill}</div>
-    ${labs?`<div class="row">${labs}</div>`:''}${body}`;
+    <div class="title">${esc(c.title)||'(제목없음)'}</div>
+    <div class="row">${statusPill}${asg}${modePill}${enginePill}${vPill}${roundPill}</div>
+    ${facts?`<div class="row">${facts}</div>`:''}
+    ${(c.instruction&&c.status!=='triage')?`<div class="instrline">📝 ${esc(c.instruction)}</div>`:''}
+    ${c.error?`<div class="errline ${c.status==='triage'?'warn':''}" title="${esc(c.error)}">${esc(c.error)}</div>`:''}${btns}`;
+  el.onclick=()=>openIssueModal(c);
   return el;
 }
 function tile(c){
@@ -988,6 +988,42 @@ function openModal(c){
       html+=`<div class="cmt">${esc(cm.body)}</div>${cm.url?`<div class="msub"><a href="${cm.url}" target="_blank">${esc(cm.url)}</a></div>`:`<div class="msub">${pending?'(dry-run · 미게시)':'(dry-run preview)'}</div>`}`});
     if(c.dryrun_pending)
       html+=`<div class="btns"><button class="go" onclick="publishDryRun(event,${c.id})">💬 dry-run 댓글 게시</button></div>`;}
+  m.innerHTML=html;document.getElementById('ov').classList.add('show');
+}
+function openIssueModal(c){
+  const m=document.getElementById('modal');const sm=smeta(c.status);
+  let html=`<span class="close" onclick="closeM()">✕ 닫기</span>
+    <h3>${esc(c.display)} ${esc(c.title)}</h3>
+    <div class="msub">${esc(c.repo)}${(c.assignees||[]).length?' · '+esc((c.assignees||[]).join(', ')):''}
+      <span class="statuspill" style="${pill(sm.c)}">${sm.ko}</span></div>`;
+  if(c.url)html+=`<div class="mlink"><a href="${c.url}" target="_blank">GitHub 이슈 열기 ↗</a></div>`;
+  if(c.pr_url)html+=`<div class="mlink"><a href="${c.pr_url}" target="_blank">PR 열기 ↗</a></div>`;
+  if((c.labels||[]).length)html+=`<div class="lbl">라벨</div><div class="pre">${esc((c.labels||[]).join(' · '))}</div>`;
+  if(c.instruction)html+=`<div class="lbl">운영자 지시</div><div class="pre">${esc(c.instruction)}</div>`;
+  if(c.target_repo)html+=`<div class="lbl">대상</div><div class="pre">${esc(c.target_repo)}${c.branch?' · '+esc(c.branch):''}${c.commit?' · '+esc(c.commit):''}${c.rounds>1?' · '+c.rounds+'라운드':''}</div>`;
+  if(c.error)html+=`<div class="lbl">실패 사유</div><div class="pre">${esc(c.error)}</div>`;
+  const im=c.impl||{};
+  if(im.summary){html+=`<div class="lbl">구현 요약${im.done===false?' (부분 구현)':''}</div><div class="pre">${esc(im.summary)}</div>`;
+    if(im.verification)html+=`<div class="lbl2">검증</div><div class="pre">${esc(im.verification)}</div>`;
+    if((im.open_questions||[]).length)html+=`<div class="lbl2">남은 결정</div><div class="pre">${esc((im.open_questions||[]).join(', '))}</div>`;
+    if(im.risk)html+=`<div class="lbl2">위험</div><div class="pre">${esc(im.risk)}</div>`;}
+  if((c.changed||[]).length)
+    html+=`<div class="lbl">변경 파일 · ${c.changed.length}건</div><div class="pre">${esc(c.changed.join(', '))}</div>`;
+  const v=c.verify||{};
+  if(v.engine){
+    html+=`<div class="lbl">교차 검증 · ${esc(v.engine)}${v.fallback?' (동일 엔진 폴백)':''} · ${v.approved?'통과':'블로커 '+(v.blocking||[]).length+'건'}</div>`;
+    if(v.summary)html+=`<div class="pre">${esc(v.summary)}</div>`;
+    (v.blocking||[]).forEach(b=>{html+=`<div class="finding" style="border-left-color:${stripe('#fb7185')}">
+      <div class="ft">${esc(b.file||'')}${b.line?(':'+esc(b.line)):''}</div>
+      <div class="pre">${esc(b.problem||'')}</div>
+      ${b.fix?`<div class="lbl2">제안</div><div class="pre">${esc(b.fix)}</div>`:''}</div>`});
+    if((v.out_of_scope||[]).length)
+      html+=`<div class="lbl2">스코프 밖 변경</div><div class="pre">${esc((v.out_of_scope||[]).join(', '))}</div>`;
+  }
+  if(c.pr_dryrun&&!c.pr_url)
+    html+=`<div class="lbl">PR (dry-run)</div><div class="pre">dry_run_pr=true — 실제 PR은 올라가지 않았습니다. config에서 false로 바꾸면 draft PR이 생성됩니다.</div>`;
+  if(c.status==='pr_blocked')
+    html+=`<div class="btns"><button class="go" onclick="approvePr(event,${c.id})">🚀 PR 올리기 승인</button></div>`;
   m.innerHTML=html;document.getElementById('ov').classList.add('show');
 }
 function openFeedbackModal(f){

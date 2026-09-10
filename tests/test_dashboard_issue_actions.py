@@ -1,6 +1,11 @@
 import contextlib
 import json
+import os
+import re
+import shutil
 import sqlite3
+import subprocess
+import tempfile
 import unittest
 
 from src import dashboard, db, engines, keys
@@ -232,3 +237,57 @@ class SideNavTest(unittest.TestCase):
         main = self.html[self.html.index('<div class="main">'):self.html.index("</nav>") + 10000]
         for el in ('id="filterbar"', 'id="mentions"', 'id="board"'):
             self.assertIn(el, main)
+
+
+class ServedJsTest(unittest.TestCase):
+    """HTML 은 파이썬 문자열 리터럴이다. 소스에 쓴 \\n 이 모듈 로드 시 실제 개행이
+    되어 서빙되면, JS 문자열 안에서 줄이 끊겨 스크립트 전체가 죽는다 — 파일만 보면
+    정상으로 보이므로 눈으로는 못 잡는다."""
+
+    def test_no_literal_newline_inside_a_js_string(self):
+        for opener in ("('", '("'):
+            self.assertNotIn(opener + "\n", dashboard.HTML,
+                             f"JS 문자열 {opener} 안에 실제 개행이 서빙된다")
+
+    @unittest.skipUnless(shutil.which("node"), "node 없음")
+    def test_served_script_blocks_parse(self):
+        html = (dashboard.HTML
+                .replace("__LANES__", json.dumps(dashboard.LANES, ensure_ascii=False))
+                .replace("__WORK_LANES__", json.dumps(dashboard.WORK_LANES, ensure_ascii=False)))
+        blocks = re.findall(r"<script>(.*?)</script>", html, re.S)
+        self.assertTrue(blocks)
+        for i, js in enumerate(blocks):
+            with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False,
+                                             encoding="utf-8") as f:
+                f.write(js)
+                path = f.name
+            try:
+                proc = subprocess.run(["node", "--check", path],
+                                      capture_output=True, text=True)
+                self.assertEqual(proc.returncode, 0,
+                                 f"script 블록 {i} 문법 오류: {proc.stderr[:300]}")
+            finally:
+                os.unlink(path)
+
+
+class IssueCardShapeTest(unittest.TestCase):
+    """카드 골격은 리뷰 카드와 같아야 한다 — 제목은 평문, 상세는 모달."""
+
+    def test_title_is_plain_text_not_a_link(self):
+        self.assertNotIn('<div class="title"><a href', dashboard.HTML)
+
+    def test_card_opens_a_modal_like_review_cards(self):
+        self.assertIn("el.onclick=()=>openIssueModal(c)", dashboard.HTML)
+        self.assertIn("function openIssueModal", dashboard.HTML)
+
+    def test_card_uses_the_same_skeleton_classes(self):
+        tile = dashboard.HTML[dashboard.HTML.index("function issueTile"):
+                              dashboard.HTML.index("function tile(c)")]
+        for cls in ('class="pr"', 'class="title"', 'class="row"', "repopill",
+                    "statuspill", 'class="num"'):
+            self.assertIn(cls, tile)
+
+    def test_github_link_lives_in_the_modal(self):
+        modal = dashboard.HTML[dashboard.HTML.index("function openIssueModal"):
+                               dashboard.HTML.index("function openFeedbackModal")]
+        self.assertIn("GitHub 이슈 열기", modal)
