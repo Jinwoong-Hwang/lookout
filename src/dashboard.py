@@ -111,6 +111,8 @@ def build_board():
                     "target_repo": meta.get("target_repo", ""),
                     "branch": meta.get("branch", ""),
                     "commit": meta.get("commit", ""),
+                    "worktree": meta.get("worktree", ""),
+                    "parent_repo_path": _impl_parent_path(meta.get("target_repo")),
                     "changed": meta.get("changed") or [],
                     "impl": meta.get("impl") or {},
                     "verify": meta.get("verify") or {},
@@ -202,6 +204,17 @@ def build_board():
                 "error": err,
             })
         return out
+
+
+def _impl_parent_path(repo: str) -> str:
+    """구현 브랜치가 실제로 들어 있는 로컬 체크아웃. 사람이 그 브랜치로 자기
+    워크트리를 파려면 이 경로가 필요하다."""
+    if not repo:
+        return ""
+    try:
+        return worktree.impl_parent(repo)
+    except Exception:  # noqa: BLE001 - 설정 없음/경로 없음 모두 표시만 생략
+        return ""
 
 
 def _event_note(type_: str, detail) -> str:
@@ -1087,6 +1100,15 @@ function openIssueModal(c){
       ${b.fix?`<div class="lbl2">제안</div><div class="pre">${esc(b.fix)}</div>`:''}</div>`});
     if((v.out_of_scope||[]).length)
       html+=`<div class="lbl2">스코프 밖 변경</div><div class="pre">${esc((v.out_of_scope||[]).join(', '))}</div>`;
+  }
+  if(c.branch&&c.parent_repo_path){
+    const mine=`~/orca/workspaces/${esc(repoShort(c.target_repo||''))}/${esc(c.branch.split('/').pop())}`;
+    html+=`<div class="lbl">직접 돌려보기</div>`
+      +`<div class="pre">봇 워크트리 (다른 카드가 시작하면 브랜치가 갈립니다 — 오래 붙잡지 마세요)`
+      +`<div><code>${esc(c.worktree||'(아직 없음)')}</code></div></div>`
+      +`<div class="lbl2">내 워크트리를 따로 파기 (권장)</div>`
+      +`<div class="pre"><div><code>git -C ${esc(c.parent_repo_path)} worktree add ${mine} ${esc(c.branch)}</code></div>`
+      +`<div>또는 <code>orca worktree create --repo path:${esc(c.parent_repo_path)} --name ${esc(c.branch.split('/').pop())} --setup run</code> (yarn install 까지)</div></div>`;
   }
   if((c.timeline||[]).length){
     html+=`<div class="lbl">진행 기록 · ${c.timeline.length}건</div><div class="tl">`;

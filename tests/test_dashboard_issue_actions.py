@@ -340,3 +340,52 @@ class ProgressVisibilityTest(unittest.TestCase):
         src = inspect.getsource(impl_worker.process)
         for ev in ("impl_worktree_ready", "impl_engine_started", "impl_engine_done"):
             self.assertIn(ev, src)
+
+
+class WorktreeHandoffTest(unittest.TestCase):
+    """구현 브랜치를 사람이 직접 돌려보려면 경로가 필요하다. 봇 워크트리는 repo당
+    하나를 공유하므로 다른 카드가 시작하면 브랜치가 갈린다 — 그 사실도 알려야 한다."""
+
+    def setUp(self):
+        self.c = sqlite3.connect(":memory:")
+        self.c.row_factory = sqlite3.Row
+        self.c.executescript(db.SCHEMA)
+        self.c.execute("ALTER TABLE cards ADD COLUMN engine TEXT")
+        self.saved = {"connect": dashboard.db.connect,
+                      "parent": dashboard.worktree.impl_parent}
+
+        @contextlib.contextmanager
+        def fake_connect():
+            yield self.c
+
+        dashboard.db.connect = fake_connect
+        dashboard.worktree.impl_parent = lambda r: "/checkouts/" + r.split("/")[-1]
+        self.key = keys.issue_key(REPO, 3)
+        db.upsert_card(self.c, self.key, "issue", REPO, 3, status="impl_verify",
+                       payload={"display": "PH-3", "title": "t",
+                                "target_repo": "acme/ceo-client",
+                                "branch": "feature/PH-3-fix",
+                                "worktree": "/ws/acme__ceo-client/impl",
+                                "commit": "abc1234"})
+
+    def tearDown(self):
+        dashboard.db.connect = self.saved["connect"]
+        dashboard.worktree.impl_parent = self.saved["parent"]
+        self.c.close()
+
+    def test_row_carries_bot_worktree_and_parent_checkout(self):
+        row = [r for r in dashboard.build_board() if r["kind"] == "issue"][0]
+        self.assertEqual(row["worktree"], "/ws/acme__ceo-client/impl")
+        self.assertEqual(row["parent_repo_path"], "/checkouts/ceo-client")
+
+    def test_unconfigured_repo_does_not_break_the_board(self):
+        dashboard.worktree.impl_parent = lambda _r: (_ for _ in ()).throw(
+            dashboard.worktree.ImplRepoUnknown("설정 없음"))
+        row = [r for r in dashboard.build_board() if r["kind"] == "issue"][0]
+        self.assertEqual(row["parent_repo_path"], "")
+
+    def test_modal_warns_that_the_bot_worktree_gets_switched(self):
+        modal = dashboard.HTML[dashboard.HTML.index("function openIssueModal"):
+                               dashboard.HTML.index("function openFeedbackModal")]
+        self.assertIn("브랜치가 갈립니다", modal)
+        self.assertIn("worktree add", modal)
