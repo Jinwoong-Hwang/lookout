@@ -13,8 +13,9 @@ import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 
-from . import (approver, commenter, config, db, engines, feedback, impl_worker,
-               monitor, notify, poller, reviewer, router, verifier, worktree)
+from . import (approver, commenter, config, db, engines, feedback, impl_verifier,
+               impl_worker, monitor, notify, poller, pr_opener, reviewer, router,
+               verifier, worktree)
 
 CFG = config.CFG
 LOCK_PATH = config.path("logs/tick.lock")
@@ -44,7 +45,7 @@ def _maybe_poll():
 
 MAX_CONCURRENT = max(1, int(CFG.get("max_concurrent_reviews", 3)))
 RETRYABLE_STAGES = {"reviewer", "verifier", "commenter", "approver", "create_gate",
-                    "impl_worker"}
+                    "impl_worker", "impl_verifier", "pr_opener"}
 TERMINAL_STATUSES = {"done", "archived", "failed"}
 
 
@@ -197,6 +198,7 @@ def _fast_stages():
     _stage(["lgtm"], approver.create_gate, "create_gate", kind="review")
     _stage(["commenting"], commenter.process, "commenter", kind="review")
     _stage(["approving"], approver.process_gate, "approver", kind="approve")
+    _stage(["pr_opening"], pr_opener.process, "pr_opener", kind="issue")
 
 
 def run_once():
@@ -222,6 +224,7 @@ def run_once():
         did += _wave(["verifying"], verifier.process, "verifier", kind="review")
         # 이슈 구현 — 리뷰와 같은 wave 예산을 쓰지만 kind로 완전히 분리된다
         did += _wave(["implementing"], impl_worker.process, "impl_worker", kind="issue")
+        did += _wave(["impl_verify"], impl_verifier.process, "impl_verifier", kind="issue")
         _fast_stages()
         if did == 0:
             break

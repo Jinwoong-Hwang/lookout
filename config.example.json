@@ -33,6 +33,9 @@
   "impl_base_ref": {},
   "_impl_setup_cmd": "새 워크트리에서 한 번 돌릴 설치 명령. repo -> 셸 명령.",
   "impl_setup_cmd": {},
+  "_dry_run_pr": "true면 push·PR 생성을 하지 않고 본문만 카드에 남긴다. 처음엔 true로 확인 후 false 권장.",
+  "dry_run_pr": true,
+
   "_impl_target_map": "이슈 제목 태그 -> 구현 대상 저장소. 태그 표기(TALK-CEO/TALK_CEO)는 영숫자만 비교하므로 아무 표기나 적어도 된다. 못 맞히면 카드에서 사람이 고른다.",
   "impl_target_map": {
     "CEO_APP": "your-org/ceo-client",

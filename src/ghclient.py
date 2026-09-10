@@ -91,6 +91,19 @@ def pr_comment(repo: str, pr: int, body: str) -> str:
 _MY_LOGIN = None
 
 
+def pr_create_draft(repo: str, base: str, head: str, title: str, body: str) -> str:
+    """draft로 **생성**한다. 일반 상태로 만들면 저장소 전체 코드 소유자 팀에 리뷰가
+    자동 요청되고, 나중에 draft로 내려도 이미 걸린 요청은 회수되지 않는다."""
+    proc = _run(["pr", "create", "--repo", repo, "--draft",
+                 "--base", base, "--head", head, "--title", title, "--body", body])
+    return proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else ""
+
+
+def issue_comment(repo: str, number: int, body: str) -> str:
+    proc = _run(["issue", "comment", str(number), "--repo", repo, "--body", body])
+    return proc.stdout.strip()
+
+
 def my_login() -> str:
     global _MY_LOGIN
     if _MY_LOGIN is None:

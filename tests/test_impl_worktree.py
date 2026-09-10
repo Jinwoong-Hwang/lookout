@@ -142,3 +142,30 @@ class ImplBranchNameTest(unittest.TestCase):
     def test_template_is_configurable(self):
         worktree.CFG["impl_branch_template"] = "bot/{display}"
         self.assertEqual(worktree.impl_branch_name("PH-1", "무엇"), "bot/PH-1")
+
+
+class ImplWorktreeBranchReuseTest(ImplWorktreeTest):
+    """같은 카드가 검증·재구현으로 워크트리를 다시 요구한다. 그때 브랜치를 base로
+    되감으면 앞선 커밋이 조용히 사라진다."""
+
+    def test_existing_branch_keeps_its_commits(self):
+        wt = worktree.make_impl_worktree(self.repo, "feature/PH-1")
+        _write(os.path.join(wt, "impl.txt"), "구현물\n")
+        _git(wt, "add", "-A")
+        _git(wt, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "--quiet", "-m", "impl")
+        sha = _git(wt, "rev-parse", "HEAD")
+
+        again = worktree.make_impl_worktree(self.repo, "feature/PH-1")   # 재진입
+        self.assertEqual(_git(again, "rev-parse", "HEAD"), sha)
+        self.assertTrue(os.path.exists(os.path.join(again, "impl.txt")))
+
+    def test_switching_away_and_back_keeps_commits(self):
+        wt = worktree.make_impl_worktree(self.repo, "feature/PH-1")
+        _write(os.path.join(wt, "impl.txt"), "구현물\n")
+        _git(wt, "add", "-A")
+        _git(wt, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "--quiet", "-m", "impl")
+        sha = _git(wt, "rev-parse", "HEAD")
+
+        worktree.make_impl_worktree(self.repo, "feature/PH-2")           # 다른 카드
+        back = worktree.make_impl_worktree(self.repo, "feature/PH-1")    # 돌아옴
+        self.assertEqual(_git(back, "rev-parse", "HEAD"), sha)

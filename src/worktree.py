@@ -159,30 +159,46 @@ def impl_branch_name(display: str, title: str = "") -> str:
     return re.sub(r"[-/]+$", "", tmpl.format(display=display, slug=slug))
 
 
+def _branch_exists(repo_dir: str, branch: str) -> bool:
+    return _git(repo_dir, "rev-parse", "--verify", "--quiet",
+                f"refs/heads/{branch}", check=False).returncode == 0
+
+
 def make_impl_worktree(repo: str, branch: str, base_ref: str = None,
                        setup: bool = True) -> str:
     """repo당 상주 구현 워크트리를 준비하고 `branch`로 세운다.
 
     이슈마다 새 워크트리를 파면 node_modules를 매번 새로 설치해야 한다(zigbang-client는
     체크아웃 21G 중 대부분이 그것). 그래서 repo당 하나를 두고 브랜치만 갈아 쓴다.
-    동시 작업은 _repo_lock으로 직렬화된다."""
+    동시 작업은 _repo_lock으로 직렬화된다.
+
+    **이미 있는 브랜치는 base로 되감지 않는다.** 워크트리를 공유하므로 같은 카드가
+    검증·재구현으로 이 함수를 다시 부르고, 그때 -B로 브랜치를 다시 만들면 앞선
+    커밋이 조용히 사라진다."""
     parent = impl_parent(repo)
     wt = impl_worktree_path(repo)
     fresh = False
     with _repo_lock(repo):
         base = base_ref or _impl_base_ref(parent, repo)
         _git(parent, "fetch", "--quiet", "origin")
+        exists = _branch_exists(parent, branch)
         if os.path.exists(os.path.join(wt, ".git")):
             _assert_bot_worktree(wt)
             # 지난 작업 잔여물 정리. -x 는 쓰지 않는다 — node_modules(ignored)를
             # 지워버리면 상주 워크트리를 두는 이유가 없어진다.
             _git(wt, "reset", "--hard", check=False)
             _git(wt, "clean", "-fd", check=False)
-            _git(wt, "checkout", "-B", branch, base)
+            if exists:
+                _git(wt, "checkout", branch)
+            else:
+                _git(wt, "checkout", "-b", branch, base)
         else:
             os.makedirs(os.path.dirname(wt), exist_ok=True)
             _git(parent, "worktree", "prune")
-            _git(parent, "worktree", "add", "-B", branch, wt, base)
+            if exists:
+                _git(parent, "worktree", "add", wt, branch)
+            else:
+                _git(parent, "worktree", "add", "-b", branch, wt, base)
             fresh = True
     if fresh and setup:
         run_impl_setup(repo, wt)

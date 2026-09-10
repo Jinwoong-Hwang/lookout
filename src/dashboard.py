@@ -52,6 +52,7 @@ LANES = [
     ("implementing", "🛠 구현 중"),
     ("impl_verify", "🧾 구현 검증"),
     ("pr_blocked", "🔒 PR 승인 대기"),
+    ("pr_opening", "🚀 PR 올리는 중"),
 ]
 
 
@@ -105,6 +106,10 @@ def build_board():
                     "commit": meta.get("commit", ""),
                     "changed": meta.get("changed") or [],
                     "impl": meta.get("impl") or {},
+                    "verify": meta.get("verify") or {},
+                    "pr_url": meta.get("pr_url", ""),
+                    "pr_dryrun": bool(meta.get("pr_dryrun")),
+                    "rounds": meta.get("impl_rounds") or 1,
                     "head": "", "blocked": card["blocked"],
                     "findings": [], "comments": [], "dryrun_pending": False,
                     "feedback": None, "closure": {}, "error": impl_err,
@@ -231,6 +236,12 @@ def do_action(action, card_id, engine="claude", text=None):
             db.set_status(c, card["id"], back)
             db.log_event(c, "operator_retry", card["key"],
                          {"engine": card["engine"], "to": back})
+            kick = True
+        elif action == "unblock" and card["kind"] == "issue":
+            if card["status"] != "pr_blocked":
+                return False
+            db.set_status(c, card["id"], "pr_opening", blocked=0)
+            db.log_event(c, "operator_pr_approved", card["key"])
             kick = True
         elif action == "unblock" and card["kind"] == "approve":
             db.set_status(c, card["id"], "approving", blocked=0)
@@ -660,7 +671,8 @@ const STATUS_META={
   approving:{c:'#a78bfa',ko:'승인중'}, done:{c:'#6b7688',ko:'완료'},
   failed:{c:'#fb7185',ko:'실패'},
   spec:{c:'#a78bfa',ko:'설계토론'}, implementing:{c:'#fbbf24',ko:'구현중'},
-  impl_verify:{c:'#fbbf24',ko:'구현검증'}, pr_blocked:{c:'#a78bfa',ko:'PR승인대기'}};
+  impl_verify:{c:'#fbbf24',ko:'구현검증'}, pr_blocked:{c:'#a78bfa',ko:'PR승인대기'},
+  pr_opening:{c:'#a78bfa',ko:'PR생성중'}};
 function smeta(s){return STATUS_META[s]||{c:'#6b7688',ko:s};}
 function esc(s){return (s||"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]))}
 function repoShort(r){return (r||'').split('/')[1]||r;}
@@ -820,6 +832,15 @@ function issueTile(c){
     if(c.branch)body+=`<div class="instrline">🌿 <code>${esc(c.branch)}</code>${c.commit?` · <code>${esc(c.commit)}</code>`:''}${c.changed&&c.changed.length?` · ${c.changed.length}개 파일`:''}</div>`;
     if(c.impl&&c.impl.summary)body+=`<div class="instrline">🛠 ${esc(c.impl.summary)}</div>`;
     if(c.impl&&c.impl.done===false)body+=`<div class="errline warn">부분 구현 — 엔진이 done=false 로 보고</div>`;
+    if(c.verify&&c.verify.engine){
+      const v=c.verify, n=(v.blocking||[]).length;
+      body+=`<div class="instrline">🧾 ${esc(v.engine)} 검증${v.fallback?' (동일 엔진 폴백)':''} · ${v.approved?'통과':`블로커 ${n}건`}${c.rounds>1?` · ${c.rounds}라운드`:''}</div>`;
+      (v.blocking||[]).slice(0,3).forEach(b=>{body+=`<div class="errline" title="${esc(b.problem)}">${esc(b.file)}:${esc(b.line)} — ${esc(b.problem)}</div>`});
+      (v.out_of_scope||[]).length&&(body+=`<div class="errline warn">스코프 밖 변경: ${esc((v.out_of_scope||[]).join(', '))}</div>`);
+    }
+    if(c.status==='pr_blocked')body+=`<div class="btns"><button class="go" onclick="approvePr(event,${c.id})">🚀 PR 올리기 승인</button></div>`;
+    if(c.pr_url)body+=`<div class="instrline">🔗 <a href="${esc(c.pr_url)}" target="_blank" rel="noreferrer" onclick="event.stopPropagation()">${esc(c.pr_url)}</a></div>`;
+    else if(c.pr_dryrun)body+=`<div class="instrline">🧪 dry-run — PR 본문만 생성됨 (dry_run_pr=true)</div>`;
     if(c.error)body+=`<div class="errline" title="${esc(c.error)}">${esc(c.error)}</div>`;
     if(c.status==='failed')body+=`<div class="btns"><button class="go" onclick="act(event,'retry',${c.id})">↻ 재시도</button></div>`;
   }
@@ -950,6 +971,8 @@ async function startWork(e,id,mode){e.stopPropagation();
   const j=await send({action:mode==='debate'?'start_debate':'start_impl',card_id:id,engine:'claude'});
   if(j.ok===false)showToast('시작할 수 없습니다 — 엔진 상태를 확인하세요',false);
   load();}
+function approvePr(e,id){e.stopPropagation();
+  if(confirm('이 브랜치를 push하고 draft PR을 올릴까요? (ready 전환은 직접 하셔야 합니다)'))act(e,'unblock',id);}
 function stopReview(e,id){e.stopPropagation();
   if(confirm('이 리뷰를 강제 중지할까요? (진행 중인 분석을 종료하고 목록에서 제외)'))act(e,'stop',id);}
 function reReview(e,id){e.stopPropagation();
