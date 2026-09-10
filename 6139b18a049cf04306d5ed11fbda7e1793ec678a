@@ -1,0 +1,31 @@
+src/dashboard.py
+  h_03b13cada2edad 271-272,322-330,343-344,350-352,368-370,382-383,387-388,1083,1232-1235,1243
+src/db.py
+  h_03b13cada2edad 241-269
+src/debate_worker.py
+  h_03b13cada2edad 72-73,76-81,84-92,95-102,106,112-113,119,128,130,132-133,168,181,202-208
+src/impl_verifier.py
+  h_03b13cada2edad 48,57,75-79,103
+src/impl_worker.py
+  h_03b13cada2edad 106,115-121,154
+src/pr_opener.py
+  h_03b13cada2edad 40
+src/worktree.py
+  h_03b13cada2edad 9,168-180
+tests/test_dashboard_issue_actions.py
+  h_03b13cada2edad 368,546-670
+tests/test_debate_worker.py
+  h_03b13cada2edad 283-325
+tests/test_impl_worktree.py
+  h_03b13cada2edad 172-220
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "6139b18a049cf04306d5ed11fbda7e1793ec678a",
+  "prompts": {},
+  "humans": {
+    "h_03b13cada2edad": {
+      "author": "woong@zigbang.com"
+    }
+  }
+}
