@@ -3,7 +3,7 @@ import inspect
 import textwrap
 import unittest
 
-from src import impl_verifier, impl_worker, pr_opener, tick
+from src import dashboard, impl_verifier, impl_worker, pr_opener, tick
 
 # 스테이지 호출부는 kind를 반드시 넘겨야 한다 — db.cards_in은 status만 보므로
 # kind가 빠지면 다른 kind의 카드가 그 스테이지로 들어간다.
@@ -57,6 +57,24 @@ class TickWiringTest(unittest.TestCase):
             self.assertEqual(len(calls), 1, f"{lane} 소유자가 {len(calls)}개")
             self.assertIn("kind='issue'", calls[0])
         self.assertEqual(set(owners), {"implementing", "impl_verify", "pr_opening"})
+
+    def test_dashboard_can_only_start_stages_that_have_a_worker(self):
+        """대시보드가 여는 시작 스테이지에 소유 워커가 없으면 카드가 그 레인에
+        조용히 선다. spec(토론)이 정확히 이렇게 열려 있었다."""
+        owned = set()
+        for node in self._stage_calls():
+            call = ast.unparse(node)
+            if "kind='issue'" not in call:
+                continue
+            for lane, _ in dashboard.WORK_LANES:
+                if f"'{lane}'" in call:
+                    owned.add(lane)
+        for action, status in dashboard.WORK_START.items():
+            self.assertIn(status, owned, f"{action} → {status}: 집어가는 워커가 없다")
+        # 막아둔 것은 반대로 소유 워커가 없어야 한다(있으면 열어야 한다)
+        for action, (status, _why) in dashboard.WORK_START_PENDING.items():
+            self.assertNotIn(status, owned,
+                             f"{action} → {status}: 워커가 붙었으니 WORK_START 로 옮길 것")
 
     def test_verify_and_pr_stages_are_retryable(self):
         for stage in ("impl_verifier", "pr_opener"):

@@ -58,6 +58,8 @@ def process(c, card):
                      {"repo": repo, "branch": branch})
         return
 
+    db.log_event(c, "impl_verify_started", card["key"],
+                 {"engine": vengine, "fallback": fallback, "branch": branch})
     wt = worktree.make_impl_worktree(repo, branch, setup=False)
     impl = meta.get("impl") or {}
     prompt = prompt_tpl.render(

@@ -67,10 +67,32 @@ class DashboardIssueActionTest(unittest.TestCase):
         types = [r["type"] for r in self.c.execute("SELECT type FROM events").fetchall()]
         self.assertIn("work_started", types)
 
-    def test_start_debate_moves_to_spec(self):
-        self.assertTrue(dashboard.do_action("start_debate", self.card_id, "codex"))
-        self.assertEqual(self._card()["status"], "spec")
-        self.assertEqual(self._payload()["mode"], "debate")
+    def test_start_debate_is_refused_while_no_worker_exists(self):
+        """워커 없이 spec 으로 보내면 카드가 조용히 선다 — 거부하고 이유를 남긴다."""
+        self.assertFalse(dashboard.do_action("start_debate", self.card_id, "codex"))
+        self.assertEqual(self._card()["status"], "triage")
+        types = [r["type"] for r in self.c.execute("SELECT type FROM events").fetchall()]
+        self.assertIn("work_start_unavailable", types)
+
+    def test_timeline_is_exposed_with_human_labels(self):
+        dashboard.do_action("start_impl", self.card_id, "claude")
+        db.log_event(self.c, "impl_engine_done", self.key, {"engine": "claude", "secs": 12.3})
+        row = [r for r in dashboard.build_board() if r["kind"] == "issue"][0]
+        labels = [e["label"] for e in row["timeline"]]
+        self.assertIn("작업 시작", labels)
+        self.assertIn("엔진 편집 종료", labels)
+        note = next(e["detail"] for e in row["timeline"] if e["type"] == "impl_engine_done")
+        self.assertIn("secs=12.3", note)
+
+    def test_row_carries_updated_at_for_the_elapsed_badge(self):
+        row = [r for r in dashboard.build_board() if r["kind"] == "issue"][0]
+        self.assertGreater(row["updated_at"], 0)
+
+    def test_event_note_prefers_a_human_readable_field(self):
+        self.assertEqual(dashboard._event_note("x", '{"error": "터졌다"}'), "터졌다")
+        self.assertIn("branch=b", dashboard._event_note("x", '{"branch": "b", "secs": 3}'))
+        self.assertEqual(dashboard._event_note("x", None), "")
+        self.assertEqual(dashboard._event_note("x", "not json"), "")
 
     def test_start_is_rejected_once_work_began(self):
         dashboard.do_action("start_impl", self.card_id, "claude")
@@ -291,3 +313,30 @@ class IssueCardShapeTest(unittest.TestCase):
         modal = dashboard.HTML[dashboard.HTML.index("function openIssueModal"):
                                dashboard.HTML.index("function openFeedbackModal")]
         self.assertIn("GitHub 이슈 열기", modal)
+
+
+class ProgressVisibilityTest(unittest.TestCase):
+    """진행 중 구간이 무음이면 멈춘 건지 도는 건지 알 수 없다."""
+
+    def test_debate_button_is_disabled_with_a_reason(self):
+        self.assertIn('disabled title="토론 워커 미구현', dashboard.HTML)
+        self.assertNotIn("startWork(event,${c.id},'debate')", dashboard.HTML)
+
+    def test_running_states_show_an_elapsed_badge(self):
+        self.assertIn("const RUNNING=['spec','implementing','impl_verify','pr_opening']",
+                      dashboard.HTML)
+        self.assertIn("ago(c.updated_at)", dashboard.HTML)
+
+    def test_modal_renders_the_timeline(self):
+        modal = dashboard.HTML[dashboard.HTML.index("function openIssueModal"):
+                               dashboard.HTML.index("function openFeedbackModal")]
+        self.assertIn("진행 기록", modal)
+        self.assertIn("hhmm(e.ts)", modal)
+
+    def test_worker_marks_the_silent_window(self):
+        import inspect
+
+        from src import impl_worker
+        src = inspect.getsource(impl_worker.process)
+        for ev in ("impl_worktree_ready", "impl_engine_started", "impl_engine_done"):
+            self.assertIn(ev, src)

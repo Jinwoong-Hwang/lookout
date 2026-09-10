@@ -117,6 +117,15 @@ def build_board():
                     "pr_url": meta.get("pr_url", ""),
                     "pr_dryrun": bool(meta.get("pr_dryrun")),
                     "rounds": meta.get("impl_rounds") or 1,
+                    "updated_at": card["updated_at"],
+                    "timeline": [
+                        {"ts": e["ts"], "type": e["type"],
+                         "label": EVENT_LABELS.get(e["type"], e["type"]),
+                         "detail": _event_note(e["type"], e["detail"])}
+                        for e in c.execute(
+                            "SELECT ts, type, detail FROM events WHERE key=?"
+                            " ORDER BY id DESC LIMIT 40", (card["key"],)).fetchall()
+                    ],
                     "head": "", "blocked": card["blocked"],
                     "findings": [], "comments": [], "dryrun_pending": False,
                     "feedback": None, "closure": {}, "error": impl_err,
@@ -195,10 +204,49 @@ def build_board():
         return out
 
 
+def _event_note(type_: str, detail) -> str:
+    """이벤트 detail(JSON)에서 사람이 볼 한 줄만 꺼낸다. 전부 뿌리면 모달이 로그가 된다."""
+    try:
+        d = json.loads(detail) if detail else {}
+    except (TypeError, ValueError):
+        return ""
+    if not isinstance(d, dict):
+        return ""
+    for key in ("error", "reason", "summary", "url", "title"):
+        if d.get(key):
+            return str(d[key])[:200]
+    bits = []
+    for key in ("engine", "branch", "commit", "secs", "files", "blocking", "round", "approved"):
+        if d.get(key) not in (None, ""):
+            bits.append(f"{key}={d[key]}")
+    return " · ".join(bits)[:200]
+
+
 ACTIVE_REVIEW = ("intake", "reviewing", "verifying", "commenting")
 
 
-WORK_START = {"start_impl": "implementing", "start_debate": "spec"}
+# 대시보드가 시작시킬 수 있는 스테이지 = tick 에 집어가는 워커가 있는 스테이지.
+# 워커 없이 열면 카드가 그 레인에 조용히 서고 아무 일도 일어나지 않는다.
+WORK_START = {"start_impl": "implementing"}
+# 아직 워커가 없어 막아둔 것. tick 에 스테이지를 붙일 때 WORK_START 로 옮긴다.
+WORK_START_PENDING = {"start_debate": ("spec", "토론 워커 미구현 — 곧 붙습니다")}
+
+# events 를 카드 모달에 사람이 읽을 수 있게 뿌리기 위한 라벨
+EVENT_LABELS = {
+    "issue_card_created": "카드 생성", "issue_card_delisted": "목록에서 빠짐",
+    "work_started": "작업 시작", "work_start_blocked": "시작 차단(엔진 미준비)",
+    "work_start_unavailable": "시작 차단(워커 없음)",
+    "impl_target_unknown": "대상 저장소 미정", "impl_worktree_ready": "워크트리 준비 완료",
+    "impl_engine_started": "엔진 편집 시작", "impl_engine_done": "엔진 편집 종료",
+    "impl_no_changes": "변경 없음", "impl_committed": "커밋 완료",
+    "impl_verify_started": "교차 검증 시작", "impl_verified": "교차 검증 완료",
+    "impl_rework": "재구현으로 되돌림", "impl_rounds_exhausted": "라운드 예산 소진",
+    "impl_verify_no_branch": "브랜치 정보 없음", "impl_verify_empty_diff": "diff 없음",
+    "operator_pr_approved": "PR 승인(사람)", "operator_retry": "재시도(사람)",
+    "pr_dryrun": "PR dry-run", "pr_opened": "PR 생성", "pr_open_no_branch": "브랜치 정보 없음",
+    "review_quota_paused": "토큰 소진 — 대기열 복귀", "review_gave_up": "재시도 포기",
+    "stage_error": "스테이지 오류",
+}
 
 
 def do_action(action, card_id, engine="claude", text=None):
@@ -223,13 +271,18 @@ def do_action(action, card_id, engine="claude", text=None):
             if card["status"] != "triage":
                 return False
             db.merge_payload(c, card["id"], {"instruction": (text or "").strip()})
+        elif action in WORK_START_PENDING and card["kind"] == "issue":
+            stage, why = WORK_START_PENDING[action]
+            db.log_event(c, "work_start_unavailable", card["key"],
+                         {"stage": stage, "reason": why})
+            return False
         elif action in WORK_START and card["kind"] == "issue":
             if card["status"] != "triage":
                 return False
             if not engines.is_ready(engine):
                 db.log_event(c, "work_start_blocked", card["key"], {"engine": engine})
                 return False
-            mode = "debate" if action == "start_debate" else "implement"
+            mode = "implement"
             db.set_engine(c, card["id"], engine)
             db.merge_payload(c, card["id"], {"mode": mode})
             db.set_status(c, card["id"], WORK_START[action])
@@ -567,6 +620,13 @@ display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hi
   background:var(--panel);color:var(--fg);border:1px solid var(--line);border-radius:6px;
   padding:6px 7px;font:inherit;font-size:11.5px;line-height:1.4}
 .instr textarea::placeholder{color:var(--dim)}
+.tl{margin-top:6px;border:1px solid var(--line);border-radius:9px;overflow:hidden}
+.tlrow{display:grid;grid-template-columns:66px 116px 1fr;gap:8px;padding:5px 10px;
+  font-size:11.5px;border-bottom:1px solid var(--line);align-items:baseline}
+.tlrow:last-child{border-bottom:none}
+.tlrow code{color:var(--dim);font-size:11px}
+.tlrow .tlab{color:var(--ink);font-weight:600}
+.tlrow .tdet{color:var(--muted);word-break:break-word}
 .instrline{margin-top:6px;font-size:11px;line-height:1.35;color:var(--muted);
   white-space:pre-wrap;word-break:break-word}
 .rev{display:flex;gap:7px;margin-top:11px}
@@ -719,6 +779,12 @@ const STATUS_META={
   impl_verify:{c:'#fbbf24',ko:'구현검증'}, pr_blocked:{c:'#a78bfa',ko:'PR승인대기'},
   pr_opening:{c:'#a78bfa',ko:'PR생성중'}};
 function smeta(s){return STATUS_META[s]||{c:'#6b7688',ko:s};}
+function ago(ts){if(!ts)return '';const s=Math.max(0,Date.now()/1000-ts);
+  if(s<60)return Math.floor(s)+'초';if(s<3600)return Math.floor(s/60)+'분';
+  if(s<86400)return Math.floor(s/3600)+'시간';return Math.floor(s/86400)+'일';}
+function hhmm(ts){const d=new Date(ts*1000);
+  return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0')
+    +':'+String(d.getSeconds()).padStart(2,'0');}
 function esc(s){return (s||"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]))}
 function repoShort(r){return (r||'').split('/')[1]||r;}
 const REPO_COLORS=['#2dd4bf','#a78bfa','#fbbf24','#60a5fa','#4ade80','#fb7185'];
@@ -885,6 +951,8 @@ function issueTile(c){
   const nb=(v.blocking||[]).length;
   const vPill=v.engine?`<span class="pill" style="${pill(v.approved?'#4ade80':'#fb7185')}">🧾 ${esc(v.engine)} ${v.approved?'통과':'블로커 '+nb}</span>`:'';
   const roundPill=(c.rounds>1)?`<span class="pill">${c.rounds}R</span>`:'';
+  const RUNNING=['spec','implementing','impl_verify','pr_opening'];
+  const agePill=RUNNING.includes(c.status)?`<span class="pill" title="이 상태로 머문 시간">⏱ ${ago(c.updated_at)}</span>`:'';
   let facts='';
   if(c.branch)facts=`<span>🌿 ${esc(c.branch)}</span>${c.commit?`<code>${esc(c.commit)}</code>`:''}`
     +`${(c.changed||[]).length?`<span>${c.changed.length}개 파일</span>`:''}`;
@@ -898,7 +966,7 @@ function issueTile(c){
         onclick="event.stopPropagation()" onkeydown="event.stopPropagation()">${esc(c.instruction)}</textarea>
       <div class="rev">
         <button class="claude" onclick="startWork(event,${c.id},'implement')">🛠 바로 구현</button>
-        <button class="codex" onclick="startWork(event,${c.id},'debate')">🗣 설계부터</button>
+        <button class="codex" disabled title="토론 워커 미구현 — 곧 붙습니다">🗣 설계부터</button>
       </div></div>`;
   }else if(c.status==='failed'){
     btns=`<div class="btns"><button class="go" onclick="act(event,'retry',${c.id})">↻ 재시도</button></div>`;
@@ -907,7 +975,7 @@ function issueTile(c){
   }
   el.innerHTML=`${xbtn}<div class="pr">${repoPill} <span class="num">${esc(c.display)}</span></div>
     <div class="title">${esc(c.title)||'(제목없음)'}</div>
-    <div class="row">${statusPill}${asg}${modePill}${enginePill}${vPill}${roundPill}</div>
+    <div class="row">${statusPill}${asg}${modePill}${enginePill}${vPill}${roundPill}${agePill}</div>
     ${facts?`<div class="row">${facts}</div>`:''}
     ${(c.instruction&&c.status!=='triage')?`<div class="instrline">📝 ${esc(c.instruction)}</div>`:''}
     ${c.error?`<div class="errline ${c.status==='triage'?'warn':''}" title="${esc(c.error)}">${esc(c.error)}</div>`:''}${btns}`;
@@ -1019,6 +1087,13 @@ function openIssueModal(c){
       ${b.fix?`<div class="lbl2">제안</div><div class="pre">${esc(b.fix)}</div>`:''}</div>`});
     if((v.out_of_scope||[]).length)
       html+=`<div class="lbl2">스코프 밖 변경</div><div class="pre">${esc((v.out_of_scope||[]).join(', '))}</div>`;
+  }
+  if((c.timeline||[]).length){
+    html+=`<div class="lbl">진행 기록 · ${c.timeline.length}건</div><div class="tl">`;
+    c.timeline.forEach(e=>{html+=`<div class="tlrow"><code>${hhmm(e.ts)}</code>`
+      +`<span class="tlab">${esc(e.label)}</span>`
+      +`<span class="tdet">${esc(e.detail||'')}</span></div>`});
+    html+='</div>';
   }
   if(c.pr_dryrun&&!c.pr_url)
     html+=`<div class="lbl">PR (dry-run)</div><div class="pre">dry_run_pr=true — 실제 PR은 올라가지 않았습니다. config에서 false로 바꾸면 draft PR이 생성됩니다.</div>`;

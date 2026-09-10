@@ -7,6 +7,7 @@
 import json
 import re
 import subprocess
+import time
 
 from . import claude_runner, db, engines, ghclient, prompt_tpl, worktree
 from .config import CFG
@@ -86,7 +87,13 @@ def process(c, card):
 
     branch = worktree.impl_branch_name(display, meta.get("title") or "")
     issue = ghclient.issue_view(card["repo"], card["pr_number"])
+
+    # 여기서부터 커밋까지가 통째로 무음이었다(설치 수 분 + 엔진 수십 분). 어디까지
+    # 갔는지 대시보드에서 보이도록 구간마다 이벤트를 남긴다.
+    t0 = time.time()
     wt = worktree.make_impl_worktree(repo, branch)
+    db.log_event(c, "impl_worktree_ready", card["key"],
+                 {"repo": repo, "branch": branch, "secs": round(time.time() - t0, 1)})
 
     prompt = prompt_tpl.render(
         "impl.md",
@@ -98,7 +105,11 @@ def process(c, card):
         BRANCH=branch,
     )
     engine = card["engine"] or "claude"
+    db.log_event(c, "impl_engine_started", card["key"], {"engine": engine, "branch": branch})
+    t1 = time.time()
     raw = engines.run_impl(prompt, engine=engine, cwd=wt)
+    db.log_event(c, "impl_engine_done", card["key"],
+                 {"engine": engine, "secs": round(time.time() - t1, 1), "chars": len(raw or "")})
     try:
         result = claude_runner.parse_json(raw)
     except claude_runner.ClaudeError:

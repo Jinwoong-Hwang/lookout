@@ -132,6 +132,21 @@ class ImplWorkerTest(unittest.TestCase):
         # 워커가 커밋했고 워크트리는 깨끗하다
         self.assertEqual(_git(self.wt, "status", "--porcelain"), "")
 
+    def test_stage_events_break_up_the_silent_window(self):
+        """work_started → impl_committed 사이가 통째로 무음이면 수십 분 동안
+        멈춘 건지 도는 건지 알 수 없다."""
+        def edit():
+            with open(os.path.join(self.wt, "a.txt"), "w") as f:
+                f.write("after\n")
+        self._run(edit=edit)
+        events = self._events()
+        for ev in ("impl_worktree_ready", "impl_engine_started",
+                   "impl_engine_done", "impl_committed"):
+            self.assertIn(ev, events)
+        # 순서도 지켜야 의미가 있다
+        self.assertLess(events.index("impl_worktree_ready"), events.index("impl_engine_started"))
+        self.assertLess(events.index("impl_engine_done"), events.index("impl_committed"))
+
     def test_commit_message_carries_issue_and_instruction(self):
         def edit():
             with open(os.path.join(self.wt, "a.txt"), "w") as f:
