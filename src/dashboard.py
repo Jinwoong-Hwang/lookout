@@ -781,6 +781,15 @@ h1{font-size:17px;margin:0;font-weight:750;letter-spacing:-.01em}
 .toggle{display:flex;gap:6px;margin-left:6px}
 .toggle button.active{background:var(--btn-accent-bg);color:var(--btn-accent-fg);border-color:var(--btn-accent-bd);font-weight:650}
 .sec{margin:0 0 16px}
+/* 작업 보드 — 게이트 섹션은 '지금 당신 차례'라서 눈에 먼저 걸려야 한다 */
+.sec.g-gate{background:var(--panel);border:1px solid var(--warn);border-radius:14px;padding:14px 16px 4px}
+.sec.g-gate h2{border-bottom-color:var(--line)}
+.sec.g-gate .card{width:332px}
+.ghint{margin-left:auto;color:var(--muted);font-size:11.5px;font-weight:400}
+details.grp>summary{list-style:none;cursor:pointer}
+details.grp>summary::-webkit-details-marker{display:none}
+details.grp>summary h2{margin:0 0 10px}
+details.grp[open]>summary h2{margin-bottom:10px}
 .sec h2{font-size:14px;margin:0 0 10px;padding-bottom:7px;border-bottom:1px solid var(--line);display:flex;gap:8px;align-items:center}
 .sec .cards{display:flex;flex-direction:row;flex-wrap:wrap;gap:10px;padding:0}
 .sec .card{width:262px}
@@ -1161,7 +1170,7 @@ function render(){
   return render_();
 }
 function render_(){VIEW==='feedback'?renderFeedback():VIEW==='author'?renderByAuthor()
-    :renderLanes(VIEW==='work'?WORK_LANES:LANES);}
+    :VIEW==='work'?renderWork():renderLanes(LANES);}
 function renderFeedback(){
   const list=viewFeedbackData();
   const board=document.getElementById('board');board.className='board stack';board.innerHTML='';
@@ -1183,6 +1192,47 @@ function feedbackItem(f){
     <div class="acts">${open}</div>`;
   el.onclick=()=>openFeedbackModal(f);
   return el;
+}
+// 작업 보드는 칸반이 아니다. 레인 이동은 워커가 시키고 사람이 하는 일은
+// **게이트에 선 카드에 응답하는 것** 하나뿐이다 — 드래그도, 레인 간 이동도 없다.
+// 레인 10개에 카드 4장이면 가로 폭의 80%가 빈 칸이고, 스크롤 비용만 내고
+// 정보는 안 나온다. 그래서 '무슨 단계냐'가 아니라 '내가 뭘 해야 하냐'로 묶는다.
+// (리뷰 보드는 카드가 수백 장이라 레인이 실제로 채워지므로 그대로 둔다.)
+const WORK_GROUPS=[
+  {key:'gate',label:'⚠️ 내 차례',lanes:['spec_blocked','verify_blocked','pr_blocked'],
+   hint:'응답해야 다음으로 갑니다',empty:'지금 결정할 카드가 없습니다',always:true},
+  {key:'run',label:'🔄 돌아가는 중',lanes:['spec','implementing','impl_verify','pr_opening'],
+   hint:'엔진이 작업 중 — 기다리면 됩니다',empty:'돌고 있는 작업 없음',always:true},
+  {key:'wait',label:'📥 대기 (내 이슈)',lanes:['triage'],
+   hint:'여기서 작업을 시작합니다',empty:'할당된 이슈 없음',always:true},
+  {key:'end',label:'🏁 끝난 것',lanes:['done','failed'],fold:true}];
+const WORK_OPEN={};   // <details> 접힘 상태를 5초 갱신 너머로 보존
+function renderWork(){
+  const board=document.getElementById('board');
+  board.querySelectorAll('details.grp').forEach(d=>WORK_OPEN[d.dataset.g]=d.open);
+  const top=board.scrollTop;
+  const by={};viewData().forEach(c=>{(by[c.status]=by[c.status]||[]).push(c)});
+  board.className='board stack';board.innerHTML='';
+  for(const g of WORK_GROUPS){
+    const list=g.lanes.reduce((a,k)=>a.concat(by[k]||[]),[]);
+    if(!list.length&&!g.always)continue;
+    const head=`<span class="lh">${g.label}</span><span class="n">${list.length}</span>`
+      +(g.hint&&list.length?`<span class="ghint">${g.hint}</span>`:'');
+    let host;
+    if(g.fold){
+      host=document.createElement('details');host.className='grp sec';host.dataset.g=g.key;
+      host.open=!!WORK_OPEN[g.key];
+      host.innerHTML=`<summary><h2>${head}</h2></summary>`;
+    }else{
+      host=document.createElement('div');host.className='sec g-'+g.key;
+      host.innerHTML=`<h2>${head}</h2>`;
+    }
+    const cc=document.createElement('div');cc.className='cards';
+    if(!list.length)cc.innerHTML=`<div class="empty">${g.empty||'—'}</div>`;
+    list.forEach(c=>cc.appendChild(tile(c)));
+    host.appendChild(cc);board.appendChild(host);
+  }
+  board.scrollTop=top;
 }
 function renderLanes(lanes){
   lanes=lanes||LANES;

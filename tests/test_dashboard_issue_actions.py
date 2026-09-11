@@ -166,7 +166,8 @@ class DashboardIssueActionTest(unittest.TestCase):
         html = dashboard.HTML
         self.assertIn("VIEW==='work'?DATA.filter(c=>c.kind==='issue')", html)
         self.assertIn("DATA.filter(c=>c.kind!=='issue')", html)
-        self.assertIn("renderLanes(VIEW==='work'?WORK_LANES:LANES)", html)
+        # 두 뷰는 렌더러부터 다르다 — 작업은 그룹, 리뷰는 레인
+        self.assertIn("VIEW==='work'?renderWork():renderLanes(LANES)", html)
 
 
 if __name__ == "__main__":
@@ -1039,3 +1040,41 @@ class ModalReadabilityTest(unittest.TestCase):
         body = self.html[self.html.index("function md(t)"):
                          self.html.index("function repoShort")]
         self.assertIn("String.fromCharCode(10)", self.html)   # NL 상수를 쓴다
+
+
+class WorkBoardLayoutTest(unittest.TestCase):
+    """작업 보드는 칸반이 아니다 — 레인 이동은 워커가 하고, 사람이 하는 일은
+    게이트 응답 하나뿐이다. 단계별 컬럼은 대부분 비어 가로 스크롤만 만든다."""
+
+    def _groups(self):
+        import re
+        return re.findall(r"lanes:\[([^\]]*)\]", dashboard.HTML)
+
+    def test_every_work_lane_lands_in_exactly_one_group(self):
+        """빠진 레인이 있으면 그 상태의 카드는 화면에서 **사라진다** — 조용히
+        일이 멈추는 가장 나쁜 실패다."""
+        seen = []
+        for g in self._groups():
+            seen += [x.strip().strip("'") for x in g.split(",") if x.strip()]
+        for key, _label in dashboard.WORK_LANES:
+            self.assertIn(key, seen, f"{key} 레인이 어느 그룹에도 없다")
+        self.assertEqual(len(seen), len(set(seen)), "같은 레인이 두 그룹에 있다")
+
+    def test_the_gate_group_comes_first(self):
+        """'내 차례'가 맨 위에 있어야 스크롤 없이 할 일이 보인다."""
+        html = dashboard.HTML
+        gate = html.index("'spec_blocked','verify_blocked','pr_blocked'")
+        for other in ("'triage'", "'done','failed'"):
+            self.assertLess(gate, html.index(other))
+
+    def test_work_view_does_not_use_the_kanban_renderer(self):
+        self.assertIn("VIEW==='work'?renderWork()", dashboard.HTML)
+
+    def test_the_review_board_keeps_its_lanes(self):
+        """리뷰는 카드가 수백 장이라 레인이 실제로 채워진다 — 건드리지 않는다."""
+        self.assertIn("renderLanes(LANES)", dashboard.HTML)
+        self.assertIn("function renderLanes", dashboard.HTML)
+
+
+if __name__ == "__main__":
+    unittest.main()
