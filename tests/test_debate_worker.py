@@ -323,3 +323,24 @@ class AgreementAssemblyTest(unittest.TestCase):
         self.assertTrue(ag["settled"])
         self.assertEqual(ag["unresolved"], [])
         self.assertEqual(ag["design"], "합의안")
+
+
+class ParseFailureIsVisibleTest(DebateWorkerTest):
+    """파싱 실패를 조용히 300자로 자르면 다음 턴이 반쪽 입력으로 논쟁한다."""
+
+    def test_failure_is_logged_and_keeps_enough_text(self):
+        long_reply = "JSON 이 아닌 긴 산문. " * 200        # 4000자 정도
+        self._reply()
+        import json as _json
+
+        def fake(prompt, engine="claude", **kw):
+            self.turns.append(engine)
+            return long_reply
+        engines.run = fake
+        self._round()
+
+        self.assertIn("debate_parse_failed", self._events())
+        turn = self._payload()["debate"][0]
+        self.assertTrue(turn.get("parse_failed"))
+        self.assertGreater(len(turn["claim"]), 300, "300자로 잘려 맥락이 사라졌다")
+        self.assertEqual(turn["claim"], turn["proposal"])   # 다음 턴이 읽을 수 있게

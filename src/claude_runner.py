@@ -100,21 +100,43 @@ def run_json(prompt: str, **kw) -> dict:
 
 
 def parse_json(text: str):
-    t = text.strip()
-    if "```" in t:
-        # extract first fenced block
-        start = t.find("```")
-        nl = t.find("\n", start)
-        end = t.find("```", nl + 1)
-        if nl != -1 and end != -1:
-            t = t[nl + 1:end].strip()
-    # find outermost JSON object/array
+    """응답에서 완결된 JSON 객체를 뽑는다.
+
+    첫 ``` 와 다음 ``` 사이를 그냥 자르면, 본문(proposal 등)에 코드펜스가 들어간
+    순간 JSON 이 중간에서 끊긴다 — 실제로 토론의 제안자 응답 3개가 전부 이 경로로
+    파싱에 실패했고, 폴백이 응답을 잘라 다음 턴이 반쪽 입력으로 논쟁했다.
+    그래서 문자열 리터럴을 인식하며 중괄호 깊이를 세어 **완결된** 객체를 찾는다."""
+    t = (text or "").strip()
+    if t.startswith("```"):
+        nl = t.find("\n")
+        if nl != -1:
+            t = t[nl + 1:]
+        if t.rstrip().endswith("```"):
+            t = t.rstrip()[:-3]
     for opener, closer in (("{", "}"), ("[", "]")):
-        s = t.find(opener)
-        e = t.rfind(closer)
-        if s != -1 and e != -1 and e > s:
-            try:
-                return json.loads(t[s:e + 1])
-            except json.JSONDecodeError:
-                continue
+        start = t.find(opener)
+        while start != -1:
+            depth, in_str, esc = 0, False, False
+            for i in range(start, len(t)):
+                ch = t[i]
+                if in_str:
+                    if esc:
+                        esc = False
+                    elif ch == "\\":
+                        esc = True
+                    elif ch == '"':
+                        in_str = False
+                    continue
+                if ch == '"':
+                    in_str = True
+                elif ch == opener:
+                    depth += 1
+                elif ch == closer:
+                    depth -= 1
+                    if depth == 0:
+                        try:
+                            return json.loads(t[start:i + 1])
+                        except json.JSONDecodeError:
+                            break
+            start = t.find(opener, start + 1)
     raise ClaudeError(f"could not parse JSON from claude reply: {text[:300]}")

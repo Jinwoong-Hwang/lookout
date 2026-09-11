@@ -18,6 +18,7 @@ from .config import CFG
 MAX_ROUNDS = 6            # 라운드 상한(제안·반박 합쳐서)
 BODY_CHARS = 8000
 TRANSCRIPT_CHARS = 9000   # 상대 발언 전체가 아니라 요약만 넘긴다
+PARSE_FALLBACK_CHARS = 6000  # 파싱 실패 시에도 논쟁이 가능할 만큼은 남긴다
 ROLES = {"proposer": "claude", "critic": "codex"}
 
 
@@ -209,7 +210,14 @@ def process(c, card):
     try:
         turn = claude_runner.parse_json(raw)
     except claude_runner.ClaudeError:
-        turn = {"claim": raw.strip()[:300], "verdict": "CONTINUE"}
+        # 조용히 300자로 잘라 넘기면 다음 턴이 반쪽 입력으로 논쟁한다 — 실제로
+        # 그렇게 돌았다(PH-1816: codex 가 "본문이 잘려 있다"를 미합의로 적었다).
+        db.log_event(c, "debate_parse_failed", card["key"],
+                     {"round": round_no + 1, "role": role, "engine": engine,
+                      "chars": len(raw or "")})
+        turn = {"claim": (raw or "").strip()[:PARSE_FALLBACK_CHARS],
+                "proposal": (raw or "").strip()[:PARSE_FALLBACK_CHARS],
+                "verdict": "CONTINUE", "parse_failed": True}
 
     turn.update({"round": round_no + 1, "role": role, "engine": engine,
                  "hash": _claim_hash(turn)})

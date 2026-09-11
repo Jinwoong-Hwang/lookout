@@ -269,6 +269,7 @@ EVENT_LABELS = {
     "operator_spec_approved": "설계 승인(사람)", "operator_spec_rejected": "설계 반려(사람)",
     "operator_debate_steer": "설계 피드백(사람) — 토론 재개",
     "topic_created": "주제 토론 생성", "topic_accepted": "결과 채택(사람)",
+    "debate_parse_failed": "엔진 응답 파싱 실패 — 원문으로 진행",
     "topic_promoted": "주제 결론 → 구현 승격(사람)",
     "topic_promote_blocked": "승격 차단 — 대상 저장소 미설정",
     "gate_stale": "게이트 거부 — 카드 상태가 이미 바뀜(중복/낡은 클릭)", "operator_retry": "재시도(사람)",
