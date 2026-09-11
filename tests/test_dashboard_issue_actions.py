@@ -954,6 +954,21 @@ class ReviewGateActionsTest(unittest.TestCase):
         self.assertTrue(self._payload()["reverify_only"])
         self.assertEqual(self._payload()["impl_rounds"], 3)   # 라운드 소비 없음
 
+    def test_rerun_verify_carries_the_operators_note_to_the_verifier(self):
+        """재검증의 쓸모 대부분은 '이 관점으로 다시 보라'다. 입력을 버리면 완전히
+        같은 입력으로 같은 판정이 나온다."""
+        self.assertTrue(dashboard.do_action("rerun_verify", self.cid,
+                                            text="  캐시 false 경로만 봐라  "))
+        self.assertEqual(self._payload()["reverify_note"], "캐시 false 경로만 봐라")
+        note = self.c.execute(
+            "SELECT detail FROM events WHERE type='operator_rerun_verify'").fetchone()[0]
+        self.assertIn("캐시 false", note)
+
+    def test_rerun_verify_without_a_note_still_works(self):
+        self.assertTrue(dashboard.do_action("rerun_verify", self.cid))
+        self.assertEqual(self._card()["status"], "impl_verify")
+        self.assertEqual(self._payload()["reverify_note"], "")
+
     def test_override_moves_to_the_pr_gate_and_is_recorded(self):
         self.assertTrue(dashboard.do_action("verify_override", self.cid))
         card = self._card()

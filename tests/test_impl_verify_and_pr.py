@@ -153,6 +153,43 @@ class VerifyOutcomeTest(_Base):
         self.assertFalse(payload["reverify_only"])         # 소비됨
         self.assertIn("reverify_done", self._events())
 
+    def _render_tokens(self):
+        """프롬프트에 실제로 들어간 토큰을 잡는다(_Base 가 render 를 스텁한다)."""
+        seen = {}
+        prompt_tpl.render = lambda _name, **kw: (seen.update(kw), "PROMPT")[1]
+        return seen
+
+    def test_the_operators_reverify_note_reaches_the_verifier(self):
+        """사람이 적은 관점은 최초 지시와 **구분되어** 들어가야 한다 — 섞으면
+        검증자가 '이슈가 요구한 것'과 '이번에 볼 것'을 구별하지 못한다."""
+        db.merge_payload(self.c, self.card_id,
+                         {"reverify_only": True, "reverify_note": "캐시 false 경로만 봐라",
+                          "instruction": "원래 지시"})
+        seen = self._render_tokens()
+        engines.run_json = lambda *_a, **_k: {"approved": True, "summary": "ok"}
+        impl_verifier.process(self.c, self._card())
+        self.assertIn("캐시 false 경로만 봐라", seen["REVERIFY_NOTE"])
+        self.assertIn("재검증 관점", seen["REVERIFY_NOTE"])
+        self.assertEqual(seen["INSTRUCTION"], "원래 지시")   # 섞이지 않았다
+        # 한 번 쓰고 비운다 — 남기면 다음 라운드가 낡은 관점으로 판정한다
+        self.assertEqual(self._payload()["reverify_note"], "")
+
+    def test_no_note_means_no_reverify_section_at_all(self):
+        seen = self._render_tokens()
+        engines.run_json = lambda *_a, **_k: {"approved": True, "summary": "ok"}
+        impl_verifier.process(self.c, self._card())
+        self.assertEqual(seen["REVERIFY_NOTE"], "")
+
+    def test_the_real_template_consumes_the_reverify_token(self):
+        """토큰 이름이 템플릿과 어긋나면 관점이 조용히 사라진다 — 진짜 파일로 확인."""
+        prompt_tpl.render = self.saved["render"]
+        out = prompt_tpl.render(
+            "impl_verify.md", DISPLAY="", TITLE="", TARGET_REPO="", BRANCH="",
+            BODY="", INSTRUCTION="", IMPL_SUMMARY="", DIFF="", FILES="",
+            REVERIFY_NOTE="### 이번 재검증 관점 (사람이 지금 요청)\n캐시 false")
+        self.assertIn("캐시 false", out)
+        self.assertNotIn("{REVERIFY_NOTE}", out)
+
     def test_passing_verification_clears_the_exhausted_mark(self):
         db.merge_payload(self.c, self.card_id, {"verify_exhausted": True})
         engines.run_json = lambda *_a, **_k: {"approved": True, "summary": "ok"}

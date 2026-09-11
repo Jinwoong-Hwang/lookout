@@ -235,7 +235,7 @@ def _event_note(type_: str, detail) -> str:
         return ""
     if not isinstance(d, dict):
         return ""
-    for key in ("error", "reason", "summary", "url", "title"):
+    for key in ("error", "reason", "note", "summary", "url", "title"):
         if d.get(key):
             return str(d[key])[:200]
     bits = []
@@ -440,8 +440,14 @@ def do_action(action, card_id, engine="claude", text=None, repo=None):
             # 같은 커밋을 다시 검증한다. 새 구현이 없으므로 라운드를 쓰지 않는다.
             if card["status"] != "verify_blocked":
                 return False
-            db.merge_payload(c, card["id"], {"reverify_only": True})
-            if not db.gate(c, card, "impl_verify", blocked=0, event="operator_rerun_verify"):
+            # 사람이 적어 보낸 관점을 함께 넘긴다 — 입력이 없으면 그냥 재검증이다.
+            # 재검증의 쓸모 대부분은 "이 관점으로 다시 보라"이고, 안 넘기면 완전히
+            # 같은 입력으로 같은 판정이 나온다.
+            note = (text or "").strip()
+            db.merge_payload(c, card["id"],
+                             {"reverify_only": True, "reverify_note": note})
+            if not db.gate(c, card, "impl_verify", blocked=0,
+                           event="operator_rerun_verify", detail={"note": note[:200]}):
                 return False
             kick = True
         elif action == "verify_override" and card["kind"] == "issue":
@@ -1269,7 +1275,7 @@ function issueTile(c){
   }else if(c.status==='verify_blocked'){
     btns=`<div class="errline">엔진끼리 합의하지 못했습니다 — 남은 블로커를 직접 판단하세요</div>
       <div class="instr">
-      <textarea id="spec${c.id}" placeholder="수정 요청 (선택) — 비워두면 검증이 남긴 지적을 그대로 넘깁니다"
+      <textarea id="spec${c.id}" placeholder="선택 — 수정 요청이면 구현자에게(비우면 남은 블로커 그대로), 다시 검증이면 검증자에게 '이 관점으로 보라'로 갑니다"
         oninput="draft(this)" onclick="event.stopPropagation()"
         onkeydown="event.stopPropagation()">${esc(dval('spec'+c.id,''))}</textarea>
       <div class="rev">
@@ -1420,7 +1426,7 @@ function openIssueModal(c){
     h+=`<div class="btns"><button class="go" onclick="requestChanges(event,${c.id})">↩︎ 수정 요청</button>`
       +`<button onclick="rerunVerify(event,${c.id})">🔁 다시 검증</button>`
       +`<button onclick="verifyOverride(event,${c.id})">⚠️ 그래도 PR 로</button></div>`
-      +`<div class="sub">수정 요청은 카드 입력칸의 내용을 넘깁니다. 비워두면 위 블로커가 그대로 갑니다.</div>`;
+      +`<div class="sub">수정 요청·다시 검증 모두 카드 입력칸의 내용을 넘깁니다 — 수정 요청은 구현자에게(비우면 위 블로커가 그대로), 다시 검증은 검증자에게 "이 관점으로 보라"로 갑니다.</div>`;
   if(c.status==='pr_blocked')
     h+=`<div class="btns"><button class="go" onclick="approvePr(event,${c.id})">${c.verify_override?'⚠️ 미통과인데 PR 올리기':'🚀 PR 올리기 승인'}</button>`
       +`<button onclick="requestChanges(event,${c.id})">↩︎ 수정 요청</button></div>`;
@@ -1559,10 +1565,13 @@ async function resumeDebate(e,id){e.stopPropagation();
 function rejectSpec(e,id){e.stopPropagation();
   if(confirm('설계를 반려하고 대기로 되돌릴까요? 토론 기록은 보관됩니다.'))act(e,'reject_spec',id);}
 async function rerunVerify(e,id){e.stopPropagation();
-  if(!confirm('같은 커밋을 다시 검증할까요? (구현은 바뀌지 않고 검증만 재실행합니다)'))return;
-  showToast('다시 검증 🔁',true);
-  const j=await sendAction({action:'rerun_verify',card_id:id});
+  const t=specText(id);
+  if(!confirm(t?'이 관점으로 같은 커밋을 다시 검증할까요? — '+t
+               :'같은 커밋을 다시 검증할까요? (구현은 바뀌지 않고 검증만 재실행합니다)'))return;
+  showToast(t?'다시 검증 🔁 관점 전달':'다시 검증 🔁',true);
+  const j=await sendAction({action:'rerun_verify',card_id:id,text:t});
   if(j.ok===false)showToast('재검증할 수 없습니다',false);
+  else clearDraft('spec'+id);
   load();}
 async function verifyOverride(e,id){e.stopPropagation();
   if(!confirm('검증이 통과하지 못한 상태 그대로 PR 승인 단계로 넘길까요? 블로커는 PR 본문에 남습니다.'))return;

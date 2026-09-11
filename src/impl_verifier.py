@@ -76,6 +76,12 @@ def process(c, card):
     db.log_event(c, "impl_verify_started", card["key"],
                  {"engine": vengine, "fallback": fallback, "branch": branch})
     impl = meta.get("impl") or {}
+    # 사람이 '다시 검증'에 적어 보낸 관점. 최초 지시와 **섞지 않는다** — 섞으면
+    # "이슈가 요구한 것"과 "이번에 확인해 달라는 것"을 검증자가 구분하지 못한다.
+    note = (meta.get("reverify_note") or "").strip()
+    reverify_block = (
+        f"\n### 이번 재검증 관점 (사람이 지금 요청)\n{note}\n"
+        "> 같은 커밋을 다시 봅니다. 이 관점을 먼저 확인하십시오.\n" if note else "")
     prompt = prompt_tpl.render(
         "impl_verify.md",
         DISPLAY=meta.get("display") or f"#{card['pr_number']}",
@@ -83,6 +89,7 @@ def process(c, card):
         BODY=(meta.get("body") or "(생략)"),
         INSTRUCTION=(meta.get("instruction") or "(없음)"),
         IMPL_SUMMARY=(impl.get("summary") or "(요약 없음)"),
+        REVERIFY_NOTE=reverify_block,
         DIFF=diff, FILES=files,
     )
     # 워크트리는 repo당 하나를 공유한다 — 다른 카드가 브랜치를 바꿔치기하지 못하게
@@ -95,7 +102,7 @@ def process(c, card):
     out_of_scope = verdict.get("out_of_scope") or []
     approved = bool(verdict.get("approved")) and not blocking
 
-    db.merge_payload(c, card["id"], {"verify": {
+    db.merge_payload(c, card["id"], {"reverify_note": "", "verify": {
         "engine": vengine, "fallback": fallback, "approved": approved,
         "meets_requirement": verdict.get("meets_requirement"),
         "summary": verdict.get("summary", ""),
