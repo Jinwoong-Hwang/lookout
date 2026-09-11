@@ -759,3 +759,31 @@ class TopicPromotionTest(unittest.TestCase):
 
     def test_legacy_agreement_without_settled_is_flagged(self):
         self.assertIn("합의 여부 미기록", dashboard.HTML)
+
+
+class InputPreservationTest(unittest.TestCase):
+    """5초 폴링이 카드 DOM 을 다시 그린다 — 입력 중이던 textarea 가 새로 만들어져
+    타이핑하던 내용이 사라졌다(실측 제보)."""
+
+    def setUp(self):
+        self.html = dashboard.HTML
+
+    def test_render_is_skipped_while_typing_in_the_board(self):
+        self.assertIn("function typingInBoard", self.html)
+        self.assertIn("if(typingInBoard())return;", self.html)
+        # 보드 안의 입력만 막는다 — 다른 곳 포커스는 갱신을 멈추지 않는다
+        self.assertIn("board.contains(a)", self.html)
+
+    def test_every_card_input_keeps_a_draft(self):
+        self.assertEqual(self.html.count('oninput="draft(this)"'), 3)  # 지시·피드백·저장소
+        for el in ("'ins'+c.id", "'spec'+c.id", "'trepo'+c.id"):
+            self.assertIn(f"dval({el}", self.html)
+
+    def test_draft_survives_a_rerender_and_beats_the_server_value(self):
+        # dval(id, fallback): 초안이 있으면 서버 값보다 우선한다
+        self.assertIn("function dval(id,fallback){return DRAFTS[id]!==undefined?DRAFTS[id]:(fallback||'');}",
+                      self.html.replace("\n", "").replace("  ", ""))
+
+    def test_drafts_are_cleared_after_a_successful_submit(self):
+        for call in ("clearDraft('ins'+id)", "clearDraft('spec'+id)", "clearDraft('trepo'+id)"):
+            self.assertIn(call, self.html)

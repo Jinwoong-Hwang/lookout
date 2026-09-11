@@ -144,7 +144,7 @@ def _run_turn(c, card, meta, display, repo, branch, issue):
     db.log_event(c, "impl_engine_done", card["key"],
                  {"engine": engine, "secs": round(time.time() - t1, 1), "chars": len(raw or "")})
     try:
-        result = claude_runner.parse_json(raw)
+        result = claude_runner.parse_obj(raw)
     except claude_runner.ClaudeError:
         # 요약을 못 읽어도 편집은 이미 됐을 수 있다 — diff가 진실이므로 계속 간다
         result = {"summary": raw.strip()[:500], "done": None}

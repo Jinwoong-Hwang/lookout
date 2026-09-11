@@ -975,6 +975,7 @@ function renderSideCounts(){
   document.getElementById('cFeedback').textContent=FEEDBACK.length;
   document.getElementById('cWork').textContent=work;
 }
+function forceRender(){render_();}
 async function load(){
   const [rb,re,rf]=await Promise.all([fetch('/api/board'),fetch('/api/engines'),fetch('/api/feedback')]);
   DATA=await rb.json();
@@ -1031,7 +1032,24 @@ async function mAct(id,action){
   await fetch('/api/mention-action',{method:'POST',headers:{'Content-Type':'application/json','X-Lookout-Action':'1'},body:JSON.stringify({action,mention_id:id})});
   loadMentions();
 }
-function render(){VIEW==='feedback'?renderFeedback():VIEW==='author'?renderByAuthor()
+// 5초 폴링이 카드 DOM 을 통째로 다시 그린다. 입력 중이던 textarea 가 새로 만들어져
+// 내용이 날아가므로 (1) 입력값을 DRAFTS 에 붙들고 (2) 보드 안에서 타이핑 중이면
+// 그 사이클의 보드 재렌더를 건너뛴다(포커스·캐럿 위치까지 지키려면 이게 필요하다).
+const DRAFTS={};
+function draft(el){if(el&&el.id)DRAFTS[el.id]=el.value;}
+function dval(id,fallback){return DRAFTS[id]!==undefined?DRAFTS[id]:(fallback||'');}
+function clearDraft(id){delete DRAFTS[id];}
+function typingInBoard(){
+  const a=document.activeElement;
+  if(!a||!/^(TEXTAREA|INPUT)$/.test(a.tagName))return false;
+  const board=document.getElementById('board');
+  return !!(board&&board.contains(a));
+}
+function render(){
+  if(typingInBoard())return;          // 입력 중에는 보드를 건드리지 않는다
+  return render_();
+}
+function render_(){VIEW==='feedback'?renderFeedback():VIEW==='author'?renderByAuthor()
     :renderLanes(VIEW==='work'?WORK_LANES:LANES);}
 function renderFeedback(){
   const list=viewFeedbackData();
@@ -1117,7 +1135,8 @@ function issueTile(c){
   if(c.status==='triage'){
     btns=`<div class="instr">
       <textarea id="ins${c.id}" placeholder="추가 지시 (선택) — 이 이슈를 어떻게 처리할지"
-        onclick="event.stopPropagation()" onkeydown="event.stopPropagation()">${esc(c.instruction)}</textarea>
+        oninput="draft(this)" onclick="event.stopPropagation()"
+        onkeydown="event.stopPropagation()">${esc(dval('ins'+c.id,c.instruction))}</textarea>
       <div class="rev">
         <button class="claude" onclick="startWork(event,${c.id},'implement')">🛠 바로 구현</button>
         <button class="codex" onclick="startWork(event,${c.id},'debate')">🗣 설계부터</button>
@@ -1127,10 +1146,11 @@ function issueTile(c){
   }else if(c.status==='spec_blocked'){
     btns=`<div class="instr">
       <textarea id="spec${c.id}" placeholder="합의에 대한 피드백 (선택) — 승인 시 수정 지시로, 다시 토론 시 방향 지시로 쓰입니다"
-        onclick="event.stopPropagation()" onkeydown="event.stopPropagation()"></textarea>
+        oninput="draft(this)" onclick="event.stopPropagation()"
+        onkeydown="event.stopPropagation()">${esc(dval('spec'+c.id,''))}</textarea>
       ${c.debate_only?`<input id="trepo${c.id}" placeholder="구현할 저장소 (예: zigbang/ceo-client)"
-        value="${esc(c.target_repo||'')}" onclick="event.stopPropagation()"
-        onkeydown="event.stopPropagation()">`:''}
+        value="${esc(dval('trepo'+c.id,c.target_repo))}" oninput="draft(this)"
+        onclick="event.stopPropagation()" onkeydown="event.stopPropagation()">`:''}
       <div class="rev">
         ${c.debate_only
           ?`<button class="claude" onclick="implementTopic(event,${c.id})">🛠 이 결론으로 구현</button>
@@ -1355,6 +1375,7 @@ async function startWork(e,id,mode){e.stopPropagation();
     showToast('지시 저장 실패 — 시작하지 않았습니다',false);load();return;}
   const j=await send({action:mode==='debate'?'start_debate':'start_impl',card_id:id,engine:'claude'});
   if(j.ok===false)showToast('시작할 수 없습니다 — 엔진 상태를 확인하세요',false);
+  else clearDraft('ins'+id);
   load();}
 function specText(id){const t=document.getElementById('spec'+id);return t?t.value.trim():'';}
 async function sendAction(body){
@@ -1367,6 +1388,7 @@ async function approveSpec(e,id){e.stopPropagation();
   showToast(t?'설계 승인(수정 지시 포함) ✅':'설계 승인 — 구현을 시작합니다 ✅',true);
   const j=await sendAction({action:'approve_spec',card_id:id,text:t});
   if(j.ok===false)showToast('승인할 수 없습니다',false);
+  else clearDraft('spec'+id);
   load();}
 async function implementTopic(e,id){e.stopPropagation();
   const ri=document.getElementById('trepo'+id), repo=ri?ri.value.trim():'';
@@ -1376,6 +1398,7 @@ async function implementTopic(e,id){e.stopPropagation();
   showToast('구현 시작 🛠',true);
   const j=await sendAction({action:'implement_topic',card_id:id,repo,text:t});
   if(j.ok===false)showToast('시작할 수 없습니다 — 저장소가 impl_repo_paths 에 있는지 확인하세요',false);
+  else {clearDraft('spec'+id);clearDraft('trepo'+id);}
   load();}
 async function resumeDebate(e,id){e.stopPropagation();
   const t=specText(id);
@@ -1384,6 +1407,7 @@ async function resumeDebate(e,id){e.stopPropagation();
   showToast('토론 재개 🔁',true);
   const j=await sendAction({action:'resume_debate',card_id:id,text:t});
   if(j.ok===false)showToast('재개할 수 없습니다',false);
+  else {clearDraft('spec'+id);}
   load();}
 function rejectSpec(e,id){e.stopPropagation();
   if(confirm('설계를 반려하고 대기로 되돌릴까요? 토론 기록은 보관됩니다.'))act(e,'reject_spec',id);}

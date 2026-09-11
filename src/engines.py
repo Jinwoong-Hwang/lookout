@@ -55,9 +55,9 @@ def run_impl(prompt: str, engine: str = "claude", **kw) -> str:
     return claude_runner.run_impl(prompt, **kw)
 
 
-def run_json(prompt: str, engine: str = "claude", **kw):
-    text = run(prompt, engine=engine, **kw)
-    return claude_runner.parse_json(text)
+def run_json(prompt: str, engine: str = "claude", **kw) -> dict:
+    """엔진 응답을 dict 로 돌려준다 — 모델이 배열로 답해도 호출부가 죽지 않게."""
+    return claude_runner.parse_obj(run(prompt, engine=engine, **kw))
 
 
 # ── 가용성 검사 (설치 + 로그인) ──────────────────────────────────────────────

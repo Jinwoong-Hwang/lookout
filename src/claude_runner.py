@@ -93,10 +93,23 @@ def run_impl(prompt: str, cwd: str, timeout: int = 3600,
         return proc.stdout
 
 
+def parse_obj(text: str) -> dict:
+    """엔진 응답을 **dict 로** 돌려준다.
+
+    parse_json 은 배열도 반환한다 — 모델이 `[{...}]` 로 답하면 호출부가
+    obj.update()/obj.get() 에서 AttributeError 로 죽는다(실측: 토론 codex 턴).
+    한 겹 배열은 풀어주고, 그래도 dict 가 아니면 파싱 실패로 취급한다."""
+    out = parse_json(text)
+    if isinstance(out, list):
+        out = next((x for x in out if isinstance(x, dict)), None)
+    if not isinstance(out, dict):
+        raise ClaudeError(f"expected a JSON object, got {type(out).__name__}: {text[:200]}")
+    return out
+
+
 def run_json(prompt: str, **kw) -> dict:
-    """Run claude and parse its reply as JSON (tolerates ```json fences)."""
-    text = run(prompt, **kw)
-    return parse_json(text)
+    """Run claude and parse its reply as a JSON object."""
+    return parse_obj(run(prompt, **kw))
 
 
 def parse_json(text: str):

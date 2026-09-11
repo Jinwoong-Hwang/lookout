@@ -208,7 +208,7 @@ def process(c, card):
         with worktree.impl_session(repo):
             raw = engines.run(prompt, engine=engine, cwd=cwd, add_dir=cwd)
     try:
-        turn = claude_runner.parse_json(raw)
+        turn = claude_runner.parse_obj(raw)
     except claude_runner.ClaudeError:
         # 조용히 300자로 잘라 넘기면 다음 턴이 반쪽 입력으로 논쟁한다 — 실제로
         # 그렇게 돌았다(PH-1816: codex 가 "본문이 잘려 있다"를 미합의로 적었다).

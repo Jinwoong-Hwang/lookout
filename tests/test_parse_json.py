@@ -53,3 +53,27 @@ class ParseJsonTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ParseObjTest(unittest.TestCase):
+    """호출부는 dict 를 기대한다. 모델이 배열로 답하면 obj.update()/obj.get() 이
+    AttributeError 로 죽는다 — 실측: PH-1816 토론의 codex 턴이 그렇게 죽었다."""
+
+    def test_single_element_array_is_unwrapped(self):
+        out = claude_runner.parse_obj('[{"claim": "A", "verdict": "AGREE"}]')
+        self.assertEqual(out["verdict"], "AGREE")
+
+    def test_first_object_in_a_mixed_array(self):
+        out = claude_runner.parse_obj('[1, {"k": 2}]')
+        self.assertEqual(out["k"], 2)
+
+    def test_plain_object_passes_through(self):
+        self.assertEqual(claude_runner.parse_obj('{"a": 1}'), {"a": 1})
+
+    def test_array_without_objects_is_a_parse_failure(self):
+        with self.assertRaises(claude_runner.ClaudeError):
+            claude_runner.parse_obj("[1,2,3]")
+
+    def test_fenced_array_reply(self):
+        out = claude_runner.parse_obj('```json\n[{"verdict": "CONTINUE"}]\n```')
+        self.assertEqual(out["verdict"], "CONTINUE")
