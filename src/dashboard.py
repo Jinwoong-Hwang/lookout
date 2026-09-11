@@ -812,6 +812,26 @@ display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hi
 .composer input{flex:1 1 auto;min-width:0;background:var(--panel2);color:var(--ink);
   border:1px solid var(--line);border-radius:9px;padding:7px 10px;font:inherit;font-size:12.5px}
 .composer button{flex:0 0 auto}
+.md{font-size:13px;line-height:1.62;color:var(--ink)}
+.md p{margin:6px 0}
+.md h5{margin:12px 0 5px;font-size:13px;font-weight:750;color:var(--ink)}
+.md ul,.md ol{margin:6px 0;padding-left:19px}
+.md li{margin:3px 0}
+.md code{background:var(--panel2);border:1px solid var(--line);border-radius:4px;
+  padding:.05em .35em;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
+.md pre.code{background:var(--panel2);border:1px solid var(--line);border-radius:8px;
+  padding:10px 12px;margin:8px 0;overflow-x:auto;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:11.8px;line-height:1.55;white-space:pre}
+.md pre.code code{background:none;border:none;padding:0}
+.md blockquote{margin:6px 0;padding:2px 0 2px 10px;border-left:2px solid var(--line);color:var(--muted)}
+.md strong{font-weight:700}
+details.sec{margin-top:12px;border:1px solid var(--line);border-radius:9px;background:var(--panel)}
+details.sec>summary{cursor:pointer;padding:9px 12px;font-size:12.5px;font-weight:700;
+  color:var(--ink);list-style:none;display:flex;justify-content:space-between;gap:8px}
+details.sec>summary::-webkit-details-marker{display:none}
+details.sec>summary::after{content:"▾";color:var(--dim);font-weight:400}
+details.sec[open]>summary::after{content:"▴"}
+details.sec>.body{padding:0 12px 12px}
 .tl{margin-top:6px;border:1px solid var(--line);border-radius:9px;overflow:hidden}
 .tlrow{display:grid;grid-template-columns:66px 116px 1fr;gap:8px;padding:5px 10px;
   font-size:11.5px;border-bottom:1px solid var(--line);align-items:baseline}
@@ -985,6 +1005,42 @@ function hhmm(ts){const d=new Date(ts*1000);
   return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0')
     +':'+String(d.getSeconds()).padStart(2,'0');}
 function esc(s){return (s||"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]))}
+// 엔진은 **굵게**·`코드`·```펜스```·- 목록 으로 답한다. 그대로 뿌리면 기호가 노출되고
+// 긴 설계안은 읽을 수가 없다. esc() 로 먼저 막고 우리 태그만 넣는다(XSS 안전).
+// 주의: 이 파일의 HTML 은 파이썬 문자열 리터럴이라 JS 안에서 개행 이스케이프를 쓸 수
+// 없다(모듈 로드 시 실제 개행이 되어 스크립트가 죽는다). NL 상수로 대신한다.
+const NL=String.fromCharCode(10);
+function md(t){
+  if(!t)return '';
+  let s=esc(String(t));
+  const blocks=[];
+  s=s.replace(/```[a-zA-Z0-9]*([\s\S]*?)```/g,(m,code)=>{
+    blocks.push(code.trim());   // 이스케이프(\\r·\\n)를 피한다
+    return '@@B'+(blocks.length-1)+'@@';});
+  s=s.replace(/`([^`]+?)`/g,'<code>$1</code>');
+  s=s.replace(/\*\*([^*]+?)\*\*/g,'<strong>$1</strong>');
+  const out=[]; let list=null;
+  const close=()=>{if(list){out.push('</'+list+'>');list=null;}};
+  for(const line of s.split(NL)){
+    const t2=line.trim();
+    const blk=t2.match(/^@@B(\d+)@@$/);
+    if(blk){close();out.push('<pre class="code">'+blocks[+blk[1]]+'</pre>');continue;}
+    const h=t2.match(/^#{1,6}\s+(.+)$/);
+    if(h){close();out.push('<h5>'+h[1]+'</h5>');continue;}
+    const ul=t2.match(/^[-*·]\s+(.+)$/), ol=t2.match(/^\d+[.)]\s+(.+)$/);
+    if(ul||ol){
+      const want=ul?'ul':'ol';
+      if(list&&list!==want)close();
+      if(!list){out.push('<'+want+'>');list=want;}
+      out.push('<li>'+(ul?ul[1]:ol[1])+'</li>');continue;}
+    close();
+    if(!t2)continue;
+    if(t2.startsWith('&gt;'))out.push('<blockquote>'+t2.slice(4).trim()+'</blockquote>');
+    else out.push('<p>'+t2+'</p>');
+  }
+  close();
+  return '<div class="md">'+out.join('')+'</div>';
+}
 function repoShort(r){return (r||'').split('/')[1]||r;}
 const REPO_COLORS=['#2dd4bf','#a78bfa','#fbbf24','#60a5fa','#4ade80','#fb7185'];
 function repoColor(r){let h=0;for(const ch of (r||''))h=(h*31+ch.charCodeAt(0))>>>0;return REPO_COLORS[h%REPO_COLORS.length];}
@@ -1319,97 +1375,110 @@ function openModal(c){
   m.innerHTML=html;document.getElementById('ov').classList.add('show');
 }
 function openIssueModal(c){
-  const m=document.getElementById('modal');const sm=smeta(c.status);
-  let html=`<span class="close" onclick="closeM()">✕ 닫기</span>
+  // 구성 원칙: 위에는 "지금 결정에 필요한 것"만, 나머지는 접어 둔다.
+  // 긴 본문은 md() 로 렌더한다 — 엔진이 마크다운으로 답하므로 원문 그대로는 못 읽는다.
+  const m=document.getElementById('modal'), sm=smeta(c.status);
+  const AG=c.agreement||{}, IM=c.impl||{}, V=c.verify||{};
+  const sec=(title,body,open)=>body?`<details class="sec"${open?' open':''}>`
+      +`<summary><span>${title}</span></summary><div class="body">${body}</div></details>`:'';
+
+  let h=`<span class="close" onclick="closeM()">✕ 닫기</span>
     <h3>${esc(c.display)} ${esc(c.title)}</h3>
     <div class="msub">${esc(c.repo)}${(c.assignees||[]).length?' · '+esc((c.assignees||[]).join(', ')):''}
-      <span class="statuspill" style="${pill(sm.c)}">${sm.ko}</span></div>`;
-  if(c.url)html+=`<div class="mlink"><a href="${c.url}" target="_blank">GitHub 이슈 열기 ↗</a></div>`;
-  if(c.pr_url)html+=`<div class="mlink"><a href="${c.pr_url}" target="_blank">PR 열기 ↗</a></div>`;
-  if((c.labels||[]).length)html+=`<div class="lbl">라벨</div><div class="pre">${esc((c.labels||[]).join(' · '))}</div>`;
-  if(c.instruction)html+=`<div class="lbl">운영자 지시</div><div class="pre">${esc(c.instruction)}</div>`;
-  if(c.target_repo)html+=`<div class="lbl">대상</div><div class="pre">${esc(c.target_repo)}${c.branch?' · '+esc(c.branch):''}${c.commit?' · '+esc(c.commit):''}${c.rounds>1?' · '+c.rounds+'라운드':''}</div>`;
-  if(c.error)html+=`<div class="lbl">실패 사유</div><div class="pre">${esc(c.error)}</div>`;
-  const im=c.impl||{};
-  if(im.summary){html+=`<div class="lbl">구현 요약${im.done===false?' (부분 구현)':''}</div><div class="pre">${esc(im.summary)}</div>`;
-    if(im.verification)html+=`<div class="lbl2">검증</div><div class="pre">${esc(im.verification)}</div>`;
-    if((im.open_questions||[]).length)html+=`<div class="lbl2">남은 결정</div><div class="pre">${esc((im.open_questions||[]).join(', '))}</div>`;
-    if(im.risk)html+=`<div class="lbl2">위험</div><div class="pre">${esc(im.risk)}</div>`;}
-  if((c.changed||[]).length)
-    html+=`<div class="lbl">변경 파일 · ${c.changed.length}건</div><div class="pre">${esc(c.changed.join(', '))}</div>`;
-  const v=c.verify||{};
-  if(v.engine){
-    html+=`<div class="lbl">교차 검증 · ${esc(v.engine)}${v.fallback?' (동일 엔진 폴백)':''} · ${v.approved?'통과':'블로커 '+(v.blocking||[]).length+'건'}</div>`;
-    if(v.summary)html+=`<div class="pre">${esc(v.summary)}</div>`;
-    (v.blocking||[]).forEach(b=>{html+=`<div class="finding" style="border-left-color:${stripe('#fb7185')}">
-      <div class="ft">${esc(b.file||'')}${b.line?(':'+esc(b.line)):''}</div>
-      <div class="pre">${esc(b.problem||'')}</div>
-      ${b.fix?`<div class="lbl2">제안</div><div class="pre">${esc(b.fix)}</div>`:''}</div>`});
-    if((v.out_of_scope||[]).length)
-      html+=`<div class="lbl2">스코프 밖 변경</div><div class="pre">${esc((v.out_of_scope||[]).join(', '))}</div>`;
-  }
-  const AG=c.agreement||{};
-  if(AG.design||AG.rounds){
-    html+=`<div class="lbl">${AG.settled?'합의된 설계':(AG.settled===null||AG.settled===undefined?'⚠️ 합의 여부 미기록':'⚠️ 합의되지 않은 설계')} · ${AG.rounds||0}라운드`
-      +`${AG.end_reason?' · '+esc(AG.end_reason):''}${AG.blocked?' · 결렬':''}${AG.design_round?` · r${AG.design_round} 제안`:''}</div>`;
-    if(AG.settled===null||AG.settled===undefined)html+=`<div class="errline warn">합의 여부가 기록되지 않은 구버전 카드입니다 — 아래 안이 합의된 것인지 판단할 수 없습니다. 토론 기록을 직접 읽으세요.</div>`;
-    else if(!AG.settled)html+=`<div class="errline warn">양쪽이 AGREE 로 끝나지 않았습니다 — 아래 안은 마지막 제안자 안이고 반대신문이 남아 있습니다. 승인하면 그대로 구현됩니다.</div>`;
-    html+=`<div class="pre">${esc(AG.design||'(합의안 없음)')}</div>`;
-    if((AG.unresolved||[]).length)
-      html+=`<div class="lbl2">미합의 — 승인 전에 결정해야 합니다</div><div class="pre">`
-        +(AG.unresolved||[]).map(q=>`<div>· ${esc(q)}</div>`).join('')+`</div>`;
-    if(AG.risk)html+=`<div class="lbl2">위험</div><div class="pre">${esc(AG.risk)}</div>`;
-    if(AG.steers)html+=`<div class="lbl2">사람 개입 ${AG.steers}회</div>`;
-    if(c.spec_amendment)html+=`<div class="lbl2">운영자 수정 지시 (구현의 최우선 기준)</div><div class="pre">${esc(c.spec_amendment)}</div>`;
-    if(c.status==='spec_blocked')
-      html+=`<div class="btns">${c.debate_only?`<button class="go" onclick="implementTopic(event,${c.id})">🛠 이 결론으로 구현</button><button onclick="approveSpec(event,${c.id})">✅ 완료로 닫기</button>`:`<button class="go" onclick="approveSpec(event,${c.id})">${AG.settled?'✅ 설계 승인 — 구현 시작':'⚠️ 미합의인데 승인 — 구현 시작'}</button>`}`
-        +`<button onclick="rejectSpec(event,${c.id})">↩︎ 반려</button></div>`;
-  }
-  if((c.debate||[]).length){
-    html+=`<div class="lbl">토론 기록 · ${c.debate.length}턴</div>`;
-    c.debate.forEach(t=>{
-      if(t.role==='operator'){
-        html+=`<div class="finding" style="border-left-color:${stripe('#2dd4bf')}">
-          <div class="ft">🧑 운영자 개입</div><div class="pre">${esc(t.claim||'')}</div></div>`;
-        return;}
-      const col=t.role==='proposer'?'#e19267':'#8faedc';
-      html+=`<div class="finding" style="border-left-color:${stripe(col)}">
-        <div class="ft">r${t.round} · ${t.role==='proposer'?'제안':'반대신문'}(${esc(t.engine||'')}) · ${esc(t.verdict||'')}</div>
-        <div class="pre">${esc(t.claim||'')}</div>
-        ${(t.evidence||[]).length?`<div class="lbl2">근거</div><div class="pre">${esc((t.evidence||[]).join(', '))}</div>`:''}
-        ${t.proposal?`<div class="lbl2">안</div><div class="pre">${esc(t.proposal)}</div>`:''}
-      </div>`});
-  }
-  if(c.branch&&c.parent_repo_path){
-    const mine=`~/orca/workspaces/${esc(repoShort(c.target_repo||''))}/${esc(c.branch.split('/').pop())}`;
-    html+=`<div class="lbl">직접 돌려보기</div>`
-      +`<div class="pre">봇 워크트리 (다른 카드가 시작하면 브랜치가 갈립니다 — 오래 붙잡지 마세요)`
-      +`<div><code>${esc(c.worktree||'(아직 없음)')}</code></div></div>`
-      +`<div class="lbl2">내 워크트리를 따로 파기 (권장 — orca)</div>`
-      +`<div class="pre"><div><code>orca worktree create --repo path:${esc(c.parent_repo_path)} --name ${esc(c.branch.split('/').pop())} --setup run</code></div>`
-      +`<div class="tdet">setup hook 으로 yarn install 까지 돌고, 봇이 브랜치를 갈아도 영향받지 않습니다</div>`
-      +`<div style="margin-top:6px">git 로 직접: <code>git -C ${esc(c.parent_repo_path)} worktree add ${mine} ${esc(c.branch)}</code></div></div>`;
-  }
-  if((c.timeline||[]).length){
-    html+=`<div class="lbl">진행 기록 · ${c.timeline.length}건</div><div class="tl">`;
-    c.timeline.forEach(e=>{html+=`<div class="tlrow"><code>${hhmm(e.ts)}</code>`
-      +`<span class="tlab">${esc(e.label)}</span>`
-      +`<span class="tdet">${esc(e.detail||'')}</span></div>`});
-    html+='</div>';
-  }
-  if(c.pr_dryrun&&!c.pr_url)
-    html+=`<div class="lbl">PR (dry-run)</div><div class="pre">dry_run_pr=true — 실제 PR은 올라가지 않았습니다. config에서 false로 바꾸면 draft PR이 생성됩니다.</div>`;
+      <span class="statuspill" style="${pill(sm.c)}">${sm.ko}</span>
+      ${c.mode?`<span class="pill">${c.mode==='debate'?'설계부터':c.mode==='debate_only'?'주제 토론':'바로 구현'}</span>`:''}</div>
+    <div class="mlink">${c.url?`<a href="${esc(c.url)}" target="_blank">GitHub 이슈 ↗</a>`:''}
+      ${c.pr_url?` · <a href="${esc(c.pr_url)}" target="_blank">PR ↗</a>`:''}</div>`;
+
+  // ── 1. 지금 사람이 봐야 할 것 ─────────────────────────────
+  if(c.error)h+=`<div class="lbl">실패 사유</div><div class="errline">${esc(c.error)}</div>`;
   if(c.status==='verify_blocked')
-    html+=`<div class="errline warn">⚖️ 엔진끼리 합의하지 못했습니다. 위 블로커를 직접 판단하세요.</div>`
-      +`<div class="btns"><button class="go" onclick="requestChanges(event,${c.id})">↩︎ 수정 요청</button>`
+    h+=`<div class="errline warn">⚖️ 엔진끼리 합의하지 못했습니다 — 아래 블로커를 직접 판단하세요</div>`;
+  if(c.verify_override)
+    h+=`<div class="errline warn">검증 미통과를 감수하고 넘어온 카드입니다</div>`;
+
+  const blk=(V.blocking||[]).map(b=>`<div class="finding" style="border-left-color:${stripe('#fb7185')}">
+      <div class="ft">${esc(b.file||'')}${b.line?(':'+esc(b.line)):''}</div>
+      ${md(b.problem)}${b.fix?`<div class="lbl2">고치는 방향</div>${md(b.fix)}`:''}</div>`).join('');
+  if(V.engine)
+    h+=`<div class="lbl">교차 검증 · ${esc(V.engine)}${V.fallback?' (동일 엔진 폴백)':''} · `
+      +`${V.approved?'통과':'미통과 '+(V.blocking||[]).length+'건'}</div>`
+      +(V.summary?md(V.summary):'')+blk
+      +((V.out_of_scope||[]).length?`<div class="lbl2">스코프 밖 변경</div>${md((V.out_of_scope||[]).map(x=>'- '+x).join(NL))}`:'');
+
+  if((AG.unresolved||[]).length)
+    h+=`<div class="lbl">미합의 ${AG.unresolved.length}건 — 승인 전에 결정해야 합니다</div>`
+      +md(AG.unresolved.map(x=>'- '+x).join(NL));
+
+  // ── 2. 게이트 버튼 ────────────────────────────────────────
+  if(c.status==='spec_blocked')
+    h+=`<div class="btns">${c.debate_only
+      ?`<button class="go" onclick="implementTopic(event,${c.id})">🛠 이 결론으로 구현</button><button onclick="approveSpec(event,${c.id})">✅ 완료로 닫기</button>`
+      :`<button class="go" onclick="approveSpec(event,${c.id})">${AG.settled?'✅ 설계 승인 — 구현 시작':'⚠️ 미합의인데 승인'}</button>`}`
+      +`<button onclick="rejectSpec(event,${c.id})">↩︎ 반려</button></div>`;
+  if(c.status==='verify_blocked')
+    h+=`<div class="btns"><button class="go" onclick="requestChanges(event,${c.id})">↩︎ 수정 요청</button>`
       +`<button onclick="rerunVerify(event,${c.id})">🔁 다시 검증</button>`
       +`<button onclick="verifyOverride(event,${c.id})">⚠️ 그래도 PR 로</button></div>`
-      +`<div class="sub">수정 요청은 카드 입력칸의 내용을 구현자에게 넘깁니다. 비워두면 위 블로커가 그대로 갑니다.</div>`;
+      +`<div class="sub">수정 요청은 카드 입력칸의 내용을 넘깁니다. 비워두면 위 블로커가 그대로 갑니다.</div>`;
   if(c.status==='pr_blocked')
-    html+=`${c.verify_override?'<div class="errline warn">검증 미통과를 감수하고 넘어온 카드입니다.</div>':''}`
-      +`<div class="btns"><button class="go" onclick="approvePr(event,${c.id})">${c.verify_override?'⚠️ 미통과인데 PR 올리기':'🚀 PR 올리기 승인'}</button>`
+    h+=`<div class="btns"><button class="go" onclick="approvePr(event,${c.id})">${c.verify_override?'⚠️ 미통과인데 PR 올리기':'🚀 PR 올리기 승인'}</button>`
       +`<button onclick="requestChanges(event,${c.id})">↩︎ 수정 요청</button></div>`;
-  m.innerHTML=html;document.getElementById('ov').classList.add('show');
+
+  // ── 3. 접어 두는 상세 ─────────────────────────────────────
+  const implBody=(IM.summary?md(IM.summary):'')
+    +(IM.verification?`<div class="lbl2">검증 실행</div>${md(IM.verification)}`:'')
+    +((IM.open_questions||[]).length?`<div class="lbl2">남은 결정</div>${md(IM.open_questions.map(x=>'- '+x).join(NL))}`:'')
+    +(IM.risk?`<div class="lbl2">위험</div>${md(IM.risk)}`:'');
+  h+=sec(`🛠 구현 요약${IM.done===false?' · 부분 구현':''}`, implBody, true);
+
+  const agWarn=(AG.rounds&&(AG.settled===null||AG.settled===undefined))
+    ?`<div class="errline warn">합의 여부 미기록(구버전 카드) — 합의된 것인지 판단할 수 없습니다. 토론 기록을 직접 읽으세요.</div>`
+    :(AG.rounds&&AG.settled===false
+      ?`<div class="errline warn">양쪽이 AGREE 로 끝나지 않았습니다 — 아래는 마지막 제안자 안이고 반대신문이 남아 있습니다.</div>`:'');
+  h+=sec(`📄 합의된 설계${AG.rounds?` · ${AG.rounds}라운드`:''}${AG.settled===false?' · 미합의':''}`,
+         AG.design?agWarn+md(AG.design):'', c.status==='spec_blocked');
+
+  if((c.debate||[]).length){
+    const turns=c.debate.map(t=>{
+      if(t.role==='operator')return `<div class="finding" style="border-left-color:${stripe('#2dd4bf')}">
+        <div class="ft">🧑 운영자 개입</div>${md(t.claim)}</div>`;
+      const col=t.role==='proposer'?'#e19267':'#8faedc';
+      return `<div class="finding" style="border-left-color:${stripe(col)}">
+        <div class="ft">r${t.round} · ${t.role==='proposer'?'제안':'반대신문'}(${esc(t.engine||'')}) · ${esc(t.verdict||'')}</div>
+        ${md(t.claim)}
+        ${(t.evidence||[]).length?`<div class="lbl2">근거</div><div class="pre">${esc((t.evidence||[]).join(', '))}</div>`:''}
+        ${t.proposal?`<div class="lbl2">안</div>${md(t.proposal)}`:''}</div>`;}).join('');
+    h+=sec(`🗣 토론 기록 · ${c.debate.length}턴`, turns);
+  }
+
+  h+=sec(`📝 지시·피드백`,
+    (c.instruction?`<div class="lbl2">운영자 지시</div>${md(c.instruction)}`:'')
+    +(c.spec_amendment?`<div class="lbl2">설계 수정 지시</div>${md(c.spec_amendment)}`:'')
+    +(c.feedback?`<div class="lbl2">구현자에게 넘어간 지적</div>${md(c.feedback)}`:''));
+
+  h+=sec(`📁 변경 파일 · ${(c.changed||[]).length}개`,
+    (c.changed||[]).length?`<div class="pre">${(c.changed||[]).map(f=>`<div>${esc(f)}</div>`).join('')}</div>`:'');
+
+  if(c.branch&&c.parent_repo_path){
+    const name=c.branch.split('/').pop();
+    h+=sec('💻 직접 돌려보기',
+      `<div class="pre"><div>대상 <code>${esc(c.target_repo||'')}</code> · 브랜치 <code>${esc(c.branch)}</code>`
+      +`${c.commit?` · 커밋 <code>${esc(c.commit)}</code>`:''}</div></div>`
+      +`<div class="lbl2">내 워크트리 (권장 — orca)</div>`
+      +`<div class="pre"><div><code>orca worktree create --repo path:${esc(c.parent_repo_path)} --name ${esc(name)} --setup run</code></div>`
+      +`<div class="tdet">봇 워크트리(<code>${esc(c.worktree||'-')}</code>)는 다른 카드가 시작하면 브랜치가 갈립니다</div></div>`);
+  }
+
+  if((c.timeline||[]).length){
+    const rows=c.timeline.map(e=>`<div class="tlrow"><code>${hhmm(e.ts)}</code>`
+      +`<span class="tlab">${esc(e.label)}</span><span class="tdet">${esc(e.detail||'')}</span></div>`).join('');
+    h+=sec(`⏱ 진행 기록 · ${c.timeline.length}건`, `<div class="tl">${rows}</div>`);
+  }
+  if(c.pr_dryrun&&!c.pr_url)
+    h+=`<div class="sub" style="margin-top:10px">🧪 dry_run_pr=true — 실제 PR 은 올라가지 않았습니다</div>`;
+
+  m.innerHTML=h;document.getElementById('ov').classList.add('show');
 }
 function openFeedbackModal(f){
   const m=document.getElementById('modal');const rc=repoColor(f.repo);

@@ -337,7 +337,7 @@ class IssueCardShapeTest(unittest.TestCase):
     def test_github_link_lives_in_the_modal(self):
         modal = dashboard.HTML[dashboard.HTML.index("function openIssueModal"):
                                dashboard.HTML.index("function openFeedbackModal")]
-        self.assertIn("GitHub 이슈 열기", modal)
+        self.assertIn("GitHub 이슈", modal)
 
 
 class ProgressVisibilityTest(unittest.TestCase):
@@ -416,7 +416,7 @@ class WorktreeHandoffTest(unittest.TestCase):
         modal = dashboard.HTML[dashboard.HTML.index("function openIssueModal"):
                                dashboard.HTML.index("function openFeedbackModal")]
         self.assertIn("브랜치가 갈립니다", modal)
-        self.assertIn("worktree add", modal)
+        self.assertIn("orca worktree create", modal)   # 사람이 쓸 독립 워크트리
 
 
 class SpecFeedbackTest(unittest.TestCase):
@@ -972,3 +972,44 @@ class ReviewGateActionsTest(unittest.TestCase):
         db.set_status(self.c, self.cid, "pr_blocked")
         self.assertFalse(dashboard.do_action("rerun_verify", self.cid))
         self.assertFalse(dashboard.do_action("verify_override", self.cid))
+
+
+class ModalReadabilityTest(unittest.TestCase):
+    """엔진은 마크다운으로 답한다 — 원문 그대로 뿌리면 기호가 노출되고 긴 설계안은
+    읽을 수 없다. 그리고 긴 블록을 순서 없이 쌓으면 지금 결정할 것이 안 보인다."""
+
+    def setUp(self):
+        self.html = dashboard.HTML
+        self.modal = self.html[self.html.index("function openIssueModal"):
+                               self.html.index("function openFeedbackModal")]
+
+    def test_markdown_renderer_exists_and_escapes_first(self):
+        self.assertIn("function md(t)", self.html)
+        body = self.html[self.html.index("function md(t)"):
+                         self.html.index("function repoShort")]
+        self.assertIn("esc(String(t))", body)          # XSS: 먼저 이스케이프
+        self.assertLess(body.index("esc(String(t))"), body.index("<strong>"))
+
+    def test_long_fields_go_through_the_renderer(self):
+        for field in ("md(AG.design)", "md(IM.summary)", "md(t.claim)",
+                      "md(b.problem)", "md(c.feedback)"):
+            self.assertIn(field, self.modal, f"{field} 가 원문 그대로 나간다")
+
+    def test_detail_sections_are_collapsible(self):
+        self.assertIn("details.sec", self.html)         # CSS
+        self.assertIn("<details class=\"sec\"", self.modal)
+        for title in ("🗣 토론 기록", "⏱ 진행 기록", "📁 변경 파일", "💻 직접 돌려보기"):
+            self.assertIn(title, self.modal)
+
+    def test_decision_material_is_above_the_fold(self):
+        """블로커·미합의·게이트 버튼은 접힌 섹션보다 위에 있어야 한다."""
+        first_details = self.modal.index("h+=sec(")   # 헬퍼 정의가 아니라 첫 호출
+        for must_be_early in ("교차 검증", "미합의", "onclick=\"requestChanges"):
+            self.assertLess(self.modal.index(must_be_early), first_details,
+                            f"{must_be_early} 가 접힌 섹션 아래에 있다")
+
+    def test_no_newline_escape_inside_the_renderer(self):
+        """HTML 은 파이썬 문자열이라 JS 안의 개행 이스케이프가 실제 개행이 된다."""
+        body = self.html[self.html.index("function md(t)"):
+                         self.html.index("function repoShort")]
+        self.assertIn("String.fromCharCode(10)", self.html)   # NL 상수를 쓴다
