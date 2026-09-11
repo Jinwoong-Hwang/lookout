@@ -775,7 +775,15 @@ class InputPreservationTest(unittest.TestCase):
         self.assertIn("board.contains(a)", self.html)
 
     def test_every_card_input_keeps_a_draft(self):
-        self.assertEqual(self.html.count('oninput="draft(this)"'), 3)  # 지시·피드백·저장소
+        """카드 안의 모든 입력이 초안을 붙들어야 한다 — 하나라도 빠지면 그 칸만
+        5초마다 지워진다. 개수를 못박는 대신 실제 태그를 훑는다."""
+        tile = self.html[self.html.index("function issueTile"):
+                         self.html.index("function tile(c)")]
+        inputs = re.findall(r"<(?:textarea|input)\b[^>]*>", tile, re.S)
+        self.assertGreaterEqual(len(inputs), 4)   # 지시·설계 피드백·저장소·수정 요청
+        for tag in inputs:
+            self.assertIn('oninput="draft(this)"', tag, f"초안 미보관: {tag[:80]}")
+            self.assertIn("event.stopPropagation()", tag, f"모달이 열린다: {tag[:80]}")
         for el in ("'ins'+c.id", "'spec'+c.id", "'trepo'+c.id"):
             self.assertIn(f"dval({el}", self.html)
 
@@ -787,3 +795,70 @@ class InputPreservationTest(unittest.TestCase):
     def test_drafts_are_cleared_after_a_successful_submit(self):
         for call in ("clearDraft('ins'+id)", "clearDraft('spec'+id)", "clearDraft('trepo'+id)"):
             self.assertIn(call, self.html)
+
+
+class PrGateReworkTest(unittest.TestCase):
+    """PR 게이트에 승인만 있으면, diff 에서 문제를 봐도 되돌릴 길이 없다."""
+
+    def setUp(self):
+        self.c = sqlite3.connect(":memory:")
+        self.c.row_factory = sqlite3.Row
+        self.c.executescript(db.SCHEMA)
+        self.c.execute("ALTER TABLE cards ADD COLUMN engine TEXT")
+        self.saved = {"connect": dashboard.db.connect, "kick": dashboard.kick_tick}
+
+        @contextlib.contextmanager
+        def fake_connect():
+            yield self.c
+
+        dashboard.db.connect = fake_connect
+        dashboard.kick_tick = lambda: None
+        self.key = keys.issue_key(REPO, 1816)
+        self.cid = db.upsert_card(
+            self.c, self.key, "issue", REPO, 1816, status="pr_blocked", blocked=1,
+            payload={"display": "PH-1816", "title": "t", "branch": "feature/PH-1816",
+                     "impl_rounds": 2, "feedback": "[검증] 널 가드 없음"})
+
+    def tearDown(self):
+        dashboard.db.connect = self.saved["connect"]
+        dashboard.kick_tick = self.saved["kick"]
+        self.c.close()
+
+    def _card(self):
+        return db.get_card(self.c, self.key)
+
+    def _payload(self):
+        return json.loads(self._card()["payload"])
+
+    def test_request_changes_sends_it_back_to_implementing(self):
+        self.assertTrue(dashboard.do_action("request_changes", self.cid,
+                                            text="취소 시 모달이 다시 열린다"))
+        card = self._card()
+        self.assertEqual(card["status"], "implementing")
+        self.assertEqual(card["blocked"], 0)
+        types = [r["type"] for r in self.c.execute("SELECT type FROM events").fetchall()]
+        self.assertIn("operator_request_changes", types)
+
+    def test_feedback_is_appended_not_replaced(self):
+        dashboard.do_action("request_changes", self.cid, text="취소 시 모달 재개방")
+        fb = self._payload()["feedback"]
+        self.assertIn("[검증] 널 가드 없음", fb)          # 이전 지적 보존
+        self.assertIn("[운영자 수정 요청] 취소 시 모달 재개방", fb)
+
+    def test_round_budget_is_raised_so_it_does_not_die_immediately(self):
+        """impl_rounds 가 이미 상한이면 되돌리자마자 impl_rounds_exhausted 로 죽는다."""
+        self.assertTrue(dashboard.do_action("request_changes", self.cid, text="고쳐라"))
+        self.assertEqual(self._payload()["impl_bonus"], dashboard.IMPL_BONUS)
+
+    def test_empty_note_is_refused(self):
+        self.assertFalse(dashboard.do_action("request_changes", self.cid, text="  "))
+        self.assertEqual(self._card()["status"], "pr_blocked")
+
+    def test_only_from_the_pr_gate(self):
+        db.set_status(self.c, self.cid, "implementing")
+        self.assertFalse(dashboard.do_action("request_changes", self.cid, text="x"))
+
+    def test_gate_offers_both_paths(self):
+        self.assertIn("🚀 PR 올리기 승인", dashboard.HTML)
+        self.assertIn("↩︎ 수정 요청", dashboard.HTML)
+        self.assertIn("function requestChanges", dashboard.HTML)

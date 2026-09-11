@@ -248,7 +248,8 @@ ACTIVE_REVIEW = ("intake", "reviewing", "verifying", "commenting")
 # 대시보드가 시작시킬 수 있는 스테이지 = tick 에 집어가는 워커가 있는 스테이지.
 # 워커 없이 열면 카드가 그 레인에 조용히 서고 아무 일도 일어나지 않는다.
 WORK_START = {"start_impl": "implementing", "start_debate": "spec"}
-DEBATE_BONUS = 2   # 사람이 개입할 때 늘려주는 라운드 수
+DEBATE_BONUS = 2   # 사람이 개입할 때 늘려주는 토론 라운드 수
+IMPL_BONUS = 1     # 사람이 수정을 요청할 때 늘려주는 구현·검증 라운드 수
 # 워커가 없어 막아둘 것이 생기면 여기에 둔다(버튼 비활성 + 서버 거부).
 WORK_START_PENDING: dict[str, tuple[str, str]] = {}
 
@@ -264,6 +265,7 @@ EVENT_LABELS = {
     "impl_rework": "재구현으로 되돌림", "impl_rounds_exhausted": "라운드 예산 소진",
     "impl_verify_no_branch": "브랜치 정보 없음", "impl_verify_empty_diff": "diff 없음",
     "operator_pr_approved": "PR 승인(사람)",
+    "operator_request_changes": "수정 요청(사람) — 구현으로 되돌림",
     "debate_turn_started": "토론 턴 시작", "debate_turn": "토론 턴",
     "debate_finished": "토론 종료", "debate_engine_missing": "엔진 없음(토론 불가)",
     "operator_spec_approved": "설계 승인(사람)", "operator_spec_rejected": "설계 반려(사람)",
@@ -403,6 +405,23 @@ def do_action(action, card_id, engine="claude", text=None, repo=None):
                 "debate": [], "agreement": {}, "mode": ""})
             if not db.gate(c, card, "triage", blocked=0, event="operator_spec_rejected"):
                 return False
+        elif action == "request_changes" and card["kind"] == "issue":
+            # PR 게이트에서 되돌리는 경로. 사람이 본 diff 의 문제를 구현자에게 넘긴다.
+            if card["status"] != "pr_blocked":
+                return False
+            note = (text or "").strip()
+            if not note:
+                return False
+            meta_now = json.loads(card["payload"]) if card["payload"] else {}
+            prev = (meta_now.get("feedback") or "").strip()
+            db.merge_payload(c, card["id"], {
+                "feedback": (f"{prev}\n\n" if prev else "") + f"[운영자 수정 요청] {note}",
+                "impl_bonus": int(meta_now.get("impl_bonus") or 0) + IMPL_BONUS,
+            })
+            if not db.gate(c, card, "implementing", blocked=0,
+                           event="operator_request_changes", detail={"note": note[:200]}):
+                return False
+            kick = True
         elif action == "unblock" and card["kind"] == "issue":
             if card["status"] != "pr_blocked":
                 return False
@@ -1161,7 +1180,14 @@ function issueTile(c){
       <div class="rev"><button onclick="rejectSpec(event,${c.id})">↩︎ 반려</button></div>
     </div>`;
   }else if(c.status==='pr_blocked'){
-    btns=`<div class="btns"><button class="go" onclick="approvePr(event,${c.id})">🚀 PR 올리기 승인</button></div>`;
+    btns=`<div class="instr">
+      <textarea id="spec${c.id}" placeholder="수정 요청 (선택) — 무엇이 잘못됐는지 쓰면 구현 단계로 되돌아갑니다"
+        oninput="draft(this)" onclick="event.stopPropagation()"
+        onkeydown="event.stopPropagation()">${esc(dval('spec'+c.id,''))}</textarea>
+      <div class="rev">
+        <button class="claude" onclick="approvePr(event,${c.id})">🚀 PR 올리기 승인</button>
+        <button class="codex" onclick="requestChanges(event,${c.id})">↩︎ 수정 요청</button>
+      </div></div>`;
   }
   el.innerHTML=`${xbtn}<div class="pr">${repoPill} <span class="num">${esc(c.display)}</span></div>
     <div class="title">${esc(c.title)||'(제목없음)'}</div>
@@ -1330,7 +1356,9 @@ function openIssueModal(c){
   if(c.pr_dryrun&&!c.pr_url)
     html+=`<div class="lbl">PR (dry-run)</div><div class="pre">dry_run_pr=true — 실제 PR은 올라가지 않았습니다. config에서 false로 바꾸면 draft PR이 생성됩니다.</div>`;
   if(c.status==='pr_blocked')
-    html+=`<div class="btns"><button class="go" onclick="approvePr(event,${c.id})">🚀 PR 올리기 승인</button></div>`;
+    html+=`<div class="btns"><button class="go" onclick="approvePr(event,${c.id})">🚀 PR 올리기 승인</button>`
+      +`<button onclick="requestChanges(event,${c.id})">↩︎ 수정 요청</button></div>`
+      +`<div class="sub">수정 요청은 카드의 입력칸에 쓴 내용을 구현자에게 넘깁니다.</div>`;
   m.innerHTML=html;document.getElementById('ov').classList.add('show');
 }
 function openFeedbackModal(f){
@@ -1411,6 +1439,15 @@ async function resumeDebate(e,id){e.stopPropagation();
   load();}
 function rejectSpec(e,id){e.stopPropagation();
   if(confirm('설계를 반려하고 대기로 되돌릴까요? 토론 기록은 보관됩니다.'))act(e,'reject_spec',id);}
+async function requestChanges(e,id){e.stopPropagation();
+  const t=specText(id);
+  if(!t){showToast('무엇을 고쳐야 하는지 적어주세요',false);return;}
+  if(!confirm('이 지적을 넘겨 구현 단계로 되돌릴까요? — '+t))return;
+  showToast('수정 요청 ↩︎ 구현으로 되돌립니다',true);
+  const j=await sendAction({action:'request_changes',card_id:id,text:t});
+  if(j.ok===false)showToast('되돌릴 수 없습니다',false);
+  else clearDraft('spec'+id);
+  load();}
 function approvePr(e,id){e.stopPropagation();
   if(confirm('이 브랜치를 push하고 draft PR을 올릴까요? (ready 전환은 직접 하셔야 합니다)'))act(e,'unblock',id);}
 async function newTopic(){

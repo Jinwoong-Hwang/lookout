@@ -112,6 +112,16 @@ class VerifyOutcomeTest(_Base):
         impl_verifier.process(self.c, self._card())
         self.assertEqual(self._card()["status"], "implementing")
 
+    def test_operator_bonus_raises_the_round_cap(self):
+        """사람이 수정을 요청하면 예산이 늘어 다시 한 바퀴 돈다."""
+        db.merge_payload(self.c, self.card_id,
+                         {"impl_rounds": impl_verifier.MAX_IMPL_ROUNDS, "impl_bonus": 1})
+        engines.run_json = lambda *_a, **_k: {"approved": False,
+                                             "blocking": [{"file": "a", "problem": "b"}]}
+        impl_verifier.process(self.c, self._card())
+        self.assertEqual(self._card()["status"], "implementing")   # failed 가 아니다
+        self.assertIn("impl_rework", self._events())
+
     def test_round_cap_stops_the_ping_pong(self):
         db.merge_payload(self.c, self.card_id, {"impl_rounds": impl_verifier.MAX_IMPL_ROUNDS})
         engines.run_json = lambda *_a, **_k: {"approved": False,

@@ -97,7 +97,9 @@ def process(c, card):
         return
 
     rounds = int(meta.get("impl_rounds") or 1)
-    if rounds >= MAX_IMPL_ROUNDS:
+    # 사람이 수정을 요청하면 예산을 늘려준다 — 안 늘리면 요청하자마자 소진되어
+    # failed 로 떨어진다(자동 되돌림 상한과 사람의 요청은 다른 축이다).
+    if rounds >= MAX_IMPL_ROUNDS + int(meta.get("impl_bonus") or 0):
         # 되돌림 예산 소진 — 사람이 보게 failed 레인에 세운다. 계속 돌리면
         # 두 엔진이 서로 미루며 토큰만 태운다.
         db.merge_payload(c, card["id"], {"failed_from": "impl_verify"})
