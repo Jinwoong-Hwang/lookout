@@ -214,3 +214,28 @@ class PrOpenerTest(_Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ExhaustedFeedbackTest(_Base):
+    """소진으로 사람에게 올릴 때도 최신 블로커를 feedback 에 남겨야, 사람이
+    '수정 요청'을 눌렀을 때 구현자가 그 지적을 받는다."""
+
+    def test_exhaustion_records_the_blockers_for_the_next_round(self):
+        db.merge_payload(self.c, self.card_id,
+                         {"impl_rounds": impl_verifier.MAX_IMPL_ROUNDS,
+                          "feedback": "낡은 지적"})
+        engines.run_json = lambda *_a, **_k: {
+            "approved": False,
+            "blocking": [{"file": "x.ts", "line": "10", "problem": "터진다", "fix": "가드"}]}
+        impl_verifier.process(self.c, self._card())
+        fb = self._payload()["feedback"]
+        self.assertIn("x.ts:10", fb)
+        self.assertIn("[검증 미해결]", fb)
+        self.assertNotIn("낡은 지적", fb)
+
+    def test_rework_path_uses_the_same_wording(self):
+        engines.run_json = lambda *_a, **_k: {
+            "approved": False,
+            "blocking": [{"file": "y.ts", "line": "2", "problem": "p", "fix": "f"}]}
+        impl_verifier.process(self.c, self._card())
+        self.assertIn("y.ts:2 — p / 고치는 방향: f", self._payload()["feedback"])

@@ -839,18 +839,43 @@ class PrGateReworkTest(unittest.TestCase):
         types = [r["type"] for r in self.c.execute("SELECT type FROM events").fetchall()]
         self.assertIn("operator_request_changes", types)
 
-    def test_feedback_is_appended_not_replaced(self):
+    def test_latest_blockers_are_carried_not_the_stale_ones(self):
+        """구현자가 받아야 할 것은 게이트를 막은 **이번** 지적이다. 직전 라운드의
+        (이미 고친) 지적을 다시 보내면 되돌림이 돈다."""
+        db.merge_payload(self.c, self.cid, {"verify": {
+            "approved": False,
+            "blocking": [{"file": "IntroStepContent.tsx", "line": "327-330",
+                          "problem": "닫힌 창을 가리킨다", "fix": "closed 검사"}]}})
         dashboard.do_action("request_changes", self.cid, text="취소 시 모달 재개방")
         fb = self._payload()["feedback"]
-        self.assertIn("[검증] 널 가드 없음", fb)          # 이전 지적 보존
+        self.assertIn("IntroStepContent.tsx:327-330", fb)          # 최신 블로커
         self.assertIn("[운영자 수정 요청] 취소 시 모달 재개방", fb)
+        self.assertNotIn("[검증] 널 가드 없음", fb)                # 낡은 것은 안 실린다
+
+    def test_empty_note_is_allowed_when_blockers_exist(self):
+        """검증이 남긴 지적을 사람이 다시 타이핑할 이유가 없다."""
+        db.merge_payload(self.c, self.cid, {"verify": {
+            "approved": False,
+            "blocking": [{"file": "a.ts", "line": "1", "problem": "깨짐", "fix": "고쳐"}]}})
+        self.assertTrue(dashboard.do_action("request_changes", self.cid, text=""))
+        self.assertIn("a.ts:1", self._payload()["feedback"])
+        self.assertEqual(self._card()["status"], "implementing")
+
+    def test_approved_verification_does_not_inject_blockers(self):
+        db.merge_payload(self.c, self.cid, {"verify": {"approved": True, "blocking": []}})
+        self.assertTrue(dashboard.do_action("request_changes", self.cid, text="그래도 이건 고쳐라"))
+        fb = self._payload()["feedback"]
+        self.assertIn("[운영자 수정 요청] 그래도 이건 고쳐라", fb)
+        self.assertNotIn("[검증 미해결]", fb)
 
     def test_round_budget_is_raised_so_it_does_not_die_immediately(self):
         """impl_rounds 가 이미 상한이면 되돌리자마자 impl_rounds_exhausted 로 죽는다."""
         self.assertTrue(dashboard.do_action("request_changes", self.cid, text="고쳐라"))
         self.assertEqual(self._payload()["impl_bonus"], dashboard.IMPL_BONUS)
 
-    def test_empty_note_is_refused(self):
+    def test_empty_note_with_nothing_to_say_is_refused(self):
+        """넘길 지적도 없고 사람도 안 썼으면 되돌릴 이유가 없다."""
+        db.merge_payload(self.c, self.cid, {"verify": {"approved": True, "blocking": []}})
         self.assertFalse(dashboard.do_action("request_changes", self.cid, text="  "))
         self.assertEqual(self._card()["status"], "pr_blocked")
 

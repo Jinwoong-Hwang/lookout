@@ -41,6 +41,19 @@ def branch_diff(repo: str, branch: str) -> tuple[str, str]:
     return packed, files
 
 
+def blockers_text(verify: dict) -> str:
+    """검증 결과를 구현자가 읽을 지적 목록으로. 되돌림 경로와 사람의 수정 요청이
+    같은 문구를 쓰도록 한 곳에 둔다."""
+    lines = [
+        f"- {b.get('file', '?')}:{b.get('line', '?')} — {b.get('problem', '')}"
+        f" / 고치는 방향: {b.get('fix', '')}"
+        for b in (verify.get("blocking") or [])
+    ]
+    if verify.get("out_of_scope"):
+        lines.append("- 스코프 밖 변경: " + ", ".join(verify["out_of_scope"]))
+    return "\n".join(lines) or (verify.get("summary") or "")
+
+
 def process(c, card):
     meta = json.loads(card["payload"]) if card["payload"] else {}
     repo, branch = meta.get("target_repo"), meta.get("branch")
@@ -105,7 +118,13 @@ def process(c, card):
         # 엔진 둘이 합의를 못 했을 뿐이다. failed 로 보내면 크래시처럼 보이고
         # 사람이 그 diff 를 판단할 기회를 잃는다. 사람 게이트로 올려 블로커를
         # 보여주고 승인·재요청·중단을 고르게 한다.
-        db.merge_payload(c, card["id"], {"verify_exhausted": True})
+        # 최신 블로커를 feedback 에 남긴다 — 사람이 '수정 요청'을 누를 때 구현자가
+        # 받아야 할 것은 게이트를 막은 **이번** 지적이다. 안 남기면 직전 라운드의
+        # (이미 고친) 지적이 그대로 다시 나간다.
+        db.merge_payload(c, card["id"], {
+            "verify_exhausted": True,
+            "feedback": f"[검증 미해결] {blockers_text(verdict)}",
+        })
         db.set_status(c, card["id"], "pr_blocked", blocked=1)
         db.log_event(c, "impl_rounds_exhausted", card["key"],
                      {"rounds": rounds, "blocking": len(blocking), "to": "pr_blocked"})
@@ -117,11 +136,7 @@ def process(c, card):
         )
         return
 
-    feedback = "\n".join(
-        f"- {b.get('file','?')}:{b.get('line','?')} — {b.get('problem','')} / 고치는 방향: {b.get('fix','')}"
-        for b in blocking) or (verdict.get("summary") or "")
-    if out_of_scope:
-        feedback += "\n- 스코프 밖 변경: " + ", ".join(out_of_scope)
-    db.merge_payload(c, card["id"], {"impl_rounds": rounds + 1, "feedback": feedback})
+    db.merge_payload(c, card["id"],
+                     {"impl_rounds": rounds + 1, "feedback": blockers_text(verdict)})
     db.set_status(c, card["id"], "implementing")
     db.log_event(c, "impl_rework", card["key"], {"round": rounds + 1, "blocking": len(blocking)})
