@@ -118,6 +118,7 @@ def build_board():
                     "changed": meta.get("changed") or [],
                     "impl": meta.get("impl") or {},
                     "verify": meta.get("verify") or {},
+                    "verify_exhausted": bool(meta.get("verify_exhausted")),
                     "agreement": meta.get("agreement") or {},
                     "spec_amendment": meta.get("spec_amendment", ""),
                     "topic": meta.get("topic", ""),
@@ -262,7 +263,7 @@ EVENT_LABELS = {
     "impl_engine_started": "엔진 편집 시작", "impl_engine_done": "엔진 편집 종료",
     "impl_no_changes": "변경 없음", "impl_committed": "커밋 완료",
     "impl_verify_started": "교차 검증 시작", "impl_verified": "교차 검증 완료",
-    "impl_rework": "재구현으로 되돌림", "impl_rounds_exhausted": "라운드 예산 소진",
+    "impl_rework": "재구현으로 되돌림", "impl_rounds_exhausted": "라운드 예산 소진 — 사람 판정으로",
     "impl_verify_no_branch": "브랜치 정보 없음", "impl_verify_empty_diff": "diff 없음",
     "operator_pr_approved": "PR 승인(사람)",
     "operator_request_changes": "수정 요청(사람) — 구현으로 되돌림",
@@ -1138,6 +1139,7 @@ function issueTile(c){
   const v=c.verify||{};
   const nb=(v.blocking||[]).length;
   const vPill=v.engine?`<span class="pill" style="${pill(v.approved?'#4ade80':'#fb7185')}">🧾 ${esc(v.engine)} ${v.approved?'통과':'블로커 '+nb}</span>`:'';
+  const exPill=c.verify_exhausted?`<span class="pill" style="${pill('#fbbf24')}">⚖️ 엔진 합의 실패</span>`:'';
   const roundPill=(c.rounds>1)?`<span class="pill">${c.rounds}R</span>`:'';
   const RUNNING=['spec','implementing','impl_verify','pr_opening'];
   const ag=c.agreement||{};
@@ -1180,18 +1182,19 @@ function issueTile(c){
       <div class="rev"><button onclick="rejectSpec(event,${c.id})">↩︎ 반려</button></div>
     </div>`;
   }else if(c.status==='pr_blocked'){
-    btns=`<div class="instr">
+    if(c.verify_exhausted)btns=`<div class="errline warn">검증을 통과하지 못한 채 되돌림 예산이 끝났습니다 — 승인하면 블로커가 남은 채로 PR 이 올라갑니다</div>`;
+    btns+=`<div class="instr">
       <textarea id="spec${c.id}" placeholder="수정 요청 (선택) — 무엇이 잘못됐는지 쓰면 구현 단계로 되돌아갑니다"
         oninput="draft(this)" onclick="event.stopPropagation()"
         onkeydown="event.stopPropagation()">${esc(dval('spec'+c.id,''))}</textarea>
       <div class="rev">
-        <button class="claude" onclick="approvePr(event,${c.id})">🚀 PR 올리기 승인</button>
+        <button class="claude" onclick="approvePr(event,${c.id})">${c.verify_exhausted?'⚠️ 미통과인데 승인':'🚀 PR 올리기 승인'}</button>
         <button class="codex" onclick="requestChanges(event,${c.id})">↩︎ 수정 요청</button>
       </div></div>`;
   }
   el.innerHTML=`${xbtn}<div class="pr">${repoPill} <span class="num">${esc(c.display)}</span></div>
     <div class="title">${esc(c.title)||'(제목없음)'}</div>
-    <div class="row">${statusPill}${asg}${modePill}${enginePill}${vPill}${dbPill}${agPill}${roundPill}${agePill}</div>
+    <div class="row">${statusPill}${asg}${modePill}${enginePill}${vPill}${exPill}${dbPill}${agPill}${roundPill}${agePill}</div>
     ${facts?`<div class="row">${facts}</div>`:''}
     ${(c.instruction&&c.status!=='triage')?`<div class="instrline">📝 ${esc(c.instruction)}</div>`:''}
     ${c.error?`<div class="errline ${c.status==='triage'?'warn':''}" title="${esc(c.error)}">${esc(c.error)}</div>`:''}${btns}`;
@@ -1355,8 +1358,10 @@ function openIssueModal(c){
   }
   if(c.pr_dryrun&&!c.pr_url)
     html+=`<div class="lbl">PR (dry-run)</div><div class="pre">dry_run_pr=true — 실제 PR은 올라가지 않았습니다. config에서 false로 바꾸면 draft PR이 생성됩니다.</div>`;
+  if(c.verify_exhausted)
+    html+=`<div class="errline warn">⚖️ 엔진끼리 합의하지 못한 채 되돌림 예산이 끝났습니다. 위 블로커를 직접 판단하세요 — 승인하면 그대로 PR 이 올라갑니다.</div>`;
   if(c.status==='pr_blocked')
-    html+=`<div class="btns"><button class="go" onclick="approvePr(event,${c.id})">🚀 PR 올리기 승인</button>`
+    html+=`<div class="btns"><button class="go" onclick="approvePr(event,${c.id})">${c.verify_exhausted?'⚠️ 미통과인데 승인':'🚀 PR 올리기 승인'}</button>`
       +`<button onclick="requestChanges(event,${c.id})">↩︎ 수정 요청</button></div>`
       +`<div class="sub">수정 요청은 카드의 입력칸에 쓴 내용을 구현자에게 넘깁니다.</div>`;
   m.innerHTML=html;document.getElementById('ov').classList.add('show');

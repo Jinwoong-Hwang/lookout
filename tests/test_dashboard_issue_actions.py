@@ -862,3 +862,17 @@ class PrGateReworkTest(unittest.TestCase):
         self.assertIn("🚀 PR 올리기 승인", dashboard.HTML)
         self.assertIn("↩︎ 수정 요청", dashboard.HTML)
         self.assertIn("function requestChanges", dashboard.HTML)
+
+
+class ExhaustedVerificationIsVisibleTest(unittest.TestCase):
+    """검증 미통과로 사람에게 올라온 카드를, 통과한 카드와 똑같이 보여주면
+    사람이 블로커가 남은 줄 모르고 승인한다."""
+
+    def test_card_and_modal_warn_about_the_unresolved_blockers(self):
+        self.assertIn("⚖️ 엔진 합의 실패", dashboard.HTML)
+        self.assertIn("⚠️ 미통과인데 승인", dashboard.HTML)
+        self.assertIn("승인하면 블로커가 남은 채로 PR 이 올라갑니다", dashboard.HTML)
+
+    def test_board_row_carries_the_flag(self):
+        self.assertIn('"verify_exhausted": bool(meta.get("verify_exhausted"))',
+                      open("src/dashboard.py", encoding="utf-8").read())

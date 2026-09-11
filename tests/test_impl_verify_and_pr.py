@@ -122,13 +122,24 @@ class VerifyOutcomeTest(_Base):
         self.assertEqual(self._card()["status"], "implementing")   # failed 가 아니다
         self.assertIn("impl_rework", self._events())
 
-    def test_round_cap_stops_the_ping_pong(self):
+    def test_round_cap_hands_it_to_the_human_not_to_failed(self):
+        """엔진 불일치는 실패가 아니다 — 커밋도 검증 의견도 있다. failed 로 보내면
+        크래시처럼 보이고 사람이 그 diff 를 판단할 기회를 잃는다."""
         db.merge_payload(self.c, self.card_id, {"impl_rounds": impl_verifier.MAX_IMPL_ROUNDS})
         engines.run_json = lambda *_a, **_k: {"approved": False,
                                              "blocking": [{"file": "a", "problem": "b"}]}
         impl_verifier.process(self.c, self._card())
-        self.assertEqual(self._card()["status"], "failed")
+        card = self._card()
+        self.assertEqual(card["status"], "pr_blocked")
+        self.assertEqual(card["blocked"], 1)
+        self.assertTrue(self._payload()["verify_exhausted"])   # 미통과 표식
         self.assertIn("impl_rounds_exhausted", self._events())
+
+    def test_passing_verification_clears_the_exhausted_mark(self):
+        db.merge_payload(self.c, self.card_id, {"verify_exhausted": True})
+        engines.run_json = lambda *_a, **_k: {"approved": True, "summary": "ok"}
+        impl_verifier.process(self.c, self._card())
+        self.assertFalse(self._payload()["verify_exhausted"])
 
     def test_missing_branch_fails_loudly(self):
         db.merge_payload(self.c, self.card_id, {"branch": ""})
