@@ -1412,8 +1412,12 @@ function openIssueModal(c){
       +(V.summary?md(V.summary):'')+blk
       +((V.out_of_scope||[]).length?`<div class="lbl2">스코프 밖 변경</div>${md((V.out_of_scope||[]).map(x=>'- '+x).join(NL))}`:'');
 
+  // 설계 게이트에서만 "결정하라"가 성립한다 — 그 뒤 레인엔 누를 버튼이 없으므로
+  // 같은 문구를 띄우면 사람에게 할 수 없는 일을 요구하게 된다.
   if((AG.unresolved||[]).length)
-    h+=`<div class="lbl">미합의 ${AG.unresolved.length}건 — 승인 전에 결정해야 합니다</div>`
+    h+=`<div class="lbl">${c.status==='spec_blocked'
+        ?`미합의 ${AG.unresolved.length}건 — 승인 전에 결정해야 합니다`
+        :`설계 단계 미합의 ${AG.unresolved.length}건 — PR 본문에 함께 남습니다`}</div>`
       +md(AG.unresolved.map(x=>'- '+x).join(NL));
 
   // ── 2. 게이트 버튼 ────────────────────────────────────────

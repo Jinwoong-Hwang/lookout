@@ -112,6 +112,19 @@ def impl_worktree_path(repo: str) -> str:
     return os.path.join(_impl_base_dir(), _slug(repo), IMPL_WT_NAME)
 
 
+def branch_files(repo: str, branch: str) -> list[str]:
+    """base...branch **누적** 변경 파일.
+
+    impl_worker 의 changed_files() 는 커밋 직전 워크트리(git status)만 본다 —
+    라운드가 여러 번 돌면 마지막 라운드가 만진 파일만 남아 카드가 PR 규모를
+    실제보다 작게 보여준다(실측: 카드 5개 / 실제 브랜치 11개). PR 에 담기는 것은
+    이쪽이므로 사람이 승인 전에 보는 목록도 이쪽이어야 한다."""
+    parent = impl_parent(repo)
+    base = _impl_base_ref(parent, repo)
+    out = _git(parent, "diff", "--name-only", f"{base}...{branch}").stdout
+    return [line.strip() for line in out.splitlines() if line.strip()]
+
+
 def _impl_base_ref(repo_dir: str, repo: str) -> str:
     configured = (CFG.get("impl_base_ref") or {}).get(repo)
     if configured:

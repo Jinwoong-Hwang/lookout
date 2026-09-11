@@ -259,6 +259,22 @@ class PrOpenerTest(_Base):
         self.assertEqual(self.comments[0][0], REPO)
         self.assertIn("https://pr/1", self.comments[0][2])
 
+    def test_unresolved_design_items_reach_the_pr_body(self):
+        """카드에만 두면 PR 리뷰어는 그 다툼이 있었다는 사실조차 모른다."""
+        pr_opener.CFG["dry_run_pr"] = False
+        db.merge_payload(self.c, self.card_id, {"agreement": {
+            "settled": False, "unresolved": ["www 실기 1회 확인 필요", "별도 티켓으로"]}})
+        pr_opener.process(self.c, self._card())
+        body = self.created[0][4]
+        self.assertIn("설계 단계 미합의", body)
+        self.assertIn("- [ ] www 실기 1회 확인 필요", body)
+        self.assertIn("- [ ] 별도 티켓으로", body)
+
+    def test_no_unresolved_items_adds_no_empty_section(self):
+        pr_opener.CFG["dry_run_pr"] = False
+        pr_opener.process(self.c, self._card())
+        self.assertNotIn("설계 단계 미합의", self.created[0][4])
+
     def test_pr_is_created_as_draft_not_promoted_later(self):
         """생성 후 draft로 내려도 이미 걸린 코드 소유자 리뷰 요청은 회수되지 않는다.
         그래서 --draft 는 생성 인자에 있어야 한다."""

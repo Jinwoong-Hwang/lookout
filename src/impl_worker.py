@@ -159,9 +159,15 @@ def _run_turn(c, card, meta, display, repo, branch, issue):
         return
 
     sha = _commit(wt, meta, display, result.get("summary") or "")
+    # 카드에 보여줄 것은 **브랜치 누적** 변경이다 — files 는 이번 라운드가 만진
+    # 것뿐이라, 여러 라운드를 돈 카드는 PR 규모를 실제보다 작게 보여준다.
+    try:
+        shown = worktree.branch_files(repo, branch) or files
+    except Exception:
+        shown = files   # 누적을 못 구해도 라운드를 죽이지는 않는다
     db.merge_payload(c, card["id"], {
         "target_repo": repo, "branch": branch, "worktree": wt, "commit": sha,
-        "changed": files[:60],
+        "changed": shown[:60],
         "impl": {k: result.get(k) for k in
                  ("done", "summary", "verification", "open_questions", "risk")},
     })

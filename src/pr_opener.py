@@ -24,6 +24,13 @@ def _body(meta: dict, display: str) -> str:
         engine = verify.get("engine", "")
         note = " (동일 엔진 폴백)" if verify.get("fallback") else ""
         lines += [f"## 교차 검증 — {engine}{note}", verify["summary"], ""]
+    # 설계 토론이 끝내 합의하지 못한 것들. 카드에만 두면 PR 리뷰어는 이 다툼이
+    # 있었다는 사실조차 모른다 — 승인 화면에서 사라지는 대신 본문에 남긴다.
+    unresolved = (meta.get("agreement") or {}).get("unresolved") or []
+    if unresolved:
+        lines += ["## 설계 단계 미합의 — 리뷰에서 판단 필요"]
+        lines += [f"- [ ] {u}" for u in unresolved]
+        lines.append("")
     for q in (impl.get("open_questions") or []):
         lines.append(f"- [ ] 확인 필요: {q}")
     if impl.get("risk"):

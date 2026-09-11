@@ -132,6 +132,40 @@ class ImplWorkerTest(unittest.TestCase):
         # 워커가 커밋했고 워크트리는 깨끗하다
         self.assertEqual(_git(self.wt, "status", "--porcelain"), "")
 
+    def test_card_shows_the_whole_branch_not_just_this_round(self):
+        """라운드가 여러 번 돌면 git status 는 마지막 라운드가 만진 것만 보여준다 —
+        사람이 그 목록을 보고 PR 을 승인하면 실제 규모를 모르고 승인하게 된다.
+        (실측: 카드 5개 / 실제 브랜치 11개)"""
+        saved = worktree.branch_files
+        worktree.branch_files = lambda _r, _b: ["a.txt", "예전라운드.ts", "또다른.tsx"]
+        try:
+            def edit():
+                with open(os.path.join(self.wt, "a.txt"), "w") as f:
+                    f.write("after\n")
+            self._run(edit=edit)
+        finally:
+            worktree.branch_files = saved
+        self.assertEqual(self._payload()["changed"],
+                         ["a.txt", "예전라운드.ts", "또다른.tsx"])
+
+    def test_a_broken_branch_diff_does_not_kill_the_round(self):
+        """누적을 못 구해도 커밋은 이미 됐다 — 라운드를 죽이는 대신 이번 라운드
+        목록으로 내려앉는다."""
+        saved = worktree.branch_files
+
+        def boom(_r, _b):
+            raise RuntimeError("git 실패")
+        worktree.branch_files = boom
+        try:
+            def edit():
+                with open(os.path.join(self.wt, "a.txt"), "w") as f:
+                    f.write("after\n")
+            self._run(edit=edit)
+        finally:
+            worktree.branch_files = saved
+        self.assertEqual(self._card()["status"], "impl_verify")
+        self.assertEqual(self._payload()["changed"], ["a.txt"])
+
     def test_stage_events_break_up_the_silent_window(self):
         """work_started → impl_committed 사이가 통째로 무음이면 수십 분 동안
         멈춘 건지 도는 건지 알 수 없다."""

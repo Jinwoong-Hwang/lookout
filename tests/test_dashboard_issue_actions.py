@@ -993,6 +993,17 @@ class ModalReadabilityTest(unittest.TestCase):
     """엔진은 마크다운으로 답한다 — 원문 그대로 뿌리면 기호가 노출되고 긴 설계안은
     읽을 수 없다. 그리고 긴 블록을 순서 없이 쌓으면 지금 결정할 것이 안 보인다."""
 
+    def test_unresolved_items_do_not_demand_a_decision_after_the_design_gate(self):
+        """설계 게이트에만 '결정하라'가 성립한다 — PR 게이트엔 누를 버튼이 없어서
+        같은 문구를 띄우면 사람에게 할 수 없는 일을 요구하게 된다."""
+        html = dashboard.HTML
+        self.assertIn("승인 전에 결정해야 합니다", html)
+        self.assertIn("PR 본문에 함께 남습니다", html)
+        # 설계 게이트 분기 안에서만 '결정하라'가 나온다
+        demand = html.index("승인 전에 결정해야 합니다")
+        guard = html.rindex("c.status==='spec_blocked'", 0, demand)
+        self.assertLess(demand - guard, 200)
+
     def setUp(self):
         self.html = dashboard.HTML
         self.modal = self.html[self.html.index("function openIssueModal"):
