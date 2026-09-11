@@ -16,6 +16,19 @@ EFFORT = CFG.get("claude_effort")  # low|medium|high|xhigh|max, None = 기본
 READONLY_ALLOWED = ["Read", "Grep", "Glob"]
 DISALLOWED = ["Write", "Edit", "Bash", "NotebookEdit", "WebFetch", "WebSearch"]
 
+# 구현 단계는 편집이 필요하다. 다만 Bash를 통째로 열면 엔진이 커밋·푸시를 할 수
+# 있고, 그러면 "커밋은 브로커가 한다"는 설계가 무의미해진다. 테스트·빌드 계열만
+# 패턴으로 열고 git은 읽기 전용 서브커맨드만 허용한다.
+IMPL_ALLOWED = [
+    "Read", "Grep", "Glob", "Edit", "Write", "MultiEdit", "NotebookEdit",
+    "Bash(yarn *)", "Bash(npm *)", "Bash(npx *)", "Bash(pnpm *)",
+    "Bash(node *)", "Bash(python3 *)", "Bash(pytest *)", "Bash(jest *)",
+    "Bash(tsc *)", "Bash(eslint *)", "Bash(prettier *)", "Bash(make *)",
+    "Bash(ls *)", "Bash(cat *)", "Bash(rg *)", "Bash(find *)",
+    "Bash(git status*)", "Bash(git diff*)", "Bash(git log*)", "Bash(git show*)",
+]
+IMPL_DISALLOWED = ["WebFetch", "WebSearch"]
+
 
 class ClaudeError(RuntimeError):
     pass
@@ -52,28 +65,91 @@ def run(prompt: str, cwd: str = None, add_dir: str = None, timeout: int = 900,
         return proc.stdout
 
 
+def run_impl(prompt: str, cwd: str, timeout: int = 3600,
+             model: str = None, effort: str = None) -> str:
+    """구현용 — 편집 허용, 커밋·푸시 불가(IMPL_ALLOWED 참고).
+
+    run()과 함수를 갈라 둔다. 같은 함수에 플래그를 붙이면 리뷰 경로가 실수로 쓰기
+    권한을 받을 수 있고, 그건 ADR-009를 조용히 깨는 길이다."""
+    args = [
+        CLAUDE, "-p", prompt,
+        "--output-format", "json",
+        "--model", model or MODEL,
+        "--permission-mode", "bypassPermissions",
+        "--add-dir", cwd,
+        "--allowedTools", *(CFG.get("impl_allowed_tools") or IMPL_ALLOWED),
+        "--disallowedTools", *IMPL_DISALLOWED,
+    ]
+    eff = EFFORT if effort is None else effort
+    if eff:
+        args += ["--effort", eff]
+    proc = subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=timeout,
+                          env=config.subprocess_env())
+    if proc.returncode != 0:
+        raise ClaudeError(f"claude impl failed (rc={proc.returncode}): {proc.stderr.strip()[-500:]}")
+    try:
+        return json.loads(proc.stdout).get("result", proc.stdout)
+    except json.JSONDecodeError:
+        return proc.stdout
+
+
+def parse_obj(text: str) -> dict:
+    """엔진 응답을 **dict 로** 돌려준다.
+
+    parse_json 은 배열도 반환한다 — 모델이 `[{...}]` 로 답하면 호출부가
+    obj.update()/obj.get() 에서 AttributeError 로 죽는다(실측: 토론 codex 턴).
+    한 겹 배열은 풀어주고, 그래도 dict 가 아니면 파싱 실패로 취급한다."""
+    out = parse_json(text)
+    if isinstance(out, list):
+        out = next((x for x in out if isinstance(x, dict)), None)
+    if not isinstance(out, dict):
+        raise ClaudeError(f"expected a JSON object, got {type(out).__name__}: {text[:200]}")
+    return out
+
+
 def run_json(prompt: str, **kw) -> dict:
-    """Run claude and parse its reply as JSON (tolerates ```json fences)."""
-    text = run(prompt, **kw)
-    return parse_json(text)
+    """Run claude and parse its reply as a JSON object."""
+    return parse_obj(run(prompt, **kw))
 
 
 def parse_json(text: str):
-    t = text.strip()
-    if "```" in t:
-        # extract first fenced block
-        start = t.find("```")
-        nl = t.find("\n", start)
-        end = t.find("```", nl + 1)
-        if nl != -1 and end != -1:
-            t = t[nl + 1:end].strip()
-    # find outermost JSON object/array
+    """응답에서 완결된 JSON 객체를 뽑는다.
+
+    첫 ``` 와 다음 ``` 사이를 그냥 자르면, 본문(proposal 등)에 코드펜스가 들어간
+    순간 JSON 이 중간에서 끊긴다 — 실제로 토론의 제안자 응답 3개가 전부 이 경로로
+    파싱에 실패했고, 폴백이 응답을 잘라 다음 턴이 반쪽 입력으로 논쟁했다.
+    그래서 문자열 리터럴을 인식하며 중괄호 깊이를 세어 **완결된** 객체를 찾는다."""
+    t = (text or "").strip()
+    if t.startswith("```"):
+        nl = t.find("\n")
+        if nl != -1:
+            t = t[nl + 1:]
+        if t.rstrip().endswith("```"):
+            t = t.rstrip()[:-3]
     for opener, closer in (("{", "}"), ("[", "]")):
-        s = t.find(opener)
-        e = t.rfind(closer)
-        if s != -1 and e != -1 and e > s:
-            try:
-                return json.loads(t[s:e + 1])
-            except json.JSONDecodeError:
-                continue
+        start = t.find(opener)
+        while start != -1:
+            depth, in_str, esc = 0, False, False
+            for i in range(start, len(t)):
+                ch = t[i]
+                if in_str:
+                    if esc:
+                        esc = False
+                    elif ch == "\\":
+                        esc = True
+                    elif ch == '"':
+                        in_str = False
+                    continue
+                if ch == '"':
+                    in_str = True
+                elif ch == opener:
+                    depth += 1
+                elif ch == closer:
+                    depth -= 1
+                    if depth == 0:
+                        try:
+                            return json.loads(t[start:i + 1])
+                        except json.JSONDecodeError:
+                            break
+            start = t.find(opener, start + 1)
     raise ClaudeError(f"could not parse JSON from claude reply: {text[:300]}")

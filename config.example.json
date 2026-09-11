@@ -23,6 +23,42 @@
   "slack_user_id": "",
   "slack_workspace": "",
 
+  "_impl": "구현 워커가 쓰는 로컬 체크아웃. 캐시 클론(repos/)은 --filter=blob:none이라 빌드·테스트에 부적합하므로, 오브젝트 스토어를 공유하는 실제 체크아웃을 부모로 쓴다.",
+  "impl_repo_paths": {
+    "your-org/your-repo": "~/path/to/your-repo"
+  },
+  "_impl_workspace_dir": "구현 워크트리를 모아두는 곳(HERMES_HOME 기준). repo 폴더 안에 두면 jest/eslint/tsc/yarn이 긁는다.",
+  "impl_workspace_dir": "workspaces",
+  "_impl_base_ref": "브랜치를 딸 기준. 비우면 origin/HEAD를 따라간다.",
+  "impl_base_ref": {},
+  "_impl_setup_cmd": "새 워크트리에서 한 번 돌릴 설치 명령. repo -> 셸 명령.",
+  "impl_setup_cmd": {},
+  "_dry_run_pr": "true면 push·PR 생성을 하지 않고 본문만 카드에 남긴다. 처음엔 true로 확인 후 false 권장.",
+  "dry_run_pr": true,
+
+  "_impl_target_map": "이슈 제목 태그 -> 구현 대상 저장소. 태그 표기(TALK-CEO/TALK_CEO)는 영숫자만 비교하므로 아무 표기나 적어도 된다. 못 맞히면 카드에서 사람이 고른다.",
+  "impl_target_map": {
+    "CEO_APP": "your-org/ceo-client",
+    "TALK_CEO": "your-org/ceo-client",
+    "ZB": "your-org/your-web",
+    "WWW": "your-org/your-web"
+  },
+  "_debate_roles": "토론 역할별 엔진. 두 엔진이 갈려야 반대신문이 성립한다.",
+  "debate_roles": { "proposer": "claude", "critic": "codex" },
+
+  "_impl_branch_template": "브랜치 이름. {display}=PH-1767, {slug}=제목 슬러그. 대상 repo 관례를 따를 것(예: feature/PH-1682).",
+  "impl_branch_template": "feature/{display}-{slug}",
+  "impl_setup_timeout": 1800,
+
+  "_issues": "(선택) 작업 진입점 — 할당된 GitHub 이슈를 triage 카드로 올린다. issue_repos가 비면 이 기능은 꺼진다.",
+  "issue_repos": ["your-org/product-hub"],
+  "_issue_assignee": "gh --assignee 값. '@me'면 내게 할당된 것만. 비우면 필터 없음(대량 주의).",
+  "issue_assignee": "@me",
+  "_issue_title_prefixes": "제목 태그로 추가 필터(예: [\"[FE]\"]). 비우면 필터 없음.",
+  "issue_title_prefixes": [],
+  "_issue_display_prefix": "카드에 보일 별칭 접두어. repo -> prefix (PH-1767처럼 보인다).",
+  "issue_display_prefix": { "your-org/product-hub": "PH" },
+
   "_allowlist": "리뷰 대상 repo (owner/repo). 본인이 gh로 접근 가능한 repo만.",
   "allowlist": [
     "your-org/your-repo"
@@ -65,10 +101,11 @@
 
   "gh_bin": "gh",
   "claude_bin": "claude",
-  "claude_model": "claude-opus-4-8",
+  "claude_model": "claude-opus-5",
   "claude_effort": "xhigh",
   "codex_bin": "codex",
   "codex_model": null,
+  "_codex_model_note": "null 이면 ~/.codex/config.toml 의 기본 모델을 따른다(현재 gpt-6-astra). 특정 모델로 고정할 때만 값을 넣는다.",
   "default_review_engine": "codex",
 
   "worktree_dir": "worktrees",

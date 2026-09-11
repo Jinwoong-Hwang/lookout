@@ -238,15 +238,71 @@ def set_status(c, card_id: int, status: str, blocked=None, assignee=None):
         )
 
 
+def gate(c, card, to_status: str, blocked=None, event: str = None, detail=None) -> bool:
+    """사람 게이트 전이 — 현재 상태를 조건에 넣어 한 번에 바꾼다(CAS).
+
+    읽고→검사하고→쓰는 세 단계로 하면 대시보드가 ThreadingHTTPServer 이고
+    connect() 가 autocommit(아래 connect 참고)이라, 같은 카드에 대한 두 요청이
+    둘 다 검사를 통과해 게이트가 두 번 열린다(중복 클릭·낡은 탭). UPDATE 의 WHERE
+    에 status 를 넣으면 두 번째는 rowcount 0 이 되어 막힌다.
+
+    막혔으면 gate_stale 을 남긴다 — 사람이 눌렀는데 아무 일도 없는 것이 최악이다."""
+    cur = card["status"]
+    if blocked is None:
+        cur_row = c.execute(
+            "UPDATE cards SET status=?, updated_at=? WHERE id=? AND status=?",
+            (to_status, now(), card["id"], cur))
+    else:
+        cur_row = c.execute(
+            "UPDATE cards SET status=?, blocked=?, updated_at=? WHERE id=? AND status=?",
+            (to_status, blocked, now(), card["id"], cur))
+    if cur_row.rowcount != 1:
+        actual = c.execute("SELECT status FROM cards WHERE id=?", (card["id"],)).fetchone()
+        log_event(c, "gate_stale", card["key"],
+                  {"to": to_status, "expected": cur,
+                   "actual": actual["status"] if actual else None})
+        return False
+    if event:
+        log_event(c, event, card["key"], detail)
+    return True
+
+
 def set_engine(c, card_id: int, engine: str):
     c.execute("UPDATE cards SET engine=?, updated_at=? WHERE id=?", (engine, now(), card_id))
 
 
-def cards_in(c, statuses):
+def cards_in(c, statuses, kind=None):
+    """Cards sitting in the given lanes, oldest-touched first.
+
+    이 함수는 status만 본다. 그래서 새 kind가 기존 상태 이름을 하나라도 재사용하면
+    그 카드가 남의 스테이지(예: reviewer.process)로 조용히 들어간다. 호출부가 자기
+    kind를 넘겨 거르는 것이 유일한 구조적 방어이므로 스테이지 호출은 kind를 명시한다.
+    """
     q = ",".join("?" * len(statuses))
+    if kind is None:
+        return c.execute(
+            f"SELECT * FROM cards WHERE status IN ({q}) ORDER BY updated_at ASC", statuses
+        ).fetchall()
     return c.execute(
-        f"SELECT * FROM cards WHERE status IN ({q}) ORDER BY updated_at ASC", statuses
+        f"SELECT * FROM cards WHERE status IN ({q}) AND kind=? ORDER BY updated_at ASC",
+        (*statuses, kind),
     ).fetchall()
+
+
+def merge_payload(c, card_id: int, patch: dict) -> dict:
+    """payload(JSON)에 키를 병합한다.
+
+    한 카드의 payload를 poller(제목·라벨)·대시보드(추가 지시)·워커(스레드 id)가 각각
+    다른 키로 쓴다. 통째로 덮으면 서로의 값을 지우므로 항상 병합한다."""
+    row = c.execute("SELECT payload FROM cards WHERE id=?", (card_id,)).fetchone()
+    try:
+        cur = json.loads(row["payload"]) if row and row["payload"] else {}
+    except (TypeError, ValueError):
+        cur = {}
+    cur.update(patch)
+    c.execute("UPDATE cards SET payload=?, updated_at=? WHERE id=?",
+              (json.dumps(cur, ensure_ascii=False), now(), card_id))
+    return cur
 
 
 # ---- seen heads (ADR-003 onboarding backfill skip) ------------------------
