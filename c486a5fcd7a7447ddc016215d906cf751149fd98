@@ -1,0 +1,25 @@
+src/claude_runner.py
+  h_03b13cada2edad 96-109,111-112
+src/dashboard.py
+  h_03b13cada2edad 978,1035-1052,1138-1139,1149-1150,1152-1153,1378,1391,1401,1410
+src/debate_worker.py
+  h_03b13cada2edad 211
+src/engines.py
+  h_03b13cada2edad 58-60
+src/impl_worker.py
+  h_03b13cada2edad 147
+tests/test_dashboard_issue_actions.py
+  h_03b13cada2edad 762-789
+tests/test_parse_json.py
+  h_03b13cada2edad 56-79
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "c486a5fcd7a7447ddc016215d906cf751149fd98",
+  "prompts": {},
+  "humans": {
+    "h_03b13cada2edad": {
+      "author": "woong@zigbang.com"
+    }
+  }
+}
