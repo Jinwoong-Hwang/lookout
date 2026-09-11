@@ -122,18 +122,36 @@ class VerifyOutcomeTest(_Base):
         self.assertEqual(self._card()["status"], "implementing")   # failed 가 아니다
         self.assertIn("impl_rework", self._events())
 
-    def test_round_cap_hands_it_to_the_human_not_to_failed(self):
-        """엔진 불일치는 실패가 아니다 — 커밋도 검증 의견도 있다. failed 로 보내면
-        크래시처럼 보이고 사람이 그 diff 를 판단할 기회를 잃는다."""
+    def test_round_cap_goes_to_the_review_gate_not_the_pr_gate(self):
+        """PR 승인 대기는 '올릴 준비가 됐다'는 뜻이어야 한다. 엔진이 합의하지 못한
+        카드를 같은 레인에 두면 배지 하나로 구분해야 하고, 사람이 놓친다."""
         db.merge_payload(self.c, self.card_id, {"impl_rounds": impl_verifier.MAX_IMPL_ROUNDS})
         engines.run_json = lambda *_a, **_k: {"approved": False,
                                              "blocking": [{"file": "a", "problem": "b"}]}
         impl_verifier.process(self.c, self._card())
         card = self._card()
-        self.assertEqual(card["status"], "pr_blocked")
+        self.assertEqual(card["status"], "verify_blocked")
         self.assertEqual(card["blocked"], 1)
-        self.assertTrue(self._payload()["verify_exhausted"])   # 미통과 표식
+        self.assertTrue(self._payload()["verify_exhausted"])
         self.assertIn("impl_rounds_exhausted", self._events())
+
+    def test_passing_verification_is_the_only_way_into_the_pr_gate(self):
+        engines.run_json = lambda *_a, **_k: {"approved": True, "summary": "ok"}
+        impl_verifier.process(self.c, self._card())
+        self.assertEqual(self._card()["status"], "pr_blocked")
+
+    def test_reverify_only_does_not_spend_an_implementation_round(self):
+        """사람이 '다시 검증'만 요청하면 새 구현이 없다 — 라운드를 쓰거나
+        구현으로 되돌리면 안 되고 검토 게이트로 돌아와야 한다."""
+        db.merge_payload(self.c, self.card_id, {"impl_rounds": 1, "reverify_only": True})
+        engines.run_json = lambda *_a, **_k: {"approved": False,
+                                             "blocking": [{"file": "a", "problem": "b"}]}
+        impl_verifier.process(self.c, self._card())
+        payload = self._payload()
+        self.assertEqual(self._card()["status"], "verify_blocked")
+        self.assertEqual(payload["impl_rounds"], 1)        # 그대로
+        self.assertFalse(payload["reverify_only"])         # 소비됨
+        self.assertIn("reverify_done", self._events())
 
     def test_passing_verification_clears_the_exhausted_mark(self):
         db.merge_payload(self.c, self.card_id, {"verify_exhausted": True})

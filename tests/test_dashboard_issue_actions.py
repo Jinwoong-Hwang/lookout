@@ -889,15 +889,86 @@ class PrGateReworkTest(unittest.TestCase):
         self.assertIn("function requestChanges", dashboard.HTML)
 
 
-class ExhaustedVerificationIsVisibleTest(unittest.TestCase):
-    """검증 미통과로 사람에게 올라온 카드를, 통과한 카드와 똑같이 보여주면
-    사람이 블로커가 남은 줄 모르고 승인한다."""
+class ReviewGateIsSeparateTest(unittest.TestCase):
+    """PR 승인 대기는 '올릴 준비가 됐다'는 뜻이어야 한다 — 검증 미통과는 다른 레인."""
 
-    def test_card_and_modal_warn_about_the_unresolved_blockers(self):
-        self.assertIn("⚖️ 엔진 합의 실패", dashboard.HTML)
-        self.assertIn("⚠️ 미통과인데 승인", dashboard.HTML)
-        self.assertIn("승인하면 블로커가 남은 채로 PR 이 올라갑니다", dashboard.HTML)
+    def test_review_gate_lane_exists_between_verify_and_pr(self):
+        lanes = [k for k, _ in dashboard.WORK_LANES]
+        self.assertEqual(lanes[lanes.index("impl_verify") + 1], "verify_blocked")
+        self.assertEqual(lanes[lanes.index("verify_blocked") + 1], "pr_blocked")
+
+    def test_review_gate_offers_three_paths(self):
+        for label in ("↩︎ 수정 요청", "🔁 다시 검증", "⚠️ 그래도 PR 로"):
+            self.assertIn(label, dashboard.HTML)
+        for fn in ("function rerunVerify", "function verifyOverride"):
+            self.assertIn(fn, dashboard.HTML)
+
+    def test_override_is_marked_on_the_pr_gate(self):
+        self.assertIn("⚠️ 미통과인데 PR 올리기", dashboard.HTML)
+        self.assertIn("검증 미통과를 감수하고 넘어온 카드", dashboard.HTML)
 
     def test_board_row_carries_the_flag(self):
         self.assertIn('"verify_exhausted": bool(meta.get("verify_exhausted"))',
                       open("src/dashboard.py", encoding="utf-8").read())
+
+
+class ReviewGateActionsTest(unittest.TestCase):
+    """검토 게이트의 세 갈래가 실제로 동작해야 한다."""
+
+    def setUp(self):
+        self.c = sqlite3.connect(":memory:")
+        self.c.row_factory = sqlite3.Row
+        self.c.executescript(db.SCHEMA)
+        self.c.execute("ALTER TABLE cards ADD COLUMN engine TEXT")
+        self.saved = {"connect": dashboard.db.connect, "kick": dashboard.kick_tick}
+
+        @contextlib.contextmanager
+        def fake_connect():
+            yield self.c
+
+        dashboard.db.connect = fake_connect
+        dashboard.kick_tick = lambda: None
+        self.key = keys.issue_key(REPO, 1816)
+        self.cid = db.upsert_card(
+            self.c, self.key, "issue", REPO, 1816, status="verify_blocked", blocked=1,
+            payload={"display": "PH-1816", "title": "t", "branch": "feature/PH-1816",
+                     "impl_rounds": 3, "verify_exhausted": True,
+                     "verify": {"approved": False,
+                                "blocking": [{"file": "a.ts", "line": "1",
+                                              "problem": "깨짐", "fix": "가드"}]}})
+
+    def tearDown(self):
+        dashboard.db.connect = self.saved["connect"]
+        dashboard.kick_tick = self.saved["kick"]
+        self.c.close()
+
+    def _card(self):
+        return db.get_card(self.c, self.key)
+
+    def _payload(self):
+        return json.loads(self._card()["payload"])
+
+    def test_rerun_verify_goes_back_to_verification_with_a_flag(self):
+        self.assertTrue(dashboard.do_action("rerun_verify", self.cid))
+        self.assertEqual(self._card()["status"], "impl_verify")
+        self.assertTrue(self._payload()["reverify_only"])
+        self.assertEqual(self._payload()["impl_rounds"], 3)   # 라운드 소비 없음
+
+    def test_override_moves_to_the_pr_gate_and_is_recorded(self):
+        self.assertTrue(dashboard.do_action("verify_override", self.cid))
+        card = self._card()
+        self.assertEqual(card["status"], "pr_blocked")
+        self.assertEqual(card["blocked"], 1)
+        self.assertTrue(self._payload()["verify_override"])
+        types = [r["type"] for r in self.c.execute("SELECT type FROM events").fetchall()]
+        self.assertIn("operator_verify_override", types)
+
+    def test_request_changes_works_from_the_review_gate_too(self):
+        self.assertTrue(dashboard.do_action("request_changes", self.cid, text=""))
+        self.assertEqual(self._card()["status"], "implementing")
+        self.assertIn("a.ts:1", self._payload()["feedback"])
+
+    def test_these_actions_only_apply_at_the_review_gate(self):
+        db.set_status(self.c, self.cid, "pr_blocked")
+        self.assertFalse(dashboard.do_action("rerun_verify", self.cid))
+        self.assertFalse(dashboard.do_action("verify_override", self.cid))

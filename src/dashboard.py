@@ -58,6 +58,7 @@ WORK_LANES = [
     ("spec_blocked", "🧑‍⚖️ 설계 승인 대기"),
     ("implementing", "🛠 구현 중"),
     ("impl_verify", "🧾 구현 검증"),
+    ("verify_blocked", "⚖️ 검토 필요"),
     ("pr_blocked", "🔒 PR 승인 대기"),
     ("pr_opening", "🚀 PR 올리는 중"),
     ("done", "🏁 완료"),
@@ -119,6 +120,7 @@ def build_board():
                     "impl": meta.get("impl") or {},
                     "verify": meta.get("verify") or {},
                     "verify_exhausted": bool(meta.get("verify_exhausted")),
+                    "verify_override": bool(meta.get("verify_override")),
                     "agreement": meta.get("agreement") or {},
                     "spec_amendment": meta.get("spec_amendment", ""),
                     "topic": meta.get("topic", ""),
@@ -267,6 +269,8 @@ EVENT_LABELS = {
     "impl_verify_no_branch": "브랜치 정보 없음", "impl_verify_empty_diff": "diff 없음",
     "operator_pr_approved": "PR 승인(사람)",
     "operator_request_changes": "수정 요청(사람) — 구현으로 되돌림",
+    "operator_rerun_verify": "다시 검증(사람)", "reverify_done": "재검증 완료",
+    "operator_verify_override": "검증 미통과인데 PR 로(사람)",
     "debate_turn_started": "토론 턴 시작", "debate_turn": "토론 턴",
     "debate_finished": "토론 종료", "debate_engine_missing": "엔진 없음(토론 불가)",
     "operator_spec_approved": "설계 승인(사람)", "operator_spec_rejected": "설계 반려(사람)",
@@ -408,7 +412,7 @@ def do_action(action, card_id, engine="claude", text=None, repo=None):
                 return False
         elif action == "request_changes" and card["kind"] == "issue":
             # PR 게이트에서 되돌리는 경로. 사람이 본 diff 의 문제를 구현자에게 넘긴다.
-            if card["status"] != "pr_blocked":
+            if card["status"] not in ("pr_blocked", "verify_blocked"):
                 return False
             note = (text or "").strip()
             meta_now = json.loads(card["payload"]) if card["payload"] else {}
@@ -432,6 +436,22 @@ def do_action(action, card_id, engine="claude", text=None, repo=None):
                            event="operator_request_changes", detail={"note": note[:200]}):
                 return False
             kick = True
+        elif action == "rerun_verify" and card["kind"] == "issue":
+            # 같은 커밋을 다시 검증한다. 새 구현이 없으므로 라운드를 쓰지 않는다.
+            if card["status"] != "verify_blocked":
+                return False
+            db.merge_payload(c, card["id"], {"reverify_only": True})
+            if not db.gate(c, card, "impl_verify", blocked=0, event="operator_rerun_verify"):
+                return False
+            kick = True
+        elif action == "verify_override" and card["kind"] == "issue":
+            # 검증이 통과하지 못했는데 사람이 감수하고 PR 게이트로 넘긴다.
+            if card["status"] != "verify_blocked":
+                return False
+            db.merge_payload(c, card["id"], {"verify_override": True})
+            if not db.gate(c, card, "pr_blocked", blocked=1,
+                           event="operator_verify_override"):
+                return False
         elif action == "unblock" and card["kind"] == "issue":
             if card["status"] != "pr_blocked":
                 return False
@@ -955,7 +975,7 @@ const STATUS_META={
   approving:{c:'#a78bfa',ko:'승인중'}, done:{c:'#6b7688',ko:'완료'},
   failed:{c:'#fb7185',ko:'실패'},
   spec:{c:'#a78bfa',ko:'설계토론'}, spec_blocked:{c:'#a78bfa',ko:'설계승인대기'}, implementing:{c:'#fbbf24',ko:'구현중'},
-  impl_verify:{c:'#fbbf24',ko:'구현검증'}, pr_blocked:{c:'#a78bfa',ko:'PR승인대기'},
+  impl_verify:{c:'#fbbf24',ko:'구현검증'}, verify_blocked:{c:'#fb7185',ko:'검토필요'}, pr_blocked:{c:'#a78bfa',ko:'PR승인대기'},
   pr_opening:{c:'#a78bfa',ko:'PR생성중'}};
 function smeta(s){return STATUS_META[s]||{c:'#6b7688',ko:s};}
 function ago(ts){if(!ts)return '';const s=Math.max(0,Date.now()/1000-ts);
@@ -1148,7 +1168,7 @@ function issueTile(c){
   const v=c.verify||{};
   const nb=(v.blocking||[]).length;
   const vPill=v.engine?`<span class="pill" style="${pill(v.approved?'#4ade80':'#fb7185')}">🧾 ${esc(v.engine)} ${v.approved?'통과':'블로커 '+nb}</span>`:'';
-  const exPill=c.verify_exhausted?`<span class="pill" style="${pill('#fbbf24')}">⚖️ 엔진 합의 실패</span>`:'';
+  const exPill=c.verify_override?`<span class="pill" style="${pill('#fbbf24')}">⚠️ 미통과 감수</span>`:'';
   const roundPill=(c.rounds>1)?`<span class="pill">${c.rounds}R</span>`:'';
   const RUNNING=['spec','implementing','impl_verify','pr_opening'];
   const ag=c.agreement||{};
@@ -1190,14 +1210,26 @@ function issueTile(c){
       </div>
       <div class="rev"><button onclick="rejectSpec(event,${c.id})">↩︎ 반려</button></div>
     </div>`;
+  }else if(c.status==='verify_blocked'){
+    btns=`<div class="errline">엔진끼리 합의하지 못했습니다 — 남은 블로커를 직접 판단하세요</div>
+      <div class="instr">
+      <textarea id="spec${c.id}" placeholder="수정 요청 (선택) — 비워두면 검증이 남긴 지적을 그대로 넘깁니다"
+        oninput="draft(this)" onclick="event.stopPropagation()"
+        onkeydown="event.stopPropagation()">${esc(dval('spec'+c.id,''))}</textarea>
+      <div class="rev">
+        <button class="claude" onclick="requestChanges(event,${c.id})">↩︎ 수정 요청</button>
+        <button class="codex" onclick="rerunVerify(event,${c.id})">🔁 다시 검증</button>
+      </div>
+      <div class="rev"><button onclick="verifyOverride(event,${c.id})">⚠️ 그래도 PR 로</button></div>
+      </div>`;
   }else if(c.status==='pr_blocked'){
-    if(c.verify_exhausted)btns=`<div class="errline warn">검증을 통과하지 못한 채 되돌림 예산이 끝났습니다 — 승인하면 블로커가 남은 채로 PR 이 올라갑니다</div>`;
+    if(c.verify_override)btns=`<div class="errline warn">검증 미통과를 감수하고 넘어온 카드입니다 — 블로커가 남아 있습니다</div>`;
     btns+=`<div class="instr">
       <textarea id="spec${c.id}" placeholder="수정 요청 (선택) — 비워두면 검증이 남긴 지적을 그대로 넘깁니다"
         oninput="draft(this)" onclick="event.stopPropagation()"
         onkeydown="event.stopPropagation()">${esc(dval('spec'+c.id,''))}</textarea>
       <div class="rev">
-        <button class="claude" onclick="approvePr(event,${c.id})">${c.verify_exhausted?'⚠️ 미통과인데 승인':'🚀 PR 올리기 승인'}</button>
+        <button class="claude" onclick="approvePr(event,${c.id})">${c.verify_override?'⚠️ 미통과인데 PR 올리기':'🚀 PR 올리기 승인'}</button>
         <button class="codex" onclick="requestChanges(event,${c.id})">↩︎ 수정 요청</button>
       </div></div>`;
   }
@@ -1367,12 +1399,16 @@ function openIssueModal(c){
   }
   if(c.pr_dryrun&&!c.pr_url)
     html+=`<div class="lbl">PR (dry-run)</div><div class="pre">dry_run_pr=true — 실제 PR은 올라가지 않았습니다. config에서 false로 바꾸면 draft PR이 생성됩니다.</div>`;
-  if(c.verify_exhausted)
-    html+=`<div class="errline warn">⚖️ 엔진끼리 합의하지 못한 채 되돌림 예산이 끝났습니다. 위 블로커를 직접 판단하세요 — 승인하면 그대로 PR 이 올라갑니다.</div>`;
+  if(c.status==='verify_blocked')
+    html+=`<div class="errline warn">⚖️ 엔진끼리 합의하지 못했습니다. 위 블로커를 직접 판단하세요.</div>`
+      +`<div class="btns"><button class="go" onclick="requestChanges(event,${c.id})">↩︎ 수정 요청</button>`
+      +`<button onclick="rerunVerify(event,${c.id})">🔁 다시 검증</button>`
+      +`<button onclick="verifyOverride(event,${c.id})">⚠️ 그래도 PR 로</button></div>`
+      +`<div class="sub">수정 요청은 카드 입력칸의 내용을 구현자에게 넘깁니다. 비워두면 위 블로커가 그대로 갑니다.</div>`;
   if(c.status==='pr_blocked')
-    html+=`<div class="btns"><button class="go" onclick="approvePr(event,${c.id})">${c.verify_exhausted?'⚠️ 미통과인데 승인':'🚀 PR 올리기 승인'}</button>`
-      +`<button onclick="requestChanges(event,${c.id})">↩︎ 수정 요청</button></div>`
-      +`<div class="sub">수정 요청은 카드의 입력칸에 쓴 내용을 구현자에게 넘깁니다.</div>`;
+    html+=`${c.verify_override?'<div class="errline warn">검증 미통과를 감수하고 넘어온 카드입니다.</div>':''}`
+      +`<div class="btns"><button class="go" onclick="approvePr(event,${c.id})">${c.verify_override?'⚠️ 미통과인데 PR 올리기':'🚀 PR 올리기 승인'}</button>`
+      +`<button onclick="requestChanges(event,${c.id})">↩︎ 수정 요청</button></div>`;
   m.innerHTML=html;document.getElementById('ov').classList.add('show');
 }
 function openFeedbackModal(f){
@@ -1453,6 +1489,17 @@ async function resumeDebate(e,id){e.stopPropagation();
   load();}
 function rejectSpec(e,id){e.stopPropagation();
   if(confirm('설계를 반려하고 대기로 되돌릴까요? 토론 기록은 보관됩니다.'))act(e,'reject_spec',id);}
+async function rerunVerify(e,id){e.stopPropagation();
+  if(!confirm('같은 커밋을 다시 검증할까요? (구현은 바뀌지 않고 검증만 재실행합니다)'))return;
+  showToast('다시 검증 🔁',true);
+  const j=await sendAction({action:'rerun_verify',card_id:id});
+  if(j.ok===false)showToast('재검증할 수 없습니다',false);
+  load();}
+async function verifyOverride(e,id){e.stopPropagation();
+  if(!confirm('검증이 통과하지 못한 상태 그대로 PR 승인 단계로 넘길까요? 블로커는 PR 본문에 남습니다.'))return;
+  const j=await sendAction({action:'verify_override',card_id:id});
+  if(j.ok===false)showToast('넘길 수 없습니다',false);
+  load();}
 async function requestChanges(e,id){e.stopPropagation();
   const t=specText(id);
   if(!confirm(t?'이 지적을 넘겨 구현 단계로 되돌릴까요? — '+t

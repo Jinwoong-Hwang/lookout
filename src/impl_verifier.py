@@ -90,6 +90,7 @@ def process(c, card):
     with worktree.impl_session(repo):
         wt = worktree.make_impl_worktree(repo, branch, setup=False)
         verdict = engines.run_json(prompt, engine=vengine, cwd=wt, add_dir=wt)
+    reverify_only = bool(meta.get("reverify_only"))
     blocking = verdict.get("blocking") or []
     out_of_scope = verdict.get("out_of_scope") or []
     approved = bool(verdict.get("approved")) and not blocking
@@ -105,9 +106,19 @@ def process(c, card):
                   "blocking": len(blocking), "out_of_scope": len(out_of_scope)})
 
     if approved:
-        # 사람 승인 게이트 — 여기서 멈춘다. PR은 사람이 누른 뒤에 올라간다.
-        db.merge_payload(c, card["id"], {"verify_exhausted": False})
+        # 검증을 통과했다 — 여기서부터가 "PR 올릴 준비가 됐다"는 뜻이다.
+        db.merge_payload(c, card["id"], {"verify_exhausted": False, "reverify_only": False})
         db.set_status(c, card["id"], "pr_blocked", blocked=1)
+        return
+
+    if reverify_only:
+        # 사람이 '다시 검증'만 요청한 경우 — 새 구현이 없었으므로 라운드를 쓰지 않고
+        # 결과만 갱신해 검토 게이트로 되돌린다.
+        db.merge_payload(c, card["id"], {
+            "reverify_only": False, "verify_exhausted": True,
+            "feedback": f"[검증 미해결] {blockers_text(verdict)}"})
+        db.set_status(c, card["id"], "verify_blocked", blocked=1)
+        db.log_event(c, "reverify_done", card["key"], {"blocking": len(blocking)})
         return
 
     rounds = int(meta.get("impl_rounds") or 1)
@@ -125,13 +136,15 @@ def process(c, card):
             "verify_exhausted": True,
             "feedback": f"[검증 미해결] {blockers_text(verdict)}",
         })
-        db.set_status(c, card["id"], "pr_blocked", blocked=1)
+        # PR 게이트가 아니라 **검토 게이트**다. PR 승인 대기는 "올릴 준비가 됐다"는
+        # 뜻이어야 하고, 여기는 "엔진이 합의하지 못했으니 사람이 봐야 한다"이다.
+        db.set_status(c, card["id"], "verify_blocked", blocked=1)
         db.log_event(c, "impl_rounds_exhausted", card["key"],
-                     {"rounds": rounds, "blocking": len(blocking), "to": "pr_blocked"})
+                     {"rounds": rounds, "blocking": len(blocking), "to": "verify_blocked"})
         notify.send(
             f"Lookout — {meta.get('display') or card['pr_number']} 검증 미통과",
             f"엔진끼리 합의 못 함 · 블로커 {len(blocking)}건 · {rounds}라운드",
-            subtitle="사람이 판단해야 합니다 (승인/재요청/중단)",
+            subtitle="검토 필요 — 다시 검증 / 수정 요청 / 그래도 PR",
             group="lookout-impl",
         )
         return
