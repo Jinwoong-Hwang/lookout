@@ -14,8 +14,8 @@ import ipaddress
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from . import (commenter, db, engines, feedback, ghclient, keys, poller, profiles,
-               router, worktree)
+from . import (commenter, db, engines, feedback, ghclient, impl_verifier, keys,
+               poller, profiles, router, worktree)
 from .config import CFG
 
 
@@ -411,12 +411,21 @@ def do_action(action, card_id, engine="claude", text=None, repo=None):
             if card["status"] != "pr_blocked":
                 return False
             note = (text or "").strip()
-            if not note:
-                return False
             meta_now = json.loads(card["payload"]) if card["payload"] else {}
-            prev = (meta_now.get("feedback") or "").strip()
+            verify = meta_now.get("verify") or {}
+            # 검증이 남긴 미해결 지적은 사람이 다시 타이핑할 이유가 없다 — 비워두면
+            # 그대로 넘어간다. 사람이 쓴 것은 그 위에 얹혀 우선한다.
+            auto = "" if verify.get("approved") else impl_verifier.blockers_text(verify)
+            if not note and not auto:
+                return False
+            parts = []
+            if auto:
+                parts.append(f"[검증 미해결] {auto}")
+            if note:
+                parts.append(f"[운영자 수정 요청] {note}")
+            # 덮어쓴다 — 이전 라운드의 (이미 고친) 지적을 다시 보내면 되돌림이 돈다
             db.merge_payload(c, card["id"], {
-                "feedback": (f"{prev}\n\n" if prev else "") + f"[운영자 수정 요청] {note}",
+                "feedback": "\n\n".join(parts),
                 "impl_bonus": int(meta_now.get("impl_bonus") or 0) + IMPL_BONUS,
             })
             if not db.gate(c, card, "implementing", blocked=0,
@@ -1184,7 +1193,7 @@ function issueTile(c){
   }else if(c.status==='pr_blocked'){
     if(c.verify_exhausted)btns=`<div class="errline warn">검증을 통과하지 못한 채 되돌림 예산이 끝났습니다 — 승인하면 블로커가 남은 채로 PR 이 올라갑니다</div>`;
     btns+=`<div class="instr">
-      <textarea id="spec${c.id}" placeholder="수정 요청 (선택) — 무엇이 잘못됐는지 쓰면 구현 단계로 되돌아갑니다"
+      <textarea id="spec${c.id}" placeholder="수정 요청 (선택) — 비워두면 검증이 남긴 지적을 그대로 넘깁니다"
         oninput="draft(this)" onclick="event.stopPropagation()"
         onkeydown="event.stopPropagation()">${esc(dval('spec'+c.id,''))}</textarea>
       <div class="rev">
@@ -1446,8 +1455,8 @@ function rejectSpec(e,id){e.stopPropagation();
   if(confirm('설계를 반려하고 대기로 되돌릴까요? 토론 기록은 보관됩니다.'))act(e,'reject_spec',id);}
 async function requestChanges(e,id){e.stopPropagation();
   const t=specText(id);
-  if(!t){showToast('무엇을 고쳐야 하는지 적어주세요',false);return;}
-  if(!confirm('이 지적을 넘겨 구현 단계로 되돌릴까요? — '+t))return;
+  if(!confirm(t?'이 지적을 넘겨 구현 단계로 되돌릴까요? — '+t
+               :'검증이 남긴 지적을 그대로 넘겨 구현 단계로 되돌릴까요?'))return;
   showToast('수정 요청 ↩︎ 구현으로 되돌립니다',true);
   const j=await sendAction({action:'request_changes',card_id:id,text:t});
   if(j.ok===false)showToast('되돌릴 수 없습니다',false);
