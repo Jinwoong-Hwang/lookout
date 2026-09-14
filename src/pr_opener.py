@@ -5,9 +5,42 @@ PR은 생성 시점부터 draft다. 대상 저장소는 저장소 전체가 코�
 이미 걸린 요청은 회수되지 않는다. ready 전환은 사람이 한다.
 """
 import json
+import re
 
 from . import db, ghclient, worktree
 from .config import CFG
+
+
+# 팀 관례는 Conventional Commits 다 — 실측(zigbang-client 최근 머지):
+#   fix(PH-1609): PC웹 매물리스트 랜딩에서 utm 유실 수정
+#   chore(PH-1609): zigbang-www 테스트를 CI 게이트에 연결
+# 우리만 `[PH-1816] …` 로 올리면 PR 목록에서 혼자 튄다.
+PR_TYPES = ("fix", "feat", "refactor", "chore", "docs", "test",
+            "perf", "style", "build", "ci")
+TITLE_MAX = 72
+
+
+def _title(meta: dict, display: str) -> str:
+    impl = meta.get("impl") or {}
+    kind = (impl.get("pr_type") or "").strip().lower()
+    if kind not in PR_TYPES:
+        kind = "fix"   # 엔진이 엉뚱한 값을 주면 형식을 깨느니 가장 흔한 쪽으로
+    prefix = f"{kind}({display}): "
+    subject = (meta.get("title") or "").strip()
+    # 이슈 제목의 [FE][CEO_APP] 같은 태그는 scope 가 이미 하는 일이라 뺀다
+    subject = re.sub(r"^(\s*\[[^\]]+\])+\s*", "", subject)
+    room = TITLE_MAX - len(prefix)
+    if len(subject) > room:
+        subject = subject[:max(room - 1, 1)].rstrip() + "…"
+    return prefix + (subject or display)
+
+
+def _checklist() -> list[str]:
+    """ready 전환 전에 **사람이** 확인할 것. 엔진의 자기 보고(## 검증)와 다른 축이라
+    체크된 채로 내보내지 않는다 — 우리 PR 은 draft 로 나가고, 이 목록은 draft 를
+    ready 로 올리는 사람이 쓴다."""
+    return ["빌드 성공 확인", "린트/타입 체크 통과",
+            "관련 테스트 통과 또는 작성", "관련 문서 업데이트"]
 
 
 def _body(meta: dict, display: str) -> str:
@@ -15,11 +48,14 @@ def _body(meta: dict, display: str) -> str:
     verify = meta.get("verify") or {}
     lines = [f"이슈: {meta.get('url') or display}", ""]
     if impl.get("summary"):
-        lines += ["## 변경", impl["summary"], ""]
-    if meta.get("instruction"):
-        lines += ["## 운영자 지시", meta["instruction"], ""]
+        lines += ["## 변경 요약", impl["summary"], ""]
+    # '해볼 것'과 '정할 것'은 다른 목록이다. 한데 묶으면 리뷰어가 '무엇을 해봐야
+    # 하나'를 찾지 못하고, 결정 사항이 테스트 항목으로 위장된다.
+    todo = [q for q in (impl.get("manual_test") or []) if str(q).strip()]
+    if todo:
+        lines += ["## 테스트 방법"] + [f"- [ ] {q}" for q in todo] + [""]
     if impl.get("verification"):
-        lines += ["## 검증", impl["verification"], ""]
+        lines += ["## 검증 — 엔진이 실행함", impl["verification"], ""]
     if verify.get("summary"):
         engine = verify.get("engine", "")
         note = " (동일 엔진 폴백)" if verify.get("fallback") else ""
@@ -31,10 +67,15 @@ def _body(meta: dict, display: str) -> str:
         lines += ["## 설계 단계 미합의 — 리뷰에서 판단 필요"]
         lines += [f"- [ ] {u}" for u in unresolved]
         lines.append("")
-    for q in (impl.get("open_questions") or []):
-        lines.append(f"- [ ] 확인 필요: {q}")
+    if meta.get("instruction"):
+        lines += ["## 운영자 지시", meta["instruction"], ""]
+    decisions = [q for q in (impl.get("open_questions") or []) if str(q).strip()]
+    if decisions:
+        lines += ["## 남은 결정"] + [f"- [ ] {q}" for q in decisions] + [""]
     if impl.get("risk"):
-        lines += ["", f"위험: {impl['risk']}"]
+        lines += ["## 위험", impl["risk"], ""]
+    lines += ["## 체크리스트 (ready 전환 전 확인)"]
+    lines += [f"- [ ] {x}" for x in _checklist()]
     lines += ["", f"🤖 Lookout 이 {display} 를 구현했습니다. draft 로 올라갑니다."]
     return "\n".join(lines)
 
@@ -51,7 +92,7 @@ def process(c, card):
 
     parent = worktree.impl_parent(repo)
     base = worktree._impl_base_ref(parent, repo).replace("origin/", "")
-    title = f"[{display}] {(meta.get('title') or '').strip()[:80]}"
+    title = _title(meta, display)
     body = _body(meta, display)
 
     if CFG.get("dry_run_pr", True):

@@ -259,6 +259,55 @@ class PrOpenerTest(_Base):
         self.assertEqual(self.comments[0][0], REPO)
         self.assertIn("https://pr/1", self.comments[0][2])
 
+    def test_title_follows_the_team_convention(self):
+        """팀 관례는 Conventional Commits 다(실측: fix(PH-1609): …). 우리만
+        `[PH-1816] …` 로 올리면 PR 목록에서 혼자 튄다."""
+        pr_opener.CFG["dry_run_pr"] = False
+        db.merge_payload(self.c, self.card_id, {
+            "title": "[FE][CEO_APP] 401 에러시 사용자 정보 함께 전송",
+            "impl": {"summary": "고쳤다", "pr_type": "feat"}})
+        pr_opener.process(self.c, self._card())
+        title = self.created[0][3]
+        # scope 가 이슈 키를 들고 있으므로 제목의 [FE][CEO_APP] 태그는 뺀다
+        self.assertEqual(title, "feat(PH-1765): 401 에러시 사용자 정보 함께 전송")
+
+    def test_a_bogus_type_falls_back_instead_of_breaking_the_format(self):
+        pr_opener.CFG["dry_run_pr"] = False
+        db.merge_payload(self.c, self.card_id, {"impl": {"pr_type": "버그수정"}})
+        pr_opener.process(self.c, self._card())
+        self.assertTrue(self.created[0][3].startswith("fix(PH-1765): "))
+
+    def test_a_long_title_is_trimmed_to_stay_scannable(self):
+        pr_opener.CFG["dry_run_pr"] = False
+        db.merge_payload(self.c, self.card_id, {"title": "가" * 200})
+        pr_opener.process(self.c, self._card())
+        self.assertLessEqual(len(self.created[0][3]), pr_opener.TITLE_MAX)
+
+    def test_manual_tests_and_open_decisions_are_separate_lists(self):
+        """'해볼 것'과 '정할 것'을 한데 묶으면 리뷰어가 무엇을 해봐야 하는지
+        찾지 못하고, 결정 사항이 테스트 항목으로 위장된다."""
+        pr_opener.CFG["dry_run_pr"] = False
+        db.merge_payload(self.c, self.card_id, {"impl": {
+            "summary": "고쳤다",
+            "manual_test": ["www 에서 팝업이 실제로 뜨는지"],
+            "open_questions": ["부모 게이트를 조회 기반으로 바꿀지"]}})
+        pr_opener.process(self.c, self._card())
+        body = self.created[0][4]
+        self.assertIn("## 테스트 방법", body)
+        self.assertIn("- [ ] www 에서 팝업이 실제로 뜨는지", body)
+        self.assertIn("## 남은 결정", body)
+        self.assertIn("- [ ] 부모 게이트를 조회 기반으로 바꿀지", body)
+        self.assertLess(body.index("## 테스트 방법"), body.index("## 남은 결정"))
+
+    def test_the_reviewer_checklist_is_never_pre_checked(self):
+        """엔진의 자기 보고(## 검증)와 다른 축이다 — 사람이 ready 로 올릴 때 쓴다."""
+        pr_opener.CFG["dry_run_pr"] = False
+        pr_opener.process(self.c, self._card())
+        body = self.created[0][4]
+        self.assertIn("## 체크리스트 (ready 전환 전 확인)", body)
+        self.assertIn("- [ ] 빌드 성공 확인", body)
+        self.assertNotIn("- [x]", body)
+
     def test_unresolved_design_items_reach_the_pr_body(self):
         """카드에만 두면 PR 리뷰어는 그 다툼이 있었다는 사실조차 모른다."""
         pr_opener.CFG["dry_run_pr"] = False
