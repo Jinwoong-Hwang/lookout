@@ -347,7 +347,8 @@ class IssueCardShapeTest(unittest.TestCase):
     def test_github_link_lives_in_the_modal(self):
         modal = dashboard.HTML[dashboard.HTML.index("function openIssueModal"):
                                dashboard.HTML.index("function openFeedbackModal")]
-        self.assertIn("GitHub 이슈", modal)
+        self.assertIn('target="_blank">이슈 ↗</a>', modal)
+        self.assertIn('target="_blank">PR ↗</a>', modal)
 
 
 class ProgressVisibilityTest(unittest.TestCase):
@@ -1137,6 +1138,45 @@ class ServedGlobalsTest(unittest.TestCase):
                 _re.search(rf"\b(?:const|let|var|function)\s+{name}\b", js)
                 or f"__{name}__" in js,
                 f"{name} 이 JS 에서 쓰이는데 선언도 주입도 없다 — 런타임에 죽는다")
+
+
+class ModalLayoutTest(unittest.TestCase):
+    """모달은 '읽고 결정하는' 문서다 — 머리(무엇인가)와 조작부(무엇을 할까)를
+    고정하고 근거만 스크롤해야, 블로커가 길어도 버튼이 화면 밖으로 안 밀린다."""
+
+    def setUp(self):
+        self.html = dashboard.HTML
+        self.modal = self.html[self.html.index("function openIssueModal"):
+                               self.html.index("function openFeedbackModal")]
+
+    def test_the_modal_has_three_fixed_zones(self):
+        for cls in ('class="mhead"', 'class="mbody"', 'class="mfoot"'):
+            self.assertIn(cls, self.modal)
+        self.assertIn("m.className='modal doc'", self.modal)
+        self.assertIn(".doc .mbody{", self.html)
+        self.assertIn("overflow-y:auto", self.html)
+
+    def test_every_gate_button_sits_in_the_action_zone(self):
+        """본문에 남으면 긴 블로커 아래로 밀려 스크롤해야 누를 수 있다."""
+        self.assertEqual(self.modal.count('f+=`<div class="btns">'), 5)
+        self.assertEqual(self.modal.count('h+=`<div class="btns">'), 0)
+
+    def test_other_modals_do_not_inherit_the_document_layout(self):
+        """#modal 은 하나를 돌려 쓴다 — doc 클래스가 남으면 리뷰 모달이 깨진다."""
+        self.assertEqual(self.html.count("m.className='modal';"), 2)
+
+    def test_the_failure_reason_is_not_clamped_in_the_modal(self):
+        """보드 행에서는 3줄로 자르지만, 모달에서 자르면 원인을 못 읽는다."""
+        self.assertIn("-webkit-line-clamp:3", self.html)          # 행/카드용
+        self.assertIn(".doc .errline{", self.html)
+        doc_rule = self.html[self.html.index(".doc .errline{"):]
+        self.assertIn("-webkit-line-clamp:none", doc_rule[:200])
+
+    def test_the_modal_says_why_it_is_your_turn(self):
+        """상태 이름만으로는 뭘 해야 하는지 모른다 — 한 줄로 먼저 말한다."""
+        self.assertIn('class="why', self.modal)
+        for st in ("verify_blocked", "spec_blocked", "pr_blocked", "failed", "triage"):
+            self.assertIn(f"{st}:['", self.modal.replace(" ", ""))
 
 
 if __name__ == "__main__":

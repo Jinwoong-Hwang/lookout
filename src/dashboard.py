@@ -916,6 +916,39 @@ background:transparent;border:none;padding:3px 5px;border-radius:6px;opacity:.4}
 .ov{position:fixed;inset:0;z-index:1000;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;padding:24px}
 .ov.show{display:flex}
 .modal{background:var(--panel);border:1px solid var(--line);border-radius:14px;max-width:720px;width:100%;max-height:86vh;overflow:auto;padding:22px}
+/* 이슈 모달은 '읽고 결정하는' 문서다 — 머리(무엇인가)와 조작부(무엇을 할까)를
+   고정하고 가운데 근거만 스크롤한다. 블로커가 길면 버튼이 화면 밖으로 밀려
+   끝까지 내려야 결정할 수 있었다. */
+.modal.doc{display:flex;flex-direction:column;padding:0;max-width:780px;max-height:88vh;overflow:hidden}
+.doc .mhead{flex:0 0 auto;padding:18px 24px 13px;border-bottom:1px solid var(--line)}
+.doc .mbody{flex:1 1 auto;min-height:0;overflow-y:auto;padding:16px 24px 22px}
+.doc .mfoot{flex:0 0 auto;padding:13px 24px 16px;border-top:1px solid var(--line);background:var(--panel2)}
+.doc .mhead h3{margin:0 0 7px;font-size:17px;line-height:1.4}
+.doc .mhead .num{color:var(--accent);font-weight:800;margin-right:7px}
+/* 왜 지금 당신 차례인지 — 한 줄로, 눈에 먼저 걸리게 */
+.doc .why{display:flex;gap:9px;align-items:flex-start;padding:11px 13px;border-radius:10px;
+margin:0 0 4px;font-size:13px;line-height:1.55;color:var(--ink);
+background:color-mix(in srgb,var(--warn) 12%,transparent);
+border:1px solid color-mix(in srgb,var(--warn) 38%,transparent)}
+.doc .why.bad{background:color-mix(in srgb,var(--bad) 12%,transparent);
+border-color:color-mix(in srgb,var(--bad) 38%,transparent)}
+/* 구획 제목 — 대문자 변환은 한글에 아무 일도 안 하고 자간만 벌린다 */
+.doc .lbl{display:flex;gap:8px;align-items:center;font-size:12.5px;font-weight:750;
+color:var(--ink);letter-spacing:0;text-transform:none;margin:22px 0 9px;
+padding-bottom:7px;border-bottom:1px solid var(--line)}
+.doc .lbl::before{content:"";flex:0 0 auto;width:3px;height:13px;border-radius:2px;background:var(--accent)}
+.doc .lbl2{font-size:12px;font-weight:700;color:var(--muted);margin:14px 0 4px}
+.doc .md{font-size:13.5px;line-height:1.75}
+.doc .pre{font-size:13px;line-height:1.7}
+.doc .finding{padding:13px 15px;margin:11px 0;border-radius:10px}
+.doc .finding .ft{font-family:ui-monospace,Menlo,monospace;font-size:12.5px;
+font-weight:700;color:var(--muted);margin-bottom:8px;word-break:break-all}
+/* 모달에서는 자르지 않는다 — 실패 사유가 3줄에서 잘리면 원인을 못 읽는다 */
+.doc .errline{font-size:13px;line-height:1.6;display:block;-webkit-line-clamp:none;
+word-break:break-word;margin-top:8px}
+.doc .instr{margin:0 0 9px}
+.doc .btns{margin-top:0;flex-wrap:wrap}
+.doc .sub{margin-top:8px;line-height:1.5}
 .modal h3{margin:0 0 6px;font-size:18px}
 .finding{border:1px solid var(--line);border-left:4px solid var(--dim);border-radius:11px;padding:14px;margin:12px 0;background:var(--panel2)}
 .finding .ft{font-weight:700;font-size:14px;margin-bottom:7px;color:var(--ink)}
@@ -1400,6 +1433,7 @@ function openModal(c){
       html+=`<div class="cmt">${esc(cm.body)}</div>${cm.url?`<div class="msub"><a href="${cm.url}" target="_blank">${esc(cm.url)}</a></div>`:`<div class="msub">${pending?'(dry-run · 미게시)':'(dry-run preview)'}</div>`}`});
     if(c.dryrun_pending)
       html+=`<div class="btns"><button class="go" onclick="publishDryRun(event,${c.id})">💬 dry-run 댓글 게시</button></div>`;}
+  m.className='modal';
   m.innerHTML=html;document.getElementById('ov').classList.add('show');
 }
 function openIssueModal(c){
@@ -1410,20 +1444,29 @@ function openIssueModal(c){
   const sec=(title,body,open)=>body?`<details class="sec"${open?' open':''}>`
       +`<summary><span>${title}</span></summary><div class="body">${body}</div></details>`:'';
 
-  let h=`<span class="close" onclick="closeM()">✕ 닫기</span>
-    <h3>${esc(c.display)} ${esc(c.title)}</h3>
-    <div class="msub">${esc(c.repo)}${(c.assignees||[]).length?' · '+esc((c.assignees||[]).join(', ')):''}
+  const head=`<span class="close" onclick="closeM()">✕ 닫기</span>
+    <h3><span class="num">${esc(c.display)}</span>${esc(c.title)||'(제목없음)'}</h3>
+    <div class="msub">${esc(c.repo===TOPIC_REPO?'주제 토론':c.repo)}${(c.assignees||[]).length?' · '+esc((c.assignees||[]).join(', ')):''}
       <span class="statuspill" style="${pill(sm.c)}">${sm.ko}</span>
-      ${c.mode?`<span class="pill">${c.mode==='debate'?'설계부터':c.mode==='debate_only'?'주제 토론':'바로 구현'}</span>`:''}</div>
-    <div class="mlink">${c.url?`<a href="${esc(c.url)}" target="_blank">GitHub 이슈 ↗</a>`:''}
-      ${c.pr_url?` · <a href="${esc(c.pr_url)}" target="_blank">PR ↗</a>`:''}</div>`;
+      ${c.mode?`<span class="pill">${c.mode==='debate'?'설계부터':c.mode==='debate_only'?'주제 토론':'바로 구현'}</span>`:''}
+      ${c.engine&&c.status!=='triage'?`<span class="pill">${esc(c.engine)}</span>`:''}
+      ${c.url?`<a href="${esc(c.url)}" target="_blank">이슈 ↗</a>`:''}
+      ${c.pr_url?`<a href="${esc(c.pr_url)}" target="_blank">PR ↗</a>`:''}</div>`;
 
   // ── 1. 지금 사람이 봐야 할 것 ─────────────────────────────
-  if(c.error)h+=`<div class="lbl">실패 사유</div><div class="errline">${esc(c.error)}</div>`;
-  if(c.status==='verify_blocked')
-    h+=`<div class="errline warn">⚖️ 엔진끼리 합의하지 못했습니다 — 아래 블로커를 직접 판단하세요</div>`;
+  // 왜 이 카드가 내 차례인지를 **한 줄로** 먼저 말한다. 근거는 그 아래다.
+  const WHY={
+    verify_blocked:['⚖️','엔진끼리 합의하지 못했습니다 — 아래 블로커를 직접 판단하세요',''],
+    spec_blocked:['🧑‍⚖️','설계가 나왔습니다 — 구현을 시작할지 결정하세요',''],
+    pr_blocked:['🔒','검증을 통과했습니다 — PR 로 올릴지 결정하세요',''],
+    failed:['⚠️','실패한 카드입니다 — 사유를 보고 재시도할지 정하세요','bad'],
+    triage:['📥','아직 시작하지 않은 이슈입니다 — 지시를 적고 방식을 고르세요',''],
+  }[c.status];
+  let h='';
+  if(WHY)h+=`<div class="why ${WHY[2]}"><span>${WHY[0]}</span><span>${WHY[1]}</span></div>`;
   if(c.verify_override)
-    h+=`<div class="errline warn">검증 미통과를 감수하고 넘어온 카드입니다</div>`;
+    h+=`<div class="why bad"><span>⚠️</span><span>검증 미통과를 감수하고 넘어온 카드입니다 — 블로커가 남아 있습니다</span></div>`;
+  if(c.error)h+=`<div class="lbl">실패 사유</div><div class="errline">${esc(c.error)}</div>`;
 
   const blk=(V.blocking||[]).map(b=>`<div class="finding" style="border-left-color:${stripe('#fb7185')}">
       <div class="ft">${esc(b.file||'')}${b.line?(':'+esc(b.line)):''}</div>
@@ -1451,31 +1494,32 @@ function openIssueModal(c){
     verify_blocked:['spec',"선택 — 수정 요청이면 구현자에게(비우면 남은 블로커 그대로), 다시 검증이면 검증자에게 '이 관점으로 보라'로 갑니다",''],
     pr_blocked:['spec','수정 요청 (선택) — 비워두면 검증이 남긴 지적을 그대로 넘깁니다',''],
   }[c.status];
+  let f='';
   if(INPUT)
-    h+=`<div class="instr"><textarea id="${INPUT[0]}${c.id}" placeholder="${esc(INPUT[1])}"
+    f+=`<div class="instr"><textarea id="${INPUT[0]}${c.id}" placeholder="${esc(INPUT[1])}"
         oninput="draft(this)">${esc(dval(INPUT[0]+c.id,INPUT[2]||''))}</textarea>`
       +(c.status==='spec_blocked'&&c.debate_only
         ?`<input id="trepo${c.id}" placeholder="구현할 저장소 (예: zigbang/ceo-client)"
             value="${esc(dval('trepo'+c.id,c.target_repo))}" oninput="draft(this)">`:'')
       +`</div>`;
   if(c.status==='triage')
-    h+=`<div class="btns"><button class="go" onclick="startWork(event,${c.id},'implement')">🛠 바로 구현</button>`
+    f+=`<div class="btns"><button class="go" onclick="startWork(event,${c.id},'implement')">🛠 바로 구현</button>`
       +`<button onclick="startWork(event,${c.id},'debate')">🗣 설계부터</button></div>`;
   if(c.status==='failed')
-    h+=`<div class="btns"><button class="go" onclick="act(event,'retry',${c.id})">↻ 재시도</button></div>`;
+    f+=`<div class="btns"><button class="go" onclick="act(event,'retry',${c.id})">↻ 재시도</button></div>`;
   if(c.status==='spec_blocked')
-    h+=`<div class="btns">${c.debate_only
+    f+=`<div class="btns">${c.debate_only
       ?`<button class="go" onclick="implementTopic(event,${c.id})">🛠 이 결론으로 구현</button><button onclick="approveSpec(event,${c.id})">✅ 완료로 닫기</button>`
       :`<button class="go" onclick="approveSpec(event,${c.id})">${AG.settled?'✅ 설계 승인 — 구현 시작':'⚠️ 미합의인데 승인'}</button>`}`
       +`<button onclick="resumeDebate(event,${c.id})">🔁 다시 토론</button>`
       +`<button onclick="rejectSpec(event,${c.id})">↩︎ 반려</button></div>`;
   if(c.status==='verify_blocked')
-    h+=`<div class="btns"><button class="go" onclick="requestChanges(event,${c.id})">↩︎ 수정 요청</button>`
+    f+=`<div class="btns"><button class="go" onclick="requestChanges(event,${c.id})">↩︎ 수정 요청</button>`
       +`<button onclick="rerunVerify(event,${c.id})">🔁 다시 검증</button>`
       +`<button onclick="verifyOverride(event,${c.id})">⚠️ 그래도 PR 로</button></div>`
       +`<div class="sub">수정 요청·다시 검증 모두 위 입력칸의 내용을 넘깁니다 — 수정 요청은 구현자에게(비우면 위 블로커가 그대로), 다시 검증은 검증자에게 "이 관점으로 보라"로 갑니다.</div>`;
   if(c.status==='pr_blocked')
-    h+=`<div class="btns"><button class="go" onclick="approvePr(event,${c.id})">${c.verify_override?'⚠️ 미통과인데 PR 올리기':'🚀 PR 올리기 승인'}</button>`
+    f+=`<div class="btns"><button class="go" onclick="approvePr(event,${c.id})">${c.verify_override?'⚠️ 미통과인데 PR 올리기':'🚀 PR 올리기 승인'}</button>`
       +`<button onclick="requestChanges(event,${c.id})">↩︎ 수정 요청</button></div>`;
 
   // ── 3. 접어 두는 상세 ─────────────────────────────────────
@@ -1531,7 +1575,11 @@ function openIssueModal(c){
   if(c.pr_dryrun&&!c.pr_url)
     h+=`<div class="sub" style="margin-top:10px">🧪 dry_run_pr=true — 실제 PR 은 올라가지 않았습니다</div>`;
 
-  m.innerHTML=h;document.getElementById('ov').classList.add('show');
+  m.className='modal doc';
+  m.innerHTML=`<div class="mhead">${head}</div><div class="mbody">${h}</div>`
+    +(f?`<div class="mfoot">${f}</div>`:'');
+  m.querySelector('.mbody').scrollTop=0;
+  document.getElementById('ov').classList.add('show');
 }
 function openFeedbackModal(f){
   const m=document.getElementById('modal');const rc=repoColor(f.repo);
@@ -1544,6 +1592,7 @@ function openFeedbackModal(f){
     <div class="lbl">반응</div><div class="pre">👍 ${f.up||0} · 👎 ${f.down||0} · 😕 ${f.confused||0} · 💬 ${f.replies||0}</div>`;
   if(f.comment_url)html+=`<div class="mlink"><a href="${f.comment_url}" target="_blank">GitHub 댓글 열기 ↗</a></div>`;
   html+=`<div class="lbl">API</div><div class="pre">/api/feedback/${f.id}</div>`;
+  m.className='modal';
   m.innerHTML=html;document.getElementById('ov').classList.add('show');
 }
 function closeM(){document.getElementById('ov').classList.remove('show')}
