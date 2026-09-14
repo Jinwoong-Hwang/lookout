@@ -47,24 +47,25 @@ def _checklist() -> list[str]:
 FILES_SHOWN = 12
 
 
-def _change_bullets(meta: dict) -> list[str]:
-    """`## 변경 내용` 항목. 엔진이 준 요약 불릿을 쓰고, 없으면 **변경 파일**로
+def _changes_lines(meta: dict) -> list[str]:
+    """`## 변경 내용` 본문 줄. 엔진이 준 요약 불릿을 쓰고, 없으면 **변경 파일**로
     내려앉는다 — 지어내지 않는다. 파일 목록도 '무엇이 바뀌었나'의 정직한 답이다."""
     impl = meta.get("impl") or {}
     bullets = [str(x).strip() for x in (impl.get("changes") or []) if str(x).strip()]
     if bullets:
-        return bullets
+        return [f"- {b}" for b in bullets]
     files = meta.get("changed") or []
     if not files:
         return []
     # 모노레포에서는 `packages/screens/src/...` 가 줄마다 반복돼 정작 다른 부분이
-    # 눈에 안 들어온다 — 공통 앞부분은 한 번만 적는다.
+    # 눈에 안 들어온다 — 공통 앞부분은 불릿이 아니라 머리말로 한 번만 적는다.
     head = os.path.commonpath(files) if len(files) > 1 else os.path.dirname(files[0])
     shown = [f[len(head) + 1:] if head and f.startswith(head + "/") else f
              for f in files[:FILES_SHOWN]]
-    out = ([f"`{head}/` 아래:"] if head else []) + [f"`{f}`" for f in shown]
+    out = ([f"`{head}/` 아래 {len(files)}개 파일:"] if head else []) + \
+          [f"- `{f}`" for f in shown]
     if len(files) > FILES_SHOWN:
-        out.append(f"외 {len(files) - FILES_SHOWN}개 파일")
+        out.append(f"- 외 {len(files) - FILES_SHOWN}개 파일")
     return out
 
 
@@ -78,9 +79,9 @@ def _body(meta: dict, display: str) -> str:
     lines = [f"이슈: {meta.get('url') or display}", ""]
     if impl.get("summary"):
         lines += ["## 변경 요약", impl["summary"], ""]
-    bullets = _change_bullets(meta)
-    if bullets:
-        lines += ["## 변경 내용"] + [f"- {b}" for b in bullets] + [""]
+    changes = _changes_lines(meta)
+    if changes:
+        lines += ["## 변경 내용"] + changes + [""]
     # '해볼 것'과 '정할 것'은 다른 목록이다. 한데 묶으면 리뷰어가 '무엇을 해봐야
     # 하나'를 찾지 못하고, 결정 사항이 테스트 항목으로 위장된다.
     todo = [q for q in (impl.get("manual_test") or []) if str(q).strip()]
