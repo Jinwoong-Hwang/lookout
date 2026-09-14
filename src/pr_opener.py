@@ -43,12 +43,36 @@ def _checklist() -> list[str]:
             "관련 테스트 통과 또는 작성", "관련 문서 업데이트"]
 
 
+FILES_SHOWN = 12
+
+
+def _change_bullets(meta: dict) -> list[str]:
+    """`## 변경 내용` 항목. 엔진이 준 요약 불릿을 쓰고, 없으면 **변경 파일**로
+    내려앉는다 — 지어내지 않는다. 파일 목록도 '무엇이 바뀌었나'의 정직한 답이다."""
+    impl = meta.get("impl") or {}
+    bullets = [str(x).strip() for x in (impl.get("changes") or []) if str(x).strip()]
+    if bullets:
+        return bullets
+    files = meta.get("changed") or []
+    out = [f"`{f}`" for f in files[:FILES_SHOWN]]
+    if len(files) > FILES_SHOWN:
+        out.append(f"외 {len(files) - FILES_SHOWN}개 파일")
+    return out
+
+
 def _body(meta: dict, display: str) -> str:
+    """뼈대는 팀 PR 템플릿(zax:pr)을 따른다 — 변경 요약 → 변경 내용 → 테스트 방법
+    → … → 체크리스트. 그 사이에 lookout 만 아는 근거(엔진 검증·교차 검증·설계
+    미합의)를 끼운다. 리뷰어가 늘 보던 순서를 먼저 만나고, 추가 정보는 그 아래에서
+    만나게 하는 것이 목적이다."""
     impl = meta.get("impl") or {}
     verify = meta.get("verify") or {}
     lines = [f"이슈: {meta.get('url') or display}", ""]
     if impl.get("summary"):
         lines += ["## 변경 요약", impl["summary"], ""]
+    bullets = _change_bullets(meta)
+    if bullets:
+        lines += ["## 변경 내용"] + [f"- {b}" for b in bullets] + [""]
     # '해볼 것'과 '정할 것'은 다른 목록이다. 한데 묶으면 리뷰어가 '무엇을 해봐야
     # 하나'를 찾지 못하고, 결정 사항이 테스트 항목으로 위장된다.
     todo = [q for q in (impl.get("manual_test") or []) if str(q).strip()]
@@ -67,13 +91,13 @@ def _body(meta: dict, display: str) -> str:
         lines += ["## 설계 단계 미합의 — 리뷰에서 판단 필요"]
         lines += [f"- [ ] {u}" for u in unresolved]
         lines.append("")
-    if meta.get("instruction"):
-        lines += ["## 운영자 지시", meta["instruction"], ""]
     decisions = [q for q in (impl.get("open_questions") or []) if str(q).strip()]
     if decisions:
         lines += ["## 남은 결정"] + [f"- [ ] {q}" for q in decisions] + [""]
     if impl.get("risk"):
         lines += ["## 위험", impl["risk"], ""]
+    if meta.get("instruction"):
+        lines += ["## 운영자 지시", meta["instruction"], ""]
     lines += ["## 체크리스트 (ready 전환 전 확인)"]
     lines += [f"- [ ] {x}" for x in _checklist()]
     lines += ["", f"🤖 Lookout 이 {display} 를 구현했습니다. draft 로 올라갑니다."]

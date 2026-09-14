@@ -283,6 +283,45 @@ class PrOpenerTest(_Base):
         pr_opener.process(self.c, self._card())
         self.assertLessEqual(len(self.created[0][3]), pr_opener.TITLE_MAX)
 
+    def test_body_follows_the_team_template_order(self):
+        """리뷰어가 늘 보던 순서(변경 요약 → 변경 내용 → 테스트 방법 → … →
+        체크리스트)를 먼저 만나야 한다 — 우리 근거 섹션은 그 사이에 낀다."""
+        pr_opener.CFG["dry_run_pr"] = False
+        db.merge_payload(self.c, self.card_id, {
+            "changed": ["a.ts"], "instruction": "ceo-client 만",
+            "agreement": {"unresolved": ["미합의 하나"]},
+            "verify": {"engine": "codex", "summary": "교차 검증 요약"},
+            "impl": {"summary": "고쳤다", "changes": ["a.ts 에서 널 가드"],
+                     "verification": "테스트 통과", "manual_test": ["실기 1회"],
+                     "open_questions": ["정할 것"], "risk": "느려질 수 있다"}})
+        pr_opener.process(self.c, self._card())
+        body = self.created[0][4]
+        order = ["## 변경 요약", "## 변경 내용", "## 테스트 방법",
+                 "## 검증 — 엔진이 실행함", "## 교차 검증", "## 설계 단계 미합의",
+                 "## 남은 결정", "## 위험", "## 운영자 지시", "## 체크리스트"]
+        seen = [body.index(h) for h in order]
+        self.assertEqual(seen, sorted(seen), "섹션 순서가 템플릿과 다르다")
+
+    def test_change_bullets_prefer_the_engine_over_the_file_list(self):
+        pr_opener.CFG["dry_run_pr"] = False
+        db.merge_payload(self.c, self.card_id, {
+            "changed": ["a.ts", "b.ts"],
+            "impl": {"summary": "x", "changes": ["널 가드 추가", "테스트 2건"]}})
+        pr_opener.process(self.c, self._card())
+        body = self.created[0][4]
+        self.assertIn("- 널 가드 추가", body)
+        self.assertNotIn("- `a.ts`", body)
+
+    def test_without_engine_bullets_it_falls_back_to_files_not_invention(self):
+        """불릿이 없다고 지어내면 PR 본문이 거짓이 된다 — 파일 목록은 사실이다."""
+        pr_opener.CFG["dry_run_pr"] = False
+        db.merge_payload(self.c, self.card_id, {
+            "changed": [f"f{i}.ts" for i in range(20)], "impl": {"summary": "x"}})
+        pr_opener.process(self.c, self._card())
+        body = self.created[0][4]
+        self.assertIn("- `f0.ts`", body)
+        self.assertIn(f"외 {20 - pr_opener.FILES_SHOWN}개 파일", body)
+
     def test_manual_tests_and_open_decisions_are_separate_lists(self):
         """'해볼 것'과 '정할 것'을 한데 묶으면 리뷰어가 무엇을 해봐야 하는지
         찾지 못하고, 결정 사항이 테스트 항목으로 위장된다."""

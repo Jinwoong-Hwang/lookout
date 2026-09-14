@@ -169,8 +169,8 @@ def _run_turn(c, card, meta, display, repo, branch, issue):
         "target_repo": repo, "branch": branch, "worktree": wt, "commit": sha,
         "changed": shown[:60],
         "impl": {k: result.get(k) for k in
-                 ("done", "summary", "verification", "open_questions", "risk",
-                  "pr_type", "manual_test")},
+                 ("done", "summary", "changes", "verification", "open_questions",
+                  "risk", "pr_type", "manual_test")},
     })
     db.set_status(c, card["id"], "impl_verify")
     db.log_event(c, "impl_committed", card["key"],
