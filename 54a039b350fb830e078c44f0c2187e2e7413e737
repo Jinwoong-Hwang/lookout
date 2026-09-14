@@ -1,0 +1,13 @@
+src/pr_opener.py
+  h_03b13cada2edad 50-51,56,61,65-66,68,82-84
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "54a039b350fb830e078c44f0c2187e2e7413e737",
+  "prompts": {},
+  "humans": {
+    "h_03b13cada2edad": {
+      "author": "woong@zigbang.com"
+    }
+  }
+}
