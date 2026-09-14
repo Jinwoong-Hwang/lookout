@@ -1172,6 +1172,25 @@ class ModalLayoutTest(unittest.TestCase):
         doc_rule = self.html[self.html.index(".doc .errline{"):]
         self.assertIn("-webkit-line-clamp:none", doc_rule[:200])
 
+    def test_a_finished_card_states_its_outcome_up_front(self):
+        """끝난 카드에 필요한 건 결정이 아니라 결과다 — 전에는 PR 이 나갔는지조차
+        접힌 섹션 7개를 열어야 알 수 있었다."""
+        self.assertIn("c.status==='done'", self.modal)
+        self.assertIn('class="done', self.modal)
+        self.assertIn('class="stats"', self.modal)
+        self.assertIn('class="outlink"', self.modal)
+        # 결과 블록이 상태별로 갈린다 — PR·dry-run·주제 토론·그 외
+        for token in ("c.pr_url?[", "c.pr_dryrun?[", "c.debate_only?["):
+            self.assertIn(token, self.modal.replace(" ", "").replace("\n", ""))
+
+    def test_the_outcome_block_comes_before_the_evidence(self):
+        self.assertLess(self.modal.index('class="done'),
+                        self.modal.index('const blk='))
+
+    def test_unresolved_items_are_handover_not_a_decision_when_done(self):
+        """완료 카드에서 '결정해야 합니다'는 거짓이다 — 누를 것이 없다."""
+        self.assertIn("후속 확인", self.modal)
+
     def test_the_modal_says_why_it_is_your_turn(self):
         """상태 이름만으로는 뭘 해야 하는지 모른다 — 한 줄로 먼저 말한다."""
         self.assertIn('class="why', self.modal)

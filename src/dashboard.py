@@ -946,6 +946,21 @@ font-weight:700;color:var(--muted);margin-bottom:8px;word-break:break-all}
 /* 모달에서는 자르지 않는다 — 실패 사유가 3줄에서 잘리면 원인을 못 읽는다 */
 .doc .errline{font-size:13px;line-height:1.6;display:block;-webkit-line-clamp:none;
 word-break:break-word;margin-top:8px}
+/* 끝난 카드는 '무엇을 결정하나'가 아니라 '무엇이 남았나'를 말해야 한다 */
+.doc .done{display:flex;gap:9px;align-items:flex-start;padding:11px 13px;border-radius:10px;
+margin:0 0 4px;font-size:13px;line-height:1.55;color:var(--ink);
+background:color-mix(in srgb,var(--good) 12%,transparent);
+border:1px solid color-mix(in srgb,var(--good) 38%,transparent)}
+.doc .done.flat{background:var(--panel2);border-color:var(--line);color:var(--muted)}
+.doc .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(104px,1fr));gap:8px;margin:11px 0 2px}
+.doc .stat{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:9px 11px}
+.doc .stat .k{font-size:11px;color:var(--muted);margin-bottom:3px}
+.doc .stat .v{font-size:14px;font-weight:750;color:var(--ink);font-variant-numeric:tabular-nums}
+.doc .stat .v.ok{color:var(--good)}
+.doc .stat .v.no{color:var(--bad)}
+.doc .outlink{display:inline-block;margin-top:12px;padding:8px 14px;border-radius:9px;
+background:var(--btn-accent-bg);color:var(--btn-accent-fg);border:1px solid var(--btn-accent-bd);
+font-weight:700;font-size:13px;text-decoration:none}
 .doc .instr{margin:0 0 9px}
 .doc .btns{margin-top:0;flex-wrap:wrap}
 .doc .sub{margin-top:8px;line-height:1.5}
@@ -1464,6 +1479,29 @@ function openIssueModal(c){
   }[c.status];
   let h='';
   if(WHY)h+=`<div class="why ${WHY[2]}"><span>${WHY[0]}</span><span>${WHY[1]}</span></div>`;
+
+  // ── 끝난 카드: 결정이 아니라 **결과**를 먼저 말한다 ─────────
+  // 전에는 어떻게 끝났는지가 어디에도 없고, 접힌 섹션 7개를 열어 봐야
+  // PR 이 나갔는지 알 수 있었다.
+  if(c.status==='done'){
+    const done=c.pr_url?['🏁',`PR 로 나갔습니다 — draft 이므로 <b>ready 전환은 직접</b> 하셔야 합니다`,'']
+      :c.pr_dryrun?['🧪','dry-run 이라 실제 PR 은 올라가지 않았습니다','flat']
+      :c.debate_only?['🗣','주제 토론으로 종료했습니다 — 구현하지 않았습니다','flat']
+      :['🏁','완료 처리됐습니다','flat'];
+    h+=`<div class="done ${done[2]}"><span>${done[0]}</span><span>${done[1]}</span></div>`;
+    const T=c.timeline||[];
+    const span=T.length>1?ago(Math.min(...T.map(e=>e.ts))):'';
+    const st=[];
+    if(c.rounds)st.push(['구현',`${c.rounds}라운드`,'']);
+    if(V.engine)st.push(['교차 검증',`${V.engine} ${V.approved?'통과':'미통과'}`,V.approved?'ok':'no']);
+    if((c.changed||[]).length)st.push(['변경',`${c.changed.length}개 파일`,'']);
+    if((c.debate||[]).length)st.push(['설계 토론',`${c.debate.length}턴`,'']);
+    if(span)st.push(['첫 기록',`${span} 전`,'']);
+    if(st.length)
+      h+=`<div class="stats">`+st.map(x=>`<div class="stat"><div class="k">${x[0]}</div>`
+        +`<div class="v ${x[2]}">${esc(x[1])}</div></div>`).join('')+`</div>`;
+    if(c.pr_url)h+=`<a class="outlink" href="${esc(c.pr_url)}" target="_blank">PR 열기 ↗</a>`;
+  }
   if(c.verify_override)
     h+=`<div class="why bad"><span>⚠️</span><span>검증 미통과를 감수하고 넘어온 카드입니다 — 블로커가 남아 있습니다</span></div>`;
   if(c.error)h+=`<div class="lbl">실패 사유</div><div class="errline">${esc(c.error)}</div>`;
@@ -1482,6 +1520,8 @@ function openIssueModal(c){
   if((AG.unresolved||[]).length)
     h+=`<div class="lbl">${c.status==='spec_blocked'
         ?`미합의 ${AG.unresolved.length}건 — 승인 전에 결정해야 합니다`
+        :c.status==='done'
+        ?`후속 확인 ${AG.unresolved.length}건 — PR 본문에도 체크박스로 들어갔습니다`
         :`설계 단계 미합의 ${AG.unresolved.length}건 — PR 본문에 함께 남습니다`}</div>`
       +md(AG.unresolved.map(x=>'- '+x).join(NL));
 
@@ -1572,7 +1612,7 @@ function openIssueModal(c){
       +`<span class="tlab">${esc(e.label)}</span><span class="tdet">${esc(e.detail||'')}</span></div>`).join('');
     h+=sec(`⏱ 진행 기록 · ${c.timeline.length}건`, `<div class="tl">${rows}</div>`);
   }
-  if(c.pr_dryrun&&!c.pr_url)
+  if(c.pr_dryrun&&!c.pr_url&&c.status!=='done')
     h+=`<div class="sub" style="margin-top:10px">🧪 dry_run_pr=true — 실제 PR 은 올라가지 않았습니다</div>`;
 
   m.className='modal doc';
