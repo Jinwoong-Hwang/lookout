@@ -5,6 +5,7 @@ PR은 생성 시점부터 draft다. 대상 저장소는 저장소 전체가 코�
 이미 걸린 요청은 회수되지 않는다. ready 전환은 사람이 한다.
 """
 import json
+import os
 import re
 
 from . import db, ghclient, worktree
@@ -54,7 +55,14 @@ def _change_bullets(meta: dict) -> list[str]:
     if bullets:
         return bullets
     files = meta.get("changed") or []
-    out = [f"`{f}`" for f in files[:FILES_SHOWN]]
+    if not files:
+        return []
+    # 모노레포에서는 `packages/screens/src/...` 가 줄마다 반복돼 정작 다른 부분이
+    # 눈에 안 들어온다 — 공통 앞부분은 한 번만 적는다.
+    head = os.path.commonpath(files) if len(files) > 1 else os.path.dirname(files[0])
+    shown = [f[len(head) + 1:] if head and f.startswith(head + "/") else f
+             for f in files[:FILES_SHOWN]]
+    out = ([f"`{head}/` 아래:"] if head else []) + [f"`{f}`" for f in shown]
     if len(files) > FILES_SHOWN:
         out.append(f"외 {len(files) - FILES_SHOWN}개 파일")
     return out
