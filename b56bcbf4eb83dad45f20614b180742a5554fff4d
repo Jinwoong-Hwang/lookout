@@ -1,0 +1,19 @@
+prompts/impl.md
+  h_03b13cada2edad 61-64
+src/impl_worker.py
+  h_03b13cada2edad 172-173
+src/pr_opener.py
+  h_03b13cada2edad 8,14-45,51-56,58,70-74,76-78,95
+tests/test_impl_verify_and_pr.py
+  h_03b13cada2edad 262-310
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "b56bcbf4eb83dad45f20614b180742a5554fff4d",
+  "prompts": {},
+  "humans": {
+    "h_03b13cada2edad": {
+      "author": "woong@zigbang.com"
+    }
+  }
+}
