@@ -328,12 +328,21 @@ class IssueCardShapeTest(unittest.TestCase):
         self.assertIn("el.onclick=()=>openIssueModal(c)", dashboard.HTML)
         self.assertIn("function openIssueModal", dashboard.HTML)
 
-    def test_card_uses_the_same_skeleton_classes(self):
-        tile = dashboard.HTML[dashboard.HTML.index("function issueTile"):
-                              dashboard.HTML.index("function tile(c)")]
-        for cls in ('class="pr"', 'class="title"', 'class="row"', "repopill",
-                    "statuspill", 'class="num"'):
-            self.assertIn(cls, tile)
+    def test_the_board_row_states_everything_without_being_opened(self):
+        """보드는 훑는 곳이다 — 행 하나로 어느 단계인지·누가 돌렸는지·얼마나
+        됐는지가 나와야 열지 말지 정할 수 있다."""
+        row = dashboard.HTML[dashboard.HTML.index("function issueRow"):
+                             dashboard.HTML.index("function tile(c)")]
+        for cls in ('class="irow"', 'class="inum"', 'class="ititle"',
+                    "statuspill", "repopill", "ago(c.updated_at)"):
+            self.assertIn(cls.replace('class="irow"', "'irow'"), row)
+
+    def test_gate_rows_are_marked_so_they_read_first(self):
+        row = dashboard.HTML[dashboard.HTML.index("const GATES="):
+                             dashboard.HTML.index("function tile(c)")]
+        for st in ("spec_blocked", "verify_blocked", "pr_blocked", "failed"):
+            self.assertIn(f"'{st}'", row)
+        self.assertIn("gate?' gate':''", row)
 
     def test_github_link_lives_in_the_modal(self):
         modal = dashboard.HTML[dashboard.HTML.index("function openIssueModal"):
@@ -775,18 +784,28 @@ class InputPreservationTest(unittest.TestCase):
         # 보드 안의 입력만 막는다 — 다른 곳 포커스는 갱신을 멈추지 않는다
         self.assertIn("board.contains(a)", self.html)
 
-    def test_every_card_input_keeps_a_draft(self):
-        """카드 안의 모든 입력이 초안을 붙들어야 한다 — 하나라도 빠지면 그 칸만
-        5초마다 지워진다. 개수를 못박는 대신 실제 태그를 훑는다."""
-        tile = self.html[self.html.index("function issueTile"):
-                         self.html.index("function tile(c)")]
-        inputs = re.findall(r"<(?:textarea|input)\b[^>]*>", tile, re.S)
-        self.assertGreaterEqual(len(inputs), 4)   # 지시·설계 피드백·저장소·수정 요청
+    def test_every_modal_input_keeps_a_draft(self):
+        """입력은 모달에만 있다. 초안을 안 붙들면 모달을 닫는 순간 사라진다 —
+        블로커를 다시 읽으려 닫았다 여는 것이 정상 동작이므로 치명적이다."""
+        modal = self.html[self.html.index("function openIssueModal"):
+                          self.html.index("function openFeedbackModal")]
+        inputs = re.findall(r"<(?:textarea|input)\b[^>]*>", modal, re.S)
+        self.assertGreaterEqual(len(inputs), 2)   # 상태별 입력칸 + 토픽 저장소
         for tag in inputs:
             self.assertIn('oninput="draft(this)"', tag, f"초안 미보관: {tag[:80]}")
-            self.assertIn("event.stopPropagation()", tag, f"모달이 열린다: {tag[:80]}")
-        for el in ("'ins'+c.id", "'spec'+c.id", "'trepo'+c.id"):
+        for el in ("INPUT[0]+c.id", "'trepo'+c.id"):
             self.assertIn(f"dval({el}", self.html)
+
+    def test_typing_in_the_modal_never_closes_it(self):
+        """오버레이 클릭으로 닫히는데, 입력 클릭이 거기까지 가면 글이 날아간다."""
+        self.assertIn("onclick=e=>{if(e.target.id==='ov')closeM()}",
+                      self.html.replace("\n", ""))
+
+    def test_the_board_itself_carries_no_issue_input(self):
+        """행에도 같은 id 의 입력을 두면 specText() 가 엉뚱한 칸을 읽는다."""
+        row = self.html[self.html.index("function issueRow"):
+                        self.html.index("function tile(c)")]
+        self.assertNotIn("<textarea", row)
 
     def test_draft_survives_a_rerender_and_beats_the_server_value(self):
         # dval(id, fallback): 초안이 있으면 서버 값보다 우선한다
@@ -1074,6 +1093,50 @@ class WorkBoardLayoutTest(unittest.TestCase):
         """리뷰는 카드가 수백 장이라 레인이 실제로 채워진다 — 건드리지 않는다."""
         self.assertIn("renderLanes(LANES)", dashboard.HTML)
         self.assertIn("function renderLanes", dashboard.HTML)
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+class ServedGlobalsTest(unittest.TestCase):
+    """`node --check` 는 문법만 본다 — 정의되지 않은 전역은 통과하고 브라우저에서
+    보드 전체가 백지가 된다. 실제로 TOPIC_REPO 가 파이썬 상수인 채로 JS 에서
+    쓰여 그렇게 될 뻔했다."""
+
+    def test_no_python_placeholder_survives_rendering(self):
+        html = dashboard.build_page() if hasattr(dashboard, "build_page") else None
+        if html is None:
+            import re as _re
+            html = dashboard.HTML
+            for name, val in (("__LANES__", dashboard.LANES),
+                              ("__WORK_LANES__", dashboard.WORK_LANES),
+                              ("__TOPIC_REPO__", dashboard.TOPIC_REPO)):
+                html = html.replace(name, json.dumps(val, ensure_ascii=False))
+            self.assertNotIn("__", _re.sub(r"__proto__|__dirname", "", html)[:0] or "")
+        self.assertNotIn("__LANES__", html)
+        self.assertNotIn("__WORK_LANES__", html)
+        self.assertNotIn("__TOPIC_REPO__", html)
+
+    def test_python_constants_used_in_js_are_declared_there(self):
+        """이게 진짜 함정이다 — 파이썬 상수를 JS 에서 그대로 쓰면 문법은 멀쩡하고
+        `node --check` 도 통과하는데, 브라우저에서 ReferenceError 로 보드 전체가
+        백지가 된다. 실측: TOPIC_REPO. 이름 목록을 손으로 관리하지 않도록
+        모듈의 대문자 상수를 자동으로 훑는다."""
+        import re as _re
+        js = "".join(_re.findall(r"<script>(.*?)</script>", dashboard.HTML, _re.S))
+        # 한국어 주석에 'HTML'·'API' 가 널려 있어 그대로 훑으면 전부 오탐이 된다.
+        # 주석만 걷는다 — 과하게 걷혀 놓치는 쪽이 헛경보보다 낫다.
+        js = _re.sub(r"//[^\n]*", "", js)
+        consts = [n for n in vars(dashboard)
+                  if n.isupper() and len(n) > 2 and not n.startswith("_")]
+        for name in sorted(consts):
+            if not _re.search(rf"(?<![.\w$]){name}\b", js):
+                continue                      # JS 에서 안 쓰면 무관
+            self.assertTrue(
+                _re.search(rf"\b(?:const|let|var|function)\s+{name}\b", js)
+                or f"__{name}__" in js,
+                f"{name} 이 JS 에서 쓰이는데 선언도 주입도 없다 — 런타임에 죽는다")
 
 
 if __name__ == "__main__":

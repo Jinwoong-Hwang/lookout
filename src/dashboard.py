@@ -780,12 +780,34 @@ h1{font-size:17px;margin:0;font-weight:750;letter-spacing:-.01em}
 .board.stack{display:block;overflow-y:auto;overflow-x:hidden}
 .toggle{display:flex;gap:6px;margin-left:6px}
 .toggle button.active{background:var(--btn-accent-bg);color:var(--btn-accent-fg);border-color:var(--btn-accent-bd);font-weight:650}
+/* 작업 보드는 카드가 아니라 **목록**이다. 항목이 한 자릿수고 행마다 할 일이
+   하나뿐이라, 카드로 깔면 262px 짜리 박스가 화면을 먹고 정작 훑기가 어렵다. */
+.rows{display:flex;flex-direction:column;border:1px solid var(--line);border-radius:12px;
+background:var(--panel);overflow:hidden}
+.irow{display:flex;gap:12px;align-items:center;padding:11px 14px;cursor:pointer;
+border-left:3px solid transparent;border-top:1px solid var(--line);transition:background .12s}
+.irow:first-child{border-top:none}
+.irow:hover{background:var(--panel2)}
+.irow .idot{flex:0 0 auto;width:8px;height:8px;border-radius:50%}
+.irow .imain{flex:1 1 auto;min-width:0}
+.irow .ihead{display:flex;gap:8px;align-items:baseline;min-width:0}
+.irow .inum{flex:0 0 auto;font-weight:700;font-size:12.5px;color:var(--ink);font-variant-numeric:tabular-nums}
+.irow .ititle{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+font-size:13px;color:var(--ink)}
+.irow .imeta{display:flex;flex-wrap:wrap;gap:5px;align-items:center;margin-top:5px}
+.irow .iright{flex:0 0 auto;display:flex;gap:9px;align-items:center;color:var(--muted);font-size:11.5px}
+.irow .igo{color:var(--dim)}
+.irow:hover .igo{color:var(--accent)}
+.irow.gate{border-left-color:var(--warn);background:color-mix(in srgb,var(--warn) 7%,transparent)}
+.irow.gate .igo{color:var(--warn);font-weight:700}
+.irow .xbtn{position:static;opacity:0}
+.irow:hover .xbtn{opacity:1}
+.ghead{display:flex;gap:8px;align-items:center;margin:0 0 8px;font-size:12.5px;font-weight:700}
+.ghead .n{background:var(--panel2);border-radius:20px;padding:1px 9px;color:var(--muted);
+font-size:11px;font-weight:400}
+.ghint{margin-left:auto;color:var(--muted);font-size:11.5px;font-weight:400}
 .sec{margin:0 0 16px}
 /* 작업 보드 — 게이트 섹션은 '지금 당신 차례'라서 눈에 먼저 걸려야 한다 */
-.sec.g-gate{background:var(--panel);border:1px solid var(--warn);border-radius:14px;padding:14px 16px 4px}
-.sec.g-gate h2{border-bottom-color:var(--line)}
-.sec.g-gate .card{width:332px}
-.ghint{margin-left:auto;color:var(--muted);font-size:11.5px;font-weight:400}
 details.grp>summary{list-style:none;cursor:pointer}
 details.grp>summary::-webkit-details-marker{display:none}
 details.grp>summary h2{margin:0 0 10px}
@@ -968,7 +990,7 @@ background:transparent;border:none;padding:3px 5px;border-radius:6px;opacity:.4}
 </div>
 <div class="ov" id="ov"><div class="modal" id="modal"></div></div>
 <script>
-const LANES=__LANES__;const WORK_LANES=__WORK_LANES__;
+const LANES=__LANES__;const WORK_LANES=__WORK_LANES__;const TOPIC_REPO=__TOPIC_REPO__;
 // Slack 미연동 — 멘션 섹션 숨김. Slack 연결 시 true 로 바꾸면 부활.
 const SHOW_MENTIONS=false;
 // ── 테마 (시스템/라이트/다크) — 클릭 순환, localStorage 저장 ──
@@ -1216,20 +1238,20 @@ function renderWork(){
   for(const g of WORK_GROUPS){
     const list=g.lanes.reduce((a,k)=>a.concat(by[k]||[]),[]);
     if(!list.length&&!g.always)continue;
-    const head=`<span class="lh">${g.label}</span><span class="n">${list.length}</span>`
+    const head=`<span>${g.label}</span><span class="n">${list.length}</span>`
       +(g.hint&&list.length?`<span class="ghint">${g.hint}</span>`:'');
     let host;
     if(g.fold){
       host=document.createElement('details');host.className='grp sec';host.dataset.g=g.key;
       host.open=!!WORK_OPEN[g.key];
-      host.innerHTML=`<summary><h2>${head}</h2></summary>`;
+      host.innerHTML=`<summary><div class="ghead">${head}</div></summary>`;
     }else{
       host=document.createElement('div');host.className='sec g-'+g.key;
-      host.innerHTML=`<h2>${head}</h2>`;
+      host.innerHTML=`<div class="ghead">${head}</div>`;
     }
-    const cc=document.createElement('div');cc.className='cards';
+    const cc=document.createElement('div');cc.className=list.length?'rows':'';
     if(!list.length)cc.innerHTML=`<div class="empty">${g.empty||'—'}</div>`;
-    list.forEach(c=>cc.appendChild(tile(c)));
+    list.forEach(c=>cc.appendChild(issueRow(c)));
     host.appendChild(cc);board.appendChild(host);
   }
   board.scrollTop=top;
@@ -1266,96 +1288,46 @@ function renderByAuthor(){
     sec.appendChild(cc);board.appendChild(sec);
   });
 }
-function issueTile(c){
-  // 리뷰 카드(tile)와 같은 골격: .pr / .title(평문) / .row 배지 / .row 사실 / 버튼.
-  // 제목을 <a>로 감싸면 밑줄·색 때문에 목록에서 읽기 어렵다 — 링크는 모달로 옮겼다.
-  const el=document.createElement('div');el.className='card';
-  const sm=smeta(c.status);el.style.borderLeftColor=stripe(sm.c);
-  const rc=repoColor(c.repo);
-  const repoPill=`<span class="repopill" style="${pill(rc)}"><span class="rdot" style="background:${rc}"></span>${esc(repoShort(c.repo))}</span>`;
-  const statusPill=`<span class="statuspill" style="${pill(sm.c)}">${sm.ko}</span>`;
-  const asg=(c.assignees||[]).slice(0,2).map(a=>`<span class="pill">${esc(a)}</span>`).join('');
-  const modePill=c.mode?`<span class="pill">${c.mode==='debate'?'설계부터':'바로구현'}</span>`:'';
-  const enginePill=(c.status!=='triage')?`<span class="pill">${esc(c.engine)}</span>`:'';
-  const v=c.verify||{};
-  const nb=(v.blocking||[]).length;
-  const vPill=v.engine?`<span class="pill" style="${pill(v.approved?'#4ade80':'#fb7185')}">🧾 ${esc(v.engine)} ${v.approved?'통과':'블로커 '+nb}</span>`:'';
-  const exPill=c.verify_override?`<span class="pill" style="${pill('#fbbf24')}">⚠️ 미통과 감수</span>`:'';
-  const roundPill=(c.rounds>1)?`<span class="pill">${c.rounds}R</span>`:'';
+// 보드는 **훑는 곳**이고 모달은 **결정하는 곳**이다. 카드마다 입력칸과 버튼을
+// 달면 항목 4개에 화면이 꽉 차고, 정작 결정에 필요한 근거(블로커·합의문)는
+// 카드에 안 들어가 어차피 모달을 열어야 했다. 행은 한 줄로 상태만 말한다.
+const GATES=['spec_blocked','verify_blocked','pr_blocked','failed'];
+function issueRow(c){
+  const el=document.createElement('div');
+  const gate=GATES.includes(c.status);
+  el.className='irow'+(gate?' gate':'');
+  const sm=smeta(c.status), rc=repoColor(c.repo);
   const RUNNING=['spec','implementing','impl_verify','pr_opening'];
-  const ag=c.agreement||{};
-  const dbPill=(c.debate||[]).length?`<span class="pill">🗣 ${c.debate.length}턴</span>`:'';
-  const agPill=ag.rounds?`<span class="pill" style="${pill(ag.blocked?'#fb7185':!ag.settled?'#fbbf24':(ag.unresolved||[]).length?'#fbbf24':'#4ade80')}">${ag.blocked?'결렬':(ag.settled===null||ag.settled===undefined)?'합의여부 미기록':!ag.settled?`미합의(${esc(ag.end_reason||'')})`:(ag.unresolved||[]).length?`합의·잔여 ${(ag.unresolved||[]).length}`:'합의'}</span>`:'';
-  const agePill=RUNNING.includes(c.status)?`<span class="pill" title="이 상태로 머문 시간">⏱ ${ago(c.updated_at)}</span>`:'';
-  let facts='';
-  if(c.branch)facts=`<span>🌿 ${esc(c.branch)}</span>${c.commit?`<code>${esc(c.commit)}</code>`:''}`
-    +`${(c.changed||[]).length?`<span>${c.changed.length}개 파일</span>`:''}`;
-  else if((c.labels||[]).length)facts=(c.labels||[]).slice(0,3).map(l=>`<span class="pill">${esc(l)}</span>`).join('');
-  let xbtn='', btns='';
-  if(c.status==='triage'||c.status==='failed')
-    xbtn=`<button class="xbtn" title="목록에서 제외" onclick="ignoreCard(event,${c.id})">✕</button>`;
-  if(c.status==='triage'){
-    btns=`<div class="instr">
-      <textarea id="ins${c.id}" placeholder="추가 지시 (선택) — 이 이슈를 어떻게 처리할지"
-        oninput="draft(this)" onclick="event.stopPropagation()"
-        onkeydown="event.stopPropagation()">${esc(dval('ins'+c.id,c.instruction))}</textarea>
-      <div class="rev">
-        <button class="claude" onclick="startWork(event,${c.id},'implement')">🛠 바로 구현</button>
-        <button class="codex" onclick="startWork(event,${c.id},'debate')">🗣 설계부터</button>
-      </div></div>`;
-  }else if(c.status==='failed'){
-    btns=`<div class="btns"><button class="go" onclick="act(event,'retry',${c.id})">↻ 재시도</button></div>`;
-  }else if(c.status==='spec_blocked'){
-    btns=`<div class="instr">
-      <textarea id="spec${c.id}" placeholder="합의에 대한 피드백 (선택) — 승인 시 수정 지시로, 다시 토론 시 방향 지시로 쓰입니다"
-        oninput="draft(this)" onclick="event.stopPropagation()"
-        onkeydown="event.stopPropagation()">${esc(dval('spec'+c.id,''))}</textarea>
-      ${c.debate_only?`<input id="trepo${c.id}" placeholder="구현할 저장소 (예: zigbang/ceo-client)"
-        value="${esc(dval('trepo'+c.id,c.target_repo))}" oninput="draft(this)"
-        onclick="event.stopPropagation()" onkeydown="event.stopPropagation()">`:''}
-      <div class="rev">
-        ${c.debate_only
-          ?`<button class="claude" onclick="implementTopic(event,${c.id})">🛠 이 결론으로 구현</button>
-            <button onclick="approveSpec(event,${c.id})">✅ 완료로 닫기</button>`
-          :`<button class="claude" onclick="approveSpec(event,${c.id})">✅ 승인</button>`}
-        <button class="codex" onclick="resumeDebate(event,${c.id})">🔁 다시 토론</button>
-      </div>
-      <div class="rev"><button onclick="rejectSpec(event,${c.id})">↩︎ 반려</button></div>
-    </div>`;
-  }else if(c.status==='verify_blocked'){
-    btns=`<div class="errline">엔진끼리 합의하지 못했습니다 — 남은 블로커를 직접 판단하세요</div>
-      <div class="instr">
-      <textarea id="spec${c.id}" placeholder="선택 — 수정 요청이면 구현자에게(비우면 남은 블로커 그대로), 다시 검증이면 검증자에게 '이 관점으로 보라'로 갑니다"
-        oninput="draft(this)" onclick="event.stopPropagation()"
-        onkeydown="event.stopPropagation()">${esc(dval('spec'+c.id,''))}</textarea>
-      <div class="rev">
-        <button class="claude" onclick="requestChanges(event,${c.id})">↩︎ 수정 요청</button>
-        <button class="codex" onclick="rerunVerify(event,${c.id})">🔁 다시 검증</button>
-      </div>
-      <div class="rev"><button onclick="verifyOverride(event,${c.id})">⚠️ 그래도 PR 로</button></div>
-      </div>`;
-  }else if(c.status==='pr_blocked'){
-    if(c.verify_override)btns=`<div class="errline warn">검증 미통과를 감수하고 넘어온 카드입니다 — 블로커가 남아 있습니다</div>`;
-    btns+=`<div class="instr">
-      <textarea id="spec${c.id}" placeholder="수정 요청 (선택) — 비워두면 검증이 남긴 지적을 그대로 넘깁니다"
-        oninput="draft(this)" onclick="event.stopPropagation()"
-        onkeydown="event.stopPropagation()">${esc(dval('spec'+c.id,''))}</textarea>
-      <div class="rev">
-        <button class="claude" onclick="approvePr(event,${c.id})">${c.verify_override?'⚠️ 미통과인데 PR 올리기':'🚀 PR 올리기 승인'}</button>
-        <button class="codex" onclick="requestChanges(event,${c.id})">↩︎ 수정 요청</button>
-      </div></div>`;
-  }
-  el.innerHTML=`${xbtn}<div class="pr">${repoPill} <span class="num">${esc(c.display)}</span></div>
-    <div class="title">${esc(c.title)||'(제목없음)'}</div>
-    <div class="row">${statusPill}${asg}${modePill}${enginePill}${vPill}${exPill}${dbPill}${agPill}${roundPill}${agePill}</div>
-    ${facts?`<div class="row">${facts}</div>`:''}
-    ${(c.instruction&&c.status!=='triage')?`<div class="instrline">📝 ${esc(c.instruction)}</div>`:''}
-    ${c.error?`<div class="errline ${c.status==='triage'?'warn':''}" title="${esc(c.error)}">${esc(c.error)}</div>`:''}${btns}`;
+  const v=c.verify||{}, ag=c.agreement||{};
+  const P=[];
+  P.push(`<span class="statuspill" style="${pill(sm.c)}">${sm.ko}</span>`);
+  if(c.repo&&c.repo!==TOPIC_REPO)
+    P.push(`<span class="repopill" style="${pill(rc)}"><span class="rdot" style="background:${rc}"></span>${esc(repoShort(c.repo))}</span>`);
+  if(c.status!=='triage'&&c.engine)P.push(`<span class="pill">${esc(c.engine)}</span>`);
+  if(c.mode)P.push(`<span class="pill">${c.mode==='debate'?'설계부터':'바로구현'}</span>`);
+  if(v.engine)P.push(`<span class="pill" style="${pill(v.approved?'#4ade80':'#fb7185')}">🧾 ${esc(v.engine)} ${v.approved?'통과':'블로커 '+((v.blocking||[]).length)}</span>`);
+  if(c.verify_override)P.push(`<span class="pill" style="${pill('#fbbf24')}">⚠️ 미통과 감수</span>`);
+  if(ag.rounds)P.push(`<span class="pill" style="${pill(ag.blocked?'#fb7185':ag.settled?'#4ade80':'#fbbf24')}">🗣 ${ag.rounds}R ${ag.blocked?'결렬':ag.settled?'합의':'미합의'}</span>`);
+  if(c.rounds>1)P.push(`<span class="pill">구현 ${c.rounds}R</span>`);
+  if((c.changed||[]).length)P.push(`<span class="pill">${c.changed.length}개 파일</span>`);
+  if(c.error)P.push(`<span class="pill" style="${pill('#fb7185')}" title="${esc(c.error)}">⚠️ ${esc(c.error.slice(0,40))}</span>`);
+  const right=(RUNNING.includes(c.status)?`<span title="이 상태로 머문 시간">⏱ ${ago(c.updated_at)}</span>`
+              :`<span>${ago(c.updated_at)} 전</span>`)
+    +`<span class="igo">${gate?'확인 →':'→'}</span>`
+    +((c.status==='triage'||c.status==='failed')
+      ?`<button class="xbtn" title="목록에서 제외" onclick="ignoreCard(event,${c.id})">✕</button>`:'');
+  el.innerHTML=`<span class="idot" style="background:${sm.c}"></span>
+    <div class="imain">
+      <div class="ihead"><span class="inum">${esc(c.display)}</span>
+        <span class="ititle">${esc(c.title)||'(제목없음)'}</span></div>
+      <div class="imeta">${P.join('')}</div>
+    </div>
+    <div class="iright">${right}</div>`;
   el.onclick=()=>openIssueModal(c);
   return el;
 }
 function tile(c){
-  if(c.kind==='issue')return issueTile(c);
+  if(c.kind==='issue')return issueRow(c);
   const el=document.createElement('div');el.className='card';
   const dots=c.findings.map(f=>`<span class="dot ${f.severity||'low'}"></span>`).join('');
   let btns='', xbtn='';
@@ -1470,17 +1442,38 @@ function openIssueModal(c){
         :`설계 단계 미합의 ${AG.unresolved.length}건 — PR 본문에 함께 남습니다`}</div>`
       +md(AG.unresolved.map(x=>'- '+x).join(NL));
 
-  // ── 2. 게이트 버튼 ────────────────────────────────────────
+  // ── 2. 조작부 — 입력칸과 버튼은 **여기** 하나뿐이다 ─────────
+  // 보드 행에도 두면 id 가 겹치고(specText 가 엉뚱한 칸을 읽는다) 무엇보다
+  // 근거를 읽기 전에 누르게 된다.
+  const INPUT={
+    triage:['ins','추가 지시 (선택) — 이 이슈를 어떻게 처리할지',c.instruction],
+    spec_blocked:['spec','합의에 대한 피드백 (선택) — 승인 시 수정 지시로, 다시 토론 시 방향 지시로 쓰입니다',''],
+    verify_blocked:['spec',"선택 — 수정 요청이면 구현자에게(비우면 남은 블로커 그대로), 다시 검증이면 검증자에게 '이 관점으로 보라'로 갑니다",''],
+    pr_blocked:['spec','수정 요청 (선택) — 비워두면 검증이 남긴 지적을 그대로 넘깁니다',''],
+  }[c.status];
+  if(INPUT)
+    h+=`<div class="instr"><textarea id="${INPUT[0]}${c.id}" placeholder="${esc(INPUT[1])}"
+        oninput="draft(this)">${esc(dval(INPUT[0]+c.id,INPUT[2]||''))}</textarea>`
+      +(c.status==='spec_blocked'&&c.debate_only
+        ?`<input id="trepo${c.id}" placeholder="구현할 저장소 (예: zigbang/ceo-client)"
+            value="${esc(dval('trepo'+c.id,c.target_repo))}" oninput="draft(this)">`:'')
+      +`</div>`;
+  if(c.status==='triage')
+    h+=`<div class="btns"><button class="go" onclick="startWork(event,${c.id},'implement')">🛠 바로 구현</button>`
+      +`<button onclick="startWork(event,${c.id},'debate')">🗣 설계부터</button></div>`;
+  if(c.status==='failed')
+    h+=`<div class="btns"><button class="go" onclick="act(event,'retry',${c.id})">↻ 재시도</button></div>`;
   if(c.status==='spec_blocked')
     h+=`<div class="btns">${c.debate_only
       ?`<button class="go" onclick="implementTopic(event,${c.id})">🛠 이 결론으로 구현</button><button onclick="approveSpec(event,${c.id})">✅ 완료로 닫기</button>`
       :`<button class="go" onclick="approveSpec(event,${c.id})">${AG.settled?'✅ 설계 승인 — 구현 시작':'⚠️ 미합의인데 승인'}</button>`}`
+      +`<button onclick="resumeDebate(event,${c.id})">🔁 다시 토론</button>`
       +`<button onclick="rejectSpec(event,${c.id})">↩︎ 반려</button></div>`;
   if(c.status==='verify_blocked')
     h+=`<div class="btns"><button class="go" onclick="requestChanges(event,${c.id})">↩︎ 수정 요청</button>`
       +`<button onclick="rerunVerify(event,${c.id})">🔁 다시 검증</button>`
       +`<button onclick="verifyOverride(event,${c.id})">⚠️ 그래도 PR 로</button></div>`
-      +`<div class="sub">수정 요청·다시 검증 모두 카드 입력칸의 내용을 넘깁니다 — 수정 요청은 구현자에게(비우면 위 블로커가 그대로), 다시 검증은 검증자에게 "이 관점으로 보라"로 갑니다.</div>`;
+      +`<div class="sub">수정 요청·다시 검증 모두 위 입력칸의 내용을 넘깁니다 — 수정 요청은 구현자에게(비우면 위 블로커가 그대로), 다시 검증은 검증자에게 "이 관점으로 보라"로 갑니다.</div>`;
   if(c.status==='pr_blocked')
     h+=`<div class="btns"><button class="go" onclick="approvePr(event,${c.id})">${c.verify_override?'⚠️ 미통과인데 PR 올리기':'🚀 PR 올리기 승인'}</button>`
       +`<button onclick="requestChanges(event,${c.id})">↩︎ 수정 요청</button></div>`;
@@ -1698,7 +1691,8 @@ class Handler(BaseHTTPRequestHandler):
         params = parse_qs(parsed.query)
         if path == "/" or path.startswith("/index"):
             html = (HTML.replace("__LANES__", json.dumps(LANES, ensure_ascii=False))
-                        .replace("__WORK_LANES__", json.dumps(WORK_LANES, ensure_ascii=False)))
+                        .replace("__WORK_LANES__", json.dumps(WORK_LANES, ensure_ascii=False))
+                        .replace("__TOPIC_REPO__", json.dumps(TOPIC_REPO)))
             self._send(200, html, "text/html; charset=utf-8")
         elif path == "/api/board":
             self._send(200, json.dumps(build_board(), ensure_ascii=False))
