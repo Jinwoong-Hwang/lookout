@@ -174,6 +174,35 @@ class VerifyOutcomeTest(_Base):
         # 한 번 쓰고 비운다 — 남기면 다음 라운드가 낡은 관점으로 판정한다
         self.assertEqual(self._payload()["reverify_note"], "")
 
+    def test_the_implementers_declared_risk_reaches_the_verifier(self):
+        """구현자가 '약하게 했다'고 적어 낸 곳을 검증자가 볼 기회조차 없었다 —
+        실측(PH-1816): `source 없으면 통과시키도록 완화함` 이 카드에만 남았고,
+        그 완화가 리뷰에서 HIGH 보안 결함으로 돌아왔다."""
+        db.merge_payload(self.c, self.card_id, {
+            "impl": {"summary": "고쳤다", "risk": "source 없으면 통과시키도록 완화함"}})
+        seen = self._render_tokens()
+        engines.run_json = lambda *_a, **_k: {"approved": True, "summary": "ok"}
+        impl_verifier.process(self.c, self._card())
+        self.assertIn("source 없으면 통과시키도록 완화함", seen["IMPL_RISK"])
+        self.assertIn("신고한 위험", seen["IMPL_RISK"])
+        self.assertNotIn("신고한 위험", seen["IMPL_SUMMARY"])   # 주장과 섞지 않는다
+
+    def test_no_declared_risk_means_no_risk_section(self):
+        db.merge_payload(self.c, self.card_id, {"impl": {"summary": "고쳤다"}})
+        seen = self._render_tokens()
+        engines.run_json = lambda *_a, **_k: {"approved": True, "summary": "ok"}
+        impl_verifier.process(self.c, self._card())
+        self.assertEqual(seen["IMPL_RISK"], "")
+
+    def test_the_real_template_consumes_the_risk_token(self):
+        prompt_tpl.render = self.saved["render"]
+        out = prompt_tpl.render(
+            "impl_verify.md", DISPLAY="", TITLE="", TARGET_REPO="", BRANCH="",
+            BODY="", INSTRUCTION="", IMPL_SUMMARY="", DIFF="", FILES="",
+            REVERIFY_NOTE="", IMPL_RISK="### 신고한 위험\n완화함")
+        self.assertIn("완화함", out)
+        self.assertNotIn("{IMPL_RISK}", out)
+
     def test_no_note_means_no_reverify_section_at_all(self):
         seen = self._render_tokens()
         engines.run_json = lambda *_a, **_k: {"approved": True, "summary": "ok"}

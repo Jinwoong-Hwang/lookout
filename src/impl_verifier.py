@@ -82,6 +82,13 @@ def process(c, card):
     reverify_block = (
         f"\n### 이번 재검증 관점 (사람이 지금 요청)\n{note}\n"
         "> 같은 커밋을 다시 봅니다. 이 관점을 먼저 확인하십시오.\n" if note else "")
+    # 구현자가 스스로 신고한 위험을 검증자에게 넘긴다. 안 넘기면 "source 없으면
+    # 통과시키도록 완화함" 같은 자백이 카드에만 남고 검증자는 볼 기회조차 없다 —
+    # 실측(PH-1816): 그 완화가 리뷰에서 HIGH 보안 결함으로 돌아왔다.
+    risk = (impl.get("risk") or "").strip()
+    risk_block = (f"\n### 구현한 엔진이 **스스로 신고한 위험**\n{risk}\n"
+                  "> 자백이므로 추측보다 확실합니다. 여기부터 트레이스를 만들어 보십시오.\n"
+                  if risk else "")
     prompt = prompt_tpl.render(
         "impl_verify.md",
         DISPLAY=meta.get("display") or f"#{card['pr_number']}",
@@ -89,7 +96,7 @@ def process(c, card):
         BODY=(meta.get("body") or "(생략)"),
         INSTRUCTION=(meta.get("instruction") or "(없음)"),
         IMPL_SUMMARY=(impl.get("summary") or "(요약 없음)"),
-        REVERIFY_NOTE=reverify_block,
+        REVERIFY_NOTE=reverify_block, IMPL_RISK=risk_block,
         DIFF=diff, FILES=files,
     )
     # 워크트리는 repo당 하나를 공유한다 — 다른 카드가 브랜치를 바꿔치기하지 못하게
