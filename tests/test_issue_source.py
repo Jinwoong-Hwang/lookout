@@ -7,10 +7,17 @@ from src import db, ghclient, keys, poller
 REPO = "acme/product-hub"
 
 
-def _issue(n, title="[FE] 무언가", assignees=("me",), labels=()):
-    return {"number": n, "title": title, "url": f"https://github.com/{REPO}/issues/{n}",
-            "labels": [{"name": x} for x in labels],
-            "assignees": [{"login": x} for x in assignees], "updatedAt": "2026-09-10T00:00:00Z"}
+def _issue(n, title="[FE] 무언가", assignees=("me",), labels=(),
+           issue_type=None, parent=None, sub=None):
+    row = {"number": n, "title": title, "url": f"https://github.com/{REPO}/issues/{n}",
+           "labels": [{"name": x} for x in labels],
+           "assignees": [{"login": x} for x in assignees], "updatedAt": "2026-09-10T00:00:00Z",
+           "issueType": {"name": issue_type} if issue_type else None,
+           "parent": ({"number": parent, "title": f"에픽 {parent}",
+                       "url": f"https://github.com/{REPO}/issues/{parent}"}
+                      if parent else None),
+           "subIssuesSummary": {"completed": (sub or (0, 0))[0], "total": (sub or (0, 0))[1]}}
+    return row
 
 
 class IssueSourceTest(unittest.TestCase):
@@ -64,6 +71,46 @@ class IssueSourceTest(unittest.TestCase):
 
         # kind 없이 부르면 둘 다 나온다 — 그래서 스테이지 호출은 kind를 명시해야 한다
         self.assertEqual(len(db.cards_in(self.c, ["triage"])), 2)
+
+    # ── 에픽 소속 ─────────────────────────────────────────────────
+    def test_poll_stores_epic_membership_from_github(self):
+        """소속은 GitHub 네이티브 sub-issue 관계를 그대로 싣는다 — 제목 태그로
+        추정하지 않는다. 추정하면 표기가 흔들리는 순간 소속이 틀린다."""
+        ghclient.issue_list = lambda *_a, **_k: [
+            _issue(2015, "폴더블 대응", issue_type="Epic", sub=(1, 6)),
+            _issue(2017, "[1] edge-to-edge", issue_type="Task", parent=2015),
+        ]
+        poller.poll_issues(self.c)
+
+        epic = self._payload(keys.issue_key(REPO, 2015))
+        self.assertEqual(epic["issue_type"], "Epic")
+        self.assertIsNone(epic["parent"])
+        self.assertEqual(epic["sub"], {"done": 1, "total": 6})
+
+        task = self._payload(keys.issue_key(REPO, 2017))
+        self.assertEqual(task["parent"]["number"], 2015)
+        # 부모도 별칭으로 — 렌더가 repo를 보고 분기하지 않게 여기서 확정한다
+        self.assertEqual(task["parent"]["display"], "PH-2015")
+        self.assertEqual(task["parent"]["title"], "에픽 2015")
+
+    def test_parent_outside_the_board_still_carries_its_title(self):
+        """실측 11건 중 4건은 부모가 내게 할당되지 않아 카드가 없다. 자식이 제목·
+        링크를 들고 와야 에픽 뷰가 머리글을 세울 수 있다."""
+        ghclient.issue_list = lambda *_a, **_k: [_issue(1765, parent=1680)]
+        poller.poll_issues(self.c)
+        task = self._payload(keys.issue_key(REPO, 1765))
+        self.assertEqual(task["parent"]["display"], "PH-1680")
+        self.assertTrue(task["parent"]["url"].endswith("/1680"))
+        self.assertEqual(self._cards(pr_number=1680), [])   # 부모는 카드가 아니다
+
+    def test_losing_a_parent_clears_the_old_membership(self):
+        """merge_payload 는 키를 덮는다 — 부모가 떨어져 나가면 None 이 실려야
+        옛 소속이 화면에 남지 않는다."""
+        ghclient.issue_list = lambda *_a, **_k: [_issue(1765, parent=1680)]
+        poller.poll_issues(self.c)
+        ghclient.issue_list = lambda *_a, **_k: [_issue(1765)]
+        poller.poll_issues(self.c)
+        self.assertIsNone(self._payload(keys.issue_key(REPO, 1765))["parent"])
 
     def test_issue_and_pr_keys_do_not_collide_on_same_number(self):
         self.assertNotEqual(keys.issue_key(REPO, 7), keys.root_key(REPO, 7))

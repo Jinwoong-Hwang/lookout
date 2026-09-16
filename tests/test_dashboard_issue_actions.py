@@ -162,12 +162,45 @@ class DashboardIssueActionTest(unittest.TestCase):
             self.assertNotIn(status, dashboard.ACTIVE_REVIEW)
 
     def test_review_and_work_views_never_show_each_others_cards(self):
-        """뷰별로 kind를 갈라 보여준다 — 한 보드에 섞으면 Triage가 뒤엉킨다."""
+        """뷰별로 kind를 갈라 보여준다 — 한 보드에 섞으면 Triage가 뒤엉킨다.
+
+        작업 계열은 이제 두 뷰(행동별·에픽별)라 스코프는 뷰 이름이 아니라 계열로
+        묻는다. 'work'만 비교하면 에픽 뷰가 리뷰 카드를 보게 된다."""
         html = dashboard.HTML
-        self.assertIn("VIEW==='work'?DATA.filter(c=>c.kind==='issue')", html)
+        self.assertIn("function isWorkView(){return VIEW==='work'||VIEW==='epic';}", html)
+        self.assertIn("isWorkView()?DATA.filter(c=>c.kind==='issue')", html)
         self.assertIn("DATA.filter(c=>c.kind!=='issue')", html)
-        # 두 뷰는 렌더러부터 다르다 — 작업은 그룹, 리뷰는 레인
-        self.assertIn("VIEW==='work'?renderWork():renderLanes(LANES)", html)
+        # 세 뷰는 렌더러부터 다르다 — 에픽은 소속, 작업은 행동, 리뷰는 레인
+        self.assertIn("VIEW==='epic'?renderEpics():VIEW==='work'?renderWork():renderLanes(LANES)",
+                      html)
+        # 새로고침 스코프도 계열을 따라간다(에픽 뷰에서 PR을 긁어오면 안 된다)
+        self.assertIn("scope:isWorkView()?'work':'review'", html)
+
+    def test_epic_view_is_wired_into_the_shell(self):
+        """뷰를 추가하고 탭·카운트 배선을 빠뜨리면 버튼이 죽거나 활성 표시가 안 된다."""
+        html = dashboard.HTML
+        self.assertIn("setView('epic')", html)
+        self.assertIn('id="tEpic"', html)
+        self.assertIn("['tEpic','epic']", html)
+        self.assertIn("getElementById('cEpic')", html)
+
+    def test_issue_row_carries_epic_membership(self):
+        """소속은 payload 에서 온다 — 없으면 '소속 없음'으로 떨어질 뿐, 죽지 않는다."""
+        db.merge_payload(self.c, self.card_id, {
+            "issue_type": "Task",
+            "parent": {"number": 1680, "display": "PH-1680", "title": "에픽", "url": "u"},
+            "sub": {"done": 0, "total": 0}})
+        row = [r for r in dashboard.build_board() if r["kind"] == "issue"][0]
+        self.assertEqual(row["issue_type"], "Task")
+        self.assertEqual(row["parent"]["number"], 1680)
+        self.assertEqual(row["sub"], {"done": 0, "total": 0})
+
+    def test_issue_row_without_epic_fields_degrades_quietly(self):
+        """폴러가 아직 안 돈 옛 카드도 보드에 떠야 한다(빈 값 = 소속 미상)."""
+        row = [r for r in dashboard.build_board() if r["kind"] == "issue"][0]
+        self.assertEqual(row["issue_type"], "")
+        self.assertIsNone(row["parent"])
+        self.assertEqual(row["sub"], {})
 
 
 if __name__ == "__main__":
@@ -285,6 +318,96 @@ class SideNavTest(unittest.TestCase):
         main = self.html[self.html.index('<div class="main">'):self.html.index("</nav>") + 10000]
         for el in ('id="filterbar"', 'id="mentions"', 'id="board"'):
             self.assertIn(el, main)
+
+
+@unittest.skipUnless(shutil.which("node"), "node 없음")
+class EpicGroupingTest(unittest.TestCase):
+    """에픽별 뷰의 묶음 규칙을 **실제로 돌려서** 고정한다.
+
+    이 뷰의 실패는 '카드가 화면에서 사라지는' 것이라 눈으로는 못 잡는다(어느 에픽
+    밑을 봐야 하는지 모르니 없어진 줄도 모른다). 그래서 소스를 잘라 node 로 돌려
+    모든 카드가 정확히 한 번 나타나는지 본다."""
+
+    def _run(self, cards):
+        html = dashboard.HTML
+        # 규칙(WORK_GROUPS·GATES)은 화면과 같은 것을 써야 한다 — 테스트가 제 값을
+        # 따로 들면 화면이 바뀌어도 테스트는 계속 통과한다.
+        parts = [html[html.index("const WORK_GROUPS="):html.index("const WORK_OPEN=")],
+                 html[html.index("const GATES="):html.index("function issueRow")],
+                 html[html.index("const EPIC_RANK="):html.index("function epicHead(")]]
+        js = "\n".join(parts) + """
+const out=epicGroups(CARDS).map(g=>({key:g.key,gates:g.gates,
+  head:g.head?g.head.display:null,
+  parent:g.parent?g.parent.display:null,
+  rows:g.rows.map(r=>r.display)}));
+console.log(JSON.stringify(out));
+"""
+        js = "const CARDS=" + json.dumps(cards, ensure_ascii=False) + ";\n" + js
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False,
+                                         encoding="utf-8") as f:
+            f.write(js)
+            path = f.name
+        try:
+            proc = subprocess.run(["node", path], capture_output=True, text=True)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            return json.loads(proc.stdout)
+        finally:
+            os.unlink(path)
+
+    @staticmethod
+    def _card(num, status="triage", itype="Task", parent=None, sub=None):
+        return {"pr": num, "display": f"PH-{num}", "title": f"이슈 {num}",
+                "status": status, "issue_type": itype, "updated_at": 1000 + num,
+                "sub": sub or {},
+                "parent": ({"number": parent, "display": f"PH-{parent}",
+                            "title": f"에픽 {parent}", "url": "u"} if parent else None)}
+
+    def setUp(self):
+        # 실측(내 이슈 11건) 모양 그대로: 보드 안 에픽 1 + 보드 밖 에픽 1 + 미소속
+        self.cards = [
+            self._card(2015, itype="Epic", sub={"done": 0, "total": 6}),
+            self._card(2016, parent=2015),
+            self._card(2017, status="verify_blocked", parent=2015),
+            self._card(2060, parent=2015),
+            self._card(1765, parent=1680),
+            self._card(1766, parent=1680),
+            self._card(9001, itype="", status="spec_blocked"),   # 주제 토론 — 부모 없음
+        ]
+
+    def test_every_card_appears_exactly_once(self):
+        groups = self._run(self.cards)
+        seen = []
+        for g in groups:
+            if g["head"]:
+                seen.append(g["head"])
+            seen += g["rows"]
+        self.assertEqual(sorted(seen), sorted(c["display"] for c in self.cards))
+        self.assertEqual(len(seen), len(set(seen)), "같은 카드가 두 곳에 나온다")
+
+    def test_epic_card_heads_its_section_instead_of_being_a_row(self):
+        g = next(g for g in self._run(self.cards) if g["head"] == "PH-2015")
+        self.assertNotIn("PH-2015", g["rows"])
+        self.assertEqual(sorted(g["rows"]), ["PH-2016", "PH-2017", "PH-2060"])
+
+    def test_epic_outside_the_board_still_gets_a_section(self):
+        """부모가 카드로 없다고 자식을 '소속 없음'에 던지면, 실측 기준 4건이
+        소속을 잃는다. 자식이 들고 온 parent 로 머리글을 세운다."""
+        g = next(g for g in self._run(self.cards) if g["parent"] == "PH-1680")
+        self.assertIsNone(g["head"])
+        self.assertEqual(sorted(g["rows"]), ["PH-1765", "PH-1766"])
+
+    def test_unparented_cards_land_in_a_trailing_none_group(self):
+        groups = self._run(self.cards)
+        self.assertEqual(groups[-1]["key"], "none")
+        self.assertEqual(groups[-1]["rows"], ["PH-9001"])
+
+    def test_sections_and_rows_lead_with_what_needs_me(self):
+        """에픽 뷰도 결국 '내 차례'부터 보여야 한다 — 소속을 얻자고 게이트가
+        목록 한가운데 묻히면 행동별 보드를 대신할 수 없다."""
+        groups = self._run(self.cards)
+        self.assertEqual(groups[0]["head"], "PH-2015")     # 게이트가 걸린 에픽이 먼저
+        self.assertEqual(groups[0]["gates"], 1)
+        self.assertEqual(groups[0]["rows"][0], "PH-2017")  # 그 안에서도 게이트가 위
 
 
 class ServedJsTest(unittest.TestCase):

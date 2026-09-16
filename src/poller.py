@@ -21,12 +21,26 @@ def _display(repo: str, number: int) -> str:
 
 
 def _issue_payload(repo: str, issue: dict) -> dict:
+    parent = issue.get("parent") or None
+    sub = issue.get("subIssuesSummary") or {}
     return {
         "display": _display(repo, issue["number"]),
         "title": issue.get("title"),
         "url": issue.get("url"),
         "labels": [x["name"] for x in (issue.get("labels") or [])],
         "assignees": [x["login"] for x in (issue.get("assignees") or [])],
+        # 에픽 소속 — 부모가 **내 보드에 없어도** 자식이 제목·링크를 들고 오므로
+        # 에픽 뷰가 머리글을 세울 수 있다(실측: [FE] 태스크들의 부모는 미할당).
+        "issue_type": (issue.get("issueType") or {}).get("name") or "",
+        "parent": {
+            "number": parent["number"],
+            "display": _display(repo, parent["number"]),
+            "title": parent.get("title") or "",
+            "url": parent.get("url") or "",
+        } if parent else None,
+        # GitHub 기준 자식 진행도(내게 할당되지 않은 자식까지 포함). 보드에 보이는
+        # 건수와 다를 수 있어 화면에서도 출처를 갈라 적는다.
+        "sub": {"done": sub.get("completed") or 0, "total": sub.get("total") or 0},
     }
 
 

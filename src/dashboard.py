@@ -109,6 +109,11 @@ def build_board():
                     "author": ", ".join(meta.get("assignees") or []),
                     "labels": meta.get("labels") or [],
                     "assignees": meta.get("assignees") or [],
+                    # 에픽 소속. 폴러가 아직 안 돈 옛 카드는 비어 있으므로 에픽
+                    # 뷰는 '소속 없음'으로 떨어뜨린다(빈 값이 곧 미상이다).
+                    "issue_type": meta.get("issue_type", ""),
+                    "parent": meta.get("parent") or None,
+                    "sub": meta.get("sub") or {},
                     "instruction": meta.get("instruction", ""),
                     "mode": meta.get("mode", ""),
                     "target_repo": meta.get("target_repo", ""),
@@ -803,8 +808,23 @@ font-size:13px;color:var(--ink)}
 .irow .xbtn{position:static;opacity:0}
 .irow:hover .xbtn{opacity:1}
 .ghead{display:flex;gap:8px;align-items:center;margin:0 0 8px;font-size:12.5px;font-weight:700}
-.ghead .n{background:var(--panel2);border-radius:20px;padding:1px 9px;color:var(--muted);
+.ghead .n,.esec .n{background:var(--panel2);border-radius:20px;padding:1px 9px;color:var(--muted);
 font-size:11px;font-weight:400}
+/* 에픽별 뷰 — 머리글이 에픽이고 그 아래 목록이 소속 태스크다. 왼쪽 레일이 소속을
+   잇는다(들여쓰기만 하면 스크롤 중에 어느 에픽 밑인지 놓친다). */
+.esec{margin:0 0 18px}
+.esec .ehead{display:flex;gap:9px;align-items:center;padding:0 2px 8px;border-bottom:1px solid var(--line)}
+.esec .ehead.go{cursor:pointer}
+.esec .ehead.go:hover .etitle{color:var(--accent)}
+.esec .etag{flex:0 0 auto}
+.esec .enum{flex:0 0 auto;font-weight:700;font-size:12.5px;color:var(--ink);font-variant-numeric:tabular-nums}
+.esec .etitle{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+font-size:13.5px;font-weight:650;color:var(--ink)}
+.esec .ebits{flex:0 0 auto;display:flex;gap:5px;align-items:center}
+.esec .ebits a.open{text-decoration:none;color:var(--muted)}
+.esec .rows{margin:10px 0 0 15px;border-left:3px solid var(--line)}
+.esec.hasgate .rows{border-left-color:var(--warn)}
+.esec .empty{margin:8px 0 0 15px;text-align:left}
 .ghint{margin-left:auto;color:var(--muted);font-size:11.5px;font-weight:400}
 .sec{margin:0 0 16px}
 /* 작업 보드 — 게이트 섹션은 '지금 당신 차례'라서 눈에 먼저 걸려야 한다 */
@@ -1022,6 +1042,7 @@ font-weight:700;font-size:13px;text-decoration:none}
   <button id="tFeedback" onclick="setView('feedback')"><span>💬 리뷰 피드백</span><span class="cnt" id="cFeedback">0</span></button>
   <div class="grp">작업</div>
   <button id="tWork" onclick="setView('work')"><span>🛠 이슈 보드</span><span class="cnt" id="cWork">0</span></button>
+  <button id="tEpic" onclick="setView('epic')"><span>🎯 에픽별</span><span class="cnt" id="cEpic">0</span></button>
 </nav>
 <div class="main">
 <div class="filterbar" id="filterbar"></div>
@@ -1132,8 +1153,11 @@ function repoColor(r){let h=0;for(const ch of (r||''))h=(h*31+ch.charCodeAt(0))>
 function setRepo(r){REPO=r;renderFilter();render();}
 // 리뷰 뷰는 이슈 카드를 보지 않고, 작업 뷰는 이슈 카드만 본다. 한 보드에 섞으면
 // Triage에 PR과 이슈가 뒤엉킨다.
-function scopedData(){return VIEW==='work'?DATA.filter(c=>c.kind==='issue')
-                                          :DATA.filter(c=>c.kind!=='issue');}
+// 이슈 보드(행동별)와 에픽별은 **같은 카드를 다른 축으로** 보는 두 뷰다. 스코프·
+// 새로고침·필터는 공유하므로 뷰 이름이 아니라 계열로 묻는다.
+function isWorkView(){return VIEW==='work'||VIEW==='epic';}
+function scopedData(){return isWorkView()?DATA.filter(c=>c.kind==='issue')
+                                         :DATA.filter(c=>c.kind!=='issue');}
 function viewData(){const src=scopedData();return REPO==='all'?src:src.filter(c=>c.repo===REPO);}
 function viewFeedbackData(){return REPO==='all'?FEEDBACK:FEEDBACK.filter(f=>f.repo===REPO);}
 function filterSource(){return VIEW==='feedback'?FEEDBACK:scopedData();}
@@ -1150,11 +1174,13 @@ function renderFilter(){
     h+=`<button class="chip ${on?'on':''}" style="${onStyle}" onclick="setRepo('${r}')"><span class="rdot" style="background:${col}"></span>${esc(repoShort(r))} <b>${n}</b></button>`;});
   bar.innerHTML=h;
 }
-const VIEW_TABS=[['tLane','lane'],['tAuthor','author'],['tFeedback','feedback'],['tWork','work']];
+const VIEW_TABS=[['tLane','lane'],['tAuthor','author'],['tFeedback','feedback'],
+                ['tWork','work'],['tEpic','epic']];
 function setView(v){VIEW=v;
   for(const [id,name] of VIEW_TABS)
     document.getElementById(id).classList.toggle('active',v===name);
-  document.getElementById('refreshBtn').textContent=(v==='work')?'🔄 이슈 가져오기':'🔄 PR 가져오기';
+  document.getElementById('refreshBtn').textContent=isWorkView()?'🔄 이슈 가져오기':'🔄 PR 가져오기';
+  // 주제 토론 카드는 에픽에 안 묶인다 — 소속을 보는 뷰에서 만들 이유가 없다.
   document.getElementById('composer').style.display=(v==='work')?'':'none';
   renderFilter();render();}
 function renderSideCounts(){
@@ -1164,6 +1190,7 @@ function renderSideCounts(){
   document.getElementById('cAuthor').textContent=review;
   document.getElementById('cFeedback').textContent=FEEDBACK.length;
   document.getElementById('cWork').textContent=work;
+  document.getElementById('cEpic').textContent=work;
 }
 function forceRender(){render_();}
 async function load(){
@@ -1172,7 +1199,7 @@ async function load(){
   try{FEEDBACK=await rf.json();}catch(e){FEEDBACK=[];}
   try{ENGINES=await re.json();}catch(e){}
   document.getElementById('sub').textContent=
-    (VIEW==='work'?scopedData().length+'개 이슈':scopedData().length+'개 카드');
+    (isWorkView()?scopedData().length+'개 이슈':scopedData().length+'개 카드');
   renderEngStat();
   renderSideCounts();
   renderFilter();
@@ -1240,7 +1267,7 @@ function render(){
   return render_();
 }
 function render_(){VIEW==='feedback'?renderFeedback():VIEW==='author'?renderByAuthor()
-    :VIEW==='work'?renderWork():renderLanes(LANES);}
+    :VIEW==='epic'?renderEpics():VIEW==='work'?renderWork():renderLanes(LANES);}
 function renderFeedback(){
   const list=viewFeedbackData();
   const board=document.getElementById('board');board.className='board stack';board.innerHTML='';
@@ -1301,6 +1328,77 @@ function renderWork(){
     if(!list.length)cc.innerHTML=`<div class="empty">${g.empty||'—'}</div>`;
     list.forEach(c=>cc.appendChild(issueRow(c)));
     host.appendChild(cc);board.appendChild(host);
+  }
+  board.scrollTop=top;
+}
+// 에픽별 뷰 — 행동별 보드와 **같은 카드를 다른 축으로** 본다. 저쪽이 "지금 뭘
+// 해야 하나"라면 이쪽은 "이 에픽이 어디까지 왔나"에 답한다. 소속은 GitHub 네이티브
+// sub-issue 관계(issue_type/parent)를 그대로 쓴다 — 우리가 추정하지 않는다.
+// 에픽이 내 보드에 없는 경우가 실측 11건 중 4건이라, 머리글은 에픽 카드가 없어도
+// 자식이 들고 온 parent 정보로 세운다. 안 그러면 그 태스크들이 전부 '소속 없음'이 된다.
+const EPIC_RANK={};WORK_GROUPS.forEach((g,i)=>g.lanes.forEach(l=>{EPIC_RANK[l]=i;}));
+function erank(c){const r=EPIC_RANK[c.status];return r===undefined?9:r;}
+function epicGroups(list){
+  const G=new Map();
+  const get=k=>{if(!G.has(k))G.set(k,{key:k,head:null,parent:null,rows:[]});return G.get(k);};
+  list.forEach(c=>{
+    if(c.issue_type==='Epic'){get('n'+c.pr).head=c;return;}   // 에픽은 머리글이지 행이 아니다
+    if(c.parent){const g=get('n'+c.parent.number);if(!g.parent)g.parent=c.parent;g.rows.push(c);return;}
+    get('none').rows.push(c);
+  });
+  const out=[...G.values()];
+  out.forEach(g=>{
+    const all=g.head?g.rows.concat([g.head]):g.rows;
+    g.gates=all.filter(c=>GATES.includes(c.status)).length;
+    g.rank=Math.min(...all.map(erank));
+    g.num=g.head?g.head.pr:(g.parent?g.parent.number:0);
+    // 에픽 안에서도 순서는 행동 우선 — 게이트·진행 중이 위로 온다(EPIC_RANK).
+    g.rows.sort((a,b)=>erank(a)-erank(b)||b.updated_at-a.updated_at);
+  });
+  // '소속 없음'은 항상 맨 아래. 나머지는 내 차례가 걸린 에픽부터, 그다음 최신순.
+  out.sort((a,b)=>(a.key==='none')-(b.key==='none')||a.rank-b.rank||b.num-a.num);
+  return out;
+}
+function epicHead(g){
+  if(g.key==='none')
+    return '<div class="ehead"><span class="etag">📄</span>'
+      +'<span class="etitle">소속 없음</span>'
+      +'<span class="n">'+g.rows.length+'</span>'
+      +'<span class="ghint">에픽에 안 묶인 이슈 · 주제 토론</span></div>';
+  const e=g.head,p=g.parent;
+  const disp=e?e.display:p.display, title=(e?e.title:p.title)||'(제목없음)';
+  const sub=(e&&e.sub)||{};
+  const bits=[];
+  if(e)bits.push(`<span class="statuspill" style="${pill(smeta(e.status).c)}">${smeta(e.status).ko}</span>`);
+  // GitHub 진행도와 보드 건수는 **다른 수**다(내게 할당 안 된 자식도 세므로) — 출처를 붙여 적는다.
+  if(sub.total)bits.push(`<span class="pill" title="GitHub 기준 하위 이슈 진행 — 내게 할당되지 않은 것도 포함">GitHub ${sub.done||0}/${sub.total}</span>`);
+  if(g.gates)bits.push(`<span class="pill" style="${pill('#fbbf24')}">⚠️ 내 차례 ${g.gates}</span>`);
+  if(!e)bits.push(`<span class="pill" title="에픽 자체가 내게 할당되지 않아 카드가 없습니다">보드 밖</span>`
+    +(p.url?`<a class="open" href="${esc(p.url)}" target="_blank" title="GitHub에서 열기">↗</a>`:''));
+  return `<div class="ehead${e?' go':''}"><span class="etag">🎯</span>`
+    +`<span class="enum">${esc(disp)}</span><span class="etitle">${esc(title)}</span>`
+    +`<span class="n" title="보드에 올라온 소속 태스크">${g.rows.length}</span>`
+    +`<span class="ebits">${bits.join('')}</span></div>`;
+}
+function renderEpics(){
+  const board=document.getElementById('board');
+  const top=board.scrollTop;
+  board.className='board stack';board.innerHTML='';
+  const groups=epicGroups(viewData());
+  if(!groups.length){
+    const sec=document.createElement('div');sec.className='sec';
+    sec.innerHTML='<div class="empty">이슈 카드가 없습니다</div>';
+    board.appendChild(sec);return;
+  }
+  for(const g of groups){
+    const sec=document.createElement('div');
+    sec.className='sec esec'+(g.gates?' hasgate':'');
+    sec.innerHTML=epicHead(g);
+    if(g.head)sec.querySelector('.ehead').onclick=()=>openIssueModal(g.head);
+    const cc=document.createElement('div');cc.className=g.rows.length?'rows':'';
+    if(!g.rows.length)cc.innerHTML='<div class="empty">보드에 올라온 하위 태스크 없음</div>';
+    g.rows.forEach(c=>cc.appendChild(issueRow(c)));
+    sec.appendChild(cc);board.appendChild(sec);
   }
   board.scrollTop=top;
 }
@@ -1754,7 +1852,7 @@ async function refresh(){
   try{
     const r=await fetch('/api/refresh',{method:'POST',
       headers:{'Content-Type':'application/json','X-Lookout-Action':'1'},
-      body:JSON.stringify({scope:VIEW==='work'?'work':'review'})});const j=await r.json();
+      body:JSON.stringify({scope:isWorkView()?'work':'review'})});const j=await r.json();
     await load();
     b.textContent=j.added>0?`+${j.added}건 추가`:'최신 상태';
   }catch(e){b.textContent='실패';}
