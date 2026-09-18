@@ -114,6 +114,8 @@ def build_board():
                     "issue_type": meta.get("issue_type", ""),
                     "parent": meta.get("parent") or None,
                     "sub": meta.get("sub") or {},
+                    "ticket_status": meta.get("ticket_status", ""),
+                    "ticket_board": meta.get("ticket_board", ""),
                     "instruction": meta.get("instruction", ""),
                     "mode": meta.get("mode", ""),
                     "target_repo": meta.get("target_repo", ""),
@@ -808,7 +810,7 @@ font-size:13px;color:var(--ink)}
 .irow .xbtn{position:static;opacity:0}
 .irow:hover .xbtn{opacity:1}
 .ghead{display:flex;gap:8px;align-items:center;margin:0 0 8px;font-size:12.5px;font-weight:700}
-.ghead .n,.esec .n{background:var(--panel2);border-radius:20px;padding:1px 9px;color:var(--muted);
+.ghead .n,.esec .n,.thead .n{background:var(--panel2);border-radius:20px;padding:1px 9px;color:var(--muted);
 font-size:11px;font-weight:400}
 /* 에픽별 뷰 — 머리글이 에픽이고 그 아래 목록이 소속 태스크다. 왼쪽 레일이 소속을
    잇는다(들여쓰기만 하면 스크롤 중에 어느 에픽 밑인지 놓친다). */
@@ -826,6 +828,9 @@ font-size:13.5px;font-weight:650;color:var(--ink)}
 .esec.hasgate .rows{border-left-color:var(--warn)}
 .esec .empty{margin:8px 0 0 15px;text-align:left}
 .ghint{margin-left:auto;color:var(--muted);font-size:11.5px;font-weight:400}
+/* 대기 목록 안의 티켓 진행상태 소구간 머리글 */
+.thead{display:flex;gap:7px;align-items:center;margin:14px 0 6px;font-size:11.5px}
+.sec>.thead:first-of-type{margin-top:0}
 .sec{margin:0 0 16px}
 /* 작업 보드 — 게이트 섹션은 '지금 당신 차례'라서 눈에 먼저 걸려야 한다 */
 details.grp>summary{list-style:none;cursor:pointer}
@@ -1304,6 +1309,28 @@ const WORK_GROUPS=[
    hint:'여기서 작업을 시작합니다',empty:'할당된 이슈 없음',always:true},
   {key:'end',label:'🏁 끝난 것',lanes:['done','failed'],fold:true}];
 const WORK_OPEN={};   // <details> 접힘 상태를 5초 갱신 너머로 보존
+// 티켓 진행상태 = GitHub Project 의 Status 필드. **읽기 전용**이다 — 팀 공용
+// 보드라 봇이 되돌려 쓰지 않는다. 대기 목록이 전부 같은 얼굴이던 게 문제였다:
+// 실측 12건이 Backlog(아직)·Ready dev(착수 가능)·Developing(이미 진행 중)으로
+// 갈린다. 순서는 프로젝트의 워크플로 순서가 아니라 '지금 고를 것부터'다.
+const TICKET_ORDER=['Ready dev','Developing','Acceptance Test','Ready FV',
+  'Feature Verification','Ready RT','Regression Test','Ready Deploy','Done',
+  'In requirement','Backlog','NextPatch','Next Patch'];
+function trank(s){const i=TICKET_ORDER.indexOf(s);return i<0?99:i;}
+function tcolor(s){
+  if(s==='Ready dev')return '#4ade80';
+  if(s==='Backlog'||s==='In requirement')return '#6b7688';
+  if(s==='NextPatch'||s==='Next Patch')return '#a78bfa';
+  return s?'#60a5fa':'#6b7688';
+}
+function ticketSplit(list){
+  // 폴러가 아직 안 돌아 상태가 하나도 없으면 예전처럼 한 덩어리 — 전부 '상태
+  // 미상' 아래로 밀어넣으면 없던 고장처럼 보인다.
+  if(!list.some(c=>c.ticket_status))return [['',list]];
+  const by=new Map();
+  list.forEach(c=>{const k=c.ticket_status||'';if(!by.has(k))by.set(k,[]);by.get(k).push(c);});
+  return [...by.entries()].sort((a,b)=>trank(a[0])-trank(b[0]));
+}
 function renderWork(){
   const board=document.getElementById('board');
   board.querySelectorAll('details.grp').forEach(d=>WORK_OPEN[d.dataset.g]=d.open);
@@ -1324,10 +1351,28 @@ function renderWork(){
       host=document.createElement('div');host.className='sec g-'+g.key;
       host.innerHTML=`<div class="ghead">${head}</div>`;
     }
-    const cc=document.createElement('div');cc.className=list.length?'rows':'';
-    if(!list.length)cc.innerHTML=`<div class="empty">${g.empty||'—'}</div>`;
-    list.forEach(c=>cc.appendChild(issueRow(c)));
-    host.appendChild(cc);board.appendChild(host);
+    if(!list.length){
+      const cc=document.createElement('div');
+      cc.innerHTML=`<div class="empty">${g.empty||'—'}</div>`;
+      host.appendChild(cc);
+    }else{
+      // 대기만 가른다 — 여기가 '뭘 시작할까'를 고르는 곳이다. 나머지 묶음은
+      // Lookout 이 이미 상태를 쥐고 있어 두 축을 겹쳐 적을 이유가 없다.
+      const parts=(g.key==='wait')?ticketSplit(list):[['',list]];
+      for(const [st,rows] of parts){
+        if(parts.length>1){
+          const th=document.createElement('div');th.className='thead';
+          th.innerHTML=`<span class="pill" style="${pill(tcolor(st))}">${esc(st||'상태 미상')}</span>`
+            +`<span class="n">${rows.length}</span>`
+            +(trank(st)===0?'<span class="ghint">GitHub 기준 착수 가능</span>':'');
+          host.appendChild(th);
+        }
+        const cc=document.createElement('div');cc.className='rows';
+        rows.forEach(c=>cc.appendChild(issueRow(c)));
+        host.appendChild(cc);
+      }
+    }
+    board.appendChild(host);
   }
   board.scrollTop=top;
 }
@@ -1447,6 +1492,10 @@ function issueRow(c){
   const v=c.verify||{}, ag=c.agreement||{};
   const P=[];
   P.push(`<span class="statuspill" style="${pill(sm.c)}">${sm.ko}</span>`);
+  // GitHub 이 아는 진행상태 — Lookout 레인과 **다른 축**이라 나란히 붙인다.
+  if(c.ticket_status)P.push(`<span class="pill" style="${pill(tcolor(c.ticket_status))}"`
+    +` title="${esc(c.ticket_board||'GitHub Project')} 의 Status — Lookout 은 읽기만 합니다">`
+    +`🎫 ${esc(c.ticket_status)}</span>`);
   if(c.repo&&c.repo!==TOPIC_REPO)
     P.push(`<span class="repopill" style="${pill(rc)}"><span class="rdot" style="background:${rc}"></span>${esc(repoShort(c.repo))}</span>`);
   if(c.status!=='triage'&&c.engine)P.push(`<span class="pill">${esc(c.engine)}</span>`);

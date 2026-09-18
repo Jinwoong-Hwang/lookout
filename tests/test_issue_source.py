@@ -1,4 +1,5 @@
 import json
+import pathlib
 import sqlite3
 import unittest
 
@@ -8,7 +9,7 @@ REPO = "acme/product-hub"
 
 
 def _issue(n, title="[FE] 무언가", assignees=("me",), labels=(),
-           issue_type=None, parent=None, sub=None):
+           issue_type=None, parent=None, sub=None, project_items=None):
     row = {"number": n, "title": title, "url": f"https://github.com/{REPO}/issues/{n}",
            "labels": [{"name": x} for x in labels],
            "assignees": [{"login": x} for x in assignees], "updatedAt": "2026-09-10T00:00:00Z",
@@ -16,7 +17,8 @@ def _issue(n, title="[FE] 무언가", assignees=("me",), labels=(),
            "parent": ({"number": parent, "title": f"에픽 {parent}",
                        "url": f"https://github.com/{REPO}/issues/{parent}"}
                       if parent else None),
-           "subIssuesSummary": {"completed": (sub or (0, 0))[0], "total": (sub or (0, 0))[1]}}
+           "subIssuesSummary": {"completed": (sub or (0, 0))[0], "total": (sub or (0, 0))[1]},
+           "projectItems": project_items or []}
     return row
 
 
@@ -112,6 +114,34 @@ class IssueSourceTest(unittest.TestCase):
         poller.poll_issues(self.c)
         self.assertIsNone(self._payload(keys.issue_key(REPO, 1765))["parent"])
 
+    # ── 티켓 진행상태(읽기 전용) ───────────────────────────────────
+    def test_poll_carries_the_project_status(self):
+        """보드 레인과 티켓 진행상태는 다른 축이다 — 대기 12건이 전부 같은 얼굴이던
+        문제가 여기서 갈린다(Backlog / Ready dev / Developing)."""
+        ghclient.issue_list = lambda *_a, **_k: [_issue(
+            2163, project_items=[{"status": {"name": "Ready dev"}, "title": "product backlog"}])]
+        poller.poll_issues(self.c)
+        m = self._payload(keys.issue_key(REPO, 2163))
+        self.assertEqual(m["ticket_status"], "Ready dev")
+        self.assertEqual(m["ticket_board"], "product backlog")
+
+    def test_status_comes_from_the_first_board_that_has_one(self):
+        """한 이슈가 여러 프로젝트에 올라가 있다(실측 #1842 = product backlog + QA).
+        상태 없는 항목이 먼저 와도 값을 찾아내야 한다."""
+        ghclient.issue_list = lambda *_a, **_k: [_issue(1842, project_items=[
+            {"status": None, "title": "상태 없는 보드"},
+            {"status": {"name": "NextPatch"}, "title": "product backlog"},
+            {"status": {"name": "Next Patch"}, "title": "QA"}])]
+        poller.poll_issues(self.c)
+        m = self._payload(keys.issue_key(REPO, 1842))
+        self.assertEqual((m["ticket_status"], m["ticket_board"]), ("NextPatch", "product backlog"))
+
+    def test_issue_outside_any_project_has_no_status(self):
+        """프로젝트에 없는 이슈도 보드에 떠야 한다 — 빈 값이 곧 '미상'이다."""
+        ghclient.issue_list = lambda *_a, **_k: [_issue(1767)]
+        poller.poll_issues(self.c)
+        self.assertEqual(self._payload(keys.issue_key(REPO, 1767))["ticket_status"], "")
+
     def test_issue_and_pr_keys_do_not_collide_on_same_number(self):
         self.assertNotEqual(keys.issue_key(REPO, 7), keys.root_key(REPO, 7))
 
@@ -165,3 +195,20 @@ class IssueSourceTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ProjectStatusIsReadOnlyTest(unittest.TestCase):
+    """진행상태는 팀 공용 보드(GitHub Project)의 값이다. 읽기만 한다고 정했으니
+    쓰기 경로가 생기면 여기서 막는다 — 봇이 남의 보드를 옮기는 건 되돌리기 어렵고,
+    '동기화'라는 이름으로 조용히 들어오기 쉬운 변경이다."""
+
+    WRITES = ("updateProjectV2", "ProjectV2ItemFieldValue",
+              "project item-edit", "item-edit")
+
+    def test_no_source_file_moves_a_ticket_on_the_project_board(self):
+        src = pathlib.Path(__file__).resolve().parent.parent / "src"
+        for f in sorted(src.glob("*.py")):
+            text = f.read_text(encoding="utf-8")
+            for needle in self.WRITES:
+                self.assertNotIn(needle, text,
+                                 f"{f.name} 가 Project 필드를 쓴다 — 읽기 전용 결정 위반")

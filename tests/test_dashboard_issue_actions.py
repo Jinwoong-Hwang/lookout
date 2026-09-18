@@ -195,12 +195,21 @@ class DashboardIssueActionTest(unittest.TestCase):
         self.assertEqual(row["parent"]["number"], 1680)
         self.assertEqual(row["sub"], {"done": 0, "total": 0})
 
+    def test_issue_row_carries_the_ticket_progress_status(self):
+        """보드 레인(Lookout)과 티켓 진행상태(GitHub)는 다른 축이라 둘 다 실린다."""
+        db.merge_payload(self.c, self.card_id,
+                         {"ticket_status": "Ready dev", "ticket_board": "product backlog"})
+        row = [r for r in dashboard.build_board() if r["kind"] == "issue"][0]
+        self.assertEqual(row["ticket_status"], "Ready dev")
+        self.assertEqual(row["ticket_board"], "product backlog")
+
     def test_issue_row_without_epic_fields_degrades_quietly(self):
         """폴러가 아직 안 돈 옛 카드도 보드에 떠야 한다(빈 값 = 소속 미상)."""
         row = [r for r in dashboard.build_board() if r["kind"] == "issue"][0]
         self.assertEqual(row["issue_type"], "")
         self.assertIsNone(row["parent"])
         self.assertEqual(row["sub"], {})
+        self.assertEqual(row["ticket_status"], "")
 
 
 if __name__ == "__main__":
@@ -318,6 +327,46 @@ class SideNavTest(unittest.TestCase):
         main = self.html[self.html.index('<div class="main">'):self.html.index("</nav>") + 10000]
         for el in ('id="filterbar"', 'id="mentions"', 'id="board"'):
             self.assertIn(el, main)
+
+
+@unittest.skipUnless(shutil.which("node"), "node 없음")
+class TicketStatusSplitTest(unittest.TestCase):
+    """대기 목록을 티켓 진행상태로 가르는 규칙. 순서가 틀리면 Backlog(착수 불가)가
+    맨 위에 와서, 고치기 전과 똑같이 '뭘 시작할지' 고를 수 없게 된다."""
+
+    def _split(self, cards):
+        html = dashboard.HTML
+        js = ("const CARDS=" + json.dumps(cards, ensure_ascii=False) + ";\n"
+              + html[html.index("const TICKET_ORDER="):html.index("function renderWork(")]
+              + "console.log(JSON.stringify(ticketSplit(CARDS)"
+                ".map(([st,rows])=>[st,rows.map(r=>r.display)])));")
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False,
+                                         encoding="utf-8") as f:
+            f.write(js)
+            path = f.name
+        try:
+            proc = subprocess.run(["node", path], capture_output=True, text=True)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            return json.loads(proc.stdout)
+        finally:
+            os.unlink(path)
+
+    @staticmethod
+    def _card(num, status):
+        return {"display": f"PH-{num}", "ticket_status": status}
+
+    def test_ready_to_start_comes_first_and_unknown_last(self):
+        out = self._split([self._card(1767, "Backlog"), self._card(2017, "Developing"),
+                           self._card(2163, "Ready dev"), self._card(9001, "")])
+        self.assertEqual([st for st, _ in out],
+                         ["Ready dev", "Developing", "Backlog", ""])
+        self.assertEqual(out[0][1], ["PH-2163"])
+
+    def test_flat_when_no_card_knows_its_status(self):
+        """폴러가 아직 안 돈 판에서 전부 '상태 미상' 머리글 아래로 밀어넣으면
+        없던 고장처럼 보인다 — 예전처럼 한 덩어리로 둔다."""
+        out = self._split([self._card(1, ""), self._card(2, "")])
+        self.assertEqual(out, [["", ["PH-1", "PH-2"]]])
 
 
 @unittest.skipUnless(shutil.which("node"), "node 없음")

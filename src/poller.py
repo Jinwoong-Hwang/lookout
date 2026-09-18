@@ -20,9 +20,23 @@ def _display(repo: str, number: int) -> str:
     return f"{prefix}-{number}" if prefix else f"{repo.split('/')[-1]}#{number}"
 
 
+def _ticket_status(issue: dict) -> tuple[str, str]:
+    """Project 의 Status 필드(진행상태)와 그 보드 이름.
+
+    한 이슈가 여러 프로젝트에 올라가 있을 수 있어(실측: #1842 는 product backlog +
+    QA) 값이 있는 첫 항목을 쓴다. 어느 보드에서 온 값인지도 같이 싣는다 — 화면에서
+    출처를 밝히지 않으면 두 보드가 다른 값을 줄 때 어느 쪽인지 알 수 없다."""
+    for item in (issue.get("projectItems") or []):
+        name = ((item.get("status") or {}).get("name") or "").strip()
+        if name:
+            return name, (item.get("title") or "").strip()
+    return "", ""
+
+
 def _issue_payload(repo: str, issue: dict) -> dict:
     parent = issue.get("parent") or None
     sub = issue.get("subIssuesSummary") or {}
+    ticket_status, ticket_board = _ticket_status(issue)
     return {
         "display": _display(repo, issue["number"]),
         "title": issue.get("title"),
@@ -41,6 +55,10 @@ def _issue_payload(repo: str, issue: dict) -> dict:
         # GitHub 기준 자식 진행도(내게 할당되지 않은 자식까지 포함). 보드에 보이는
         # 건수와 다를 수 있어 화면에서도 출처를 갈라 적는다.
         "sub": {"done": sub.get("completed") or 0, "total": sub.get("total") or 0},
+        # 티켓 진행상태 — 읽기 전용이다. Lookout 은 Project 에 되돌려 쓰지 않는다
+        # (팀 공용 보드라 봇이 건드릴 일이 아니다). 빈 값 = 프로젝트에 없거나 미상.
+        "ticket_status": ticket_status,
+        "ticket_board": ticket_board,
     }
 
 

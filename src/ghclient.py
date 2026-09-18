@@ -50,7 +50,7 @@ def issue_list(repo: str, assignee: str = None, title_prefixes=None,
     # issueType/parent/subIssuesSummary 는 GitHub 네이티브 sub-issue 관계다. 목록
     # 한 번에 딸려 오므로 에픽 소속을 알아내는 데 추가 호출이 들지 않는다.
     fields = ("number,title,url,labels,assignees,updatedAt,author,"
-              "issueType,parent,subIssuesSummary")
+              "issueType,parent,subIssuesSummary,projectItems")
     args = ["issue", "list", "--repo", repo, "--state", "open",
             "--limit", str(limit), "--json", fields]
     if assignee:
