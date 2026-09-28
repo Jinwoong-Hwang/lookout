@@ -119,18 +119,23 @@ class PrConversationTest(unittest.TestCase):
         self.assertNotIn("서술서술", out)
 
 
-class AuthorReplyCapTest(unittest.TestCase):
-    def test_only_the_newest_replies_are_sent_to_closure(self):
-        fp = "owner/repo#1:src/app.ts:10:stale-token"
-        comments = [{"id": "0", "author": "bot", "author_id": "9", "created_at": "00",
-                     "body": f"<!-- hermes:fp={fp} -->"}]
-        comments += [{"id": str(i), "author": "author", "author_id": "42",
-                      "created_at": f"{i:02d}", "body": f"회신 {i}"} for i in range(1, 15)]
-        body = {"id": "pr-body", "author": "author", "created_at": "00", "body": "본문 보류 표"}
-        replies = ghclient.finding_author_replies(comments, fp, "42", "bot", body)
-        self.assertEqual(len(replies), ghclient.MAX_AUTHOR_REPLIES + 1)
-        self.assertEqual(replies[0]["id"], "pr-body")  # 본문은 상한과 무관하게 항상
-        self.assertEqual([r["id"] for r in replies[1:]], [str(i) for i in range(5, 15)])
+class AuthorReplyBudgetTest(unittest.TestCase):
+    def test_budget_drops_the_oldest_unpinned_reply_first(self):
+        """건수 cap 이었을 때는 #10066 의 14건 중 가장 오래된 1라운드 회신(보류
+        근거)이 잘렸다. 문자 예산 + pin 으로 바꾼 이유다."""
+        replies = ([{"id": "body:pr", "source": "body", "created_at": "00", "body": "본문"}]
+                   + [{"id": f"issue:{i}", "source": "issue", "created_at": f"{i:02d}",
+                       "body": "x" * 100} for i in range(1, 6)])
+        # 본문 2자 + 100자짜리 두 건 = 202, 세 건째는 302 라 예산 250 을 넘는다
+        got = ghclient.trim_author_replies(replies, budget=250)
+        ids = [r["id"] for r in got]
+        self.assertEqual(ids[0], "body:pr")            # 본문은 항상
+        self.assertEqual(ids[1:], ["issue:4", "issue:5"])  # 남는 예산은 최신부터
+
+    def test_everything_fits_when_the_budget_is_generous(self):
+        replies = [{"id": f"issue:{i}", "source": "issue", "created_at": f"{i:02d}",
+                    "body": "x" * 100} for i in range(1, 6)]
+        self.assertEqual(len(ghclient.trim_author_replies(replies)), 5)
 
 
 if __name__ == "__main__":

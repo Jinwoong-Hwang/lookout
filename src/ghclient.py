@@ -14,7 +14,10 @@ FP_MARKER = "<!-- hermes:fp="
 # PR 본문이 길면(설계 문서째 붙는 PR이 있다) 대화 예산을 혼자 다 먹는다.
 PR_BODY_CHARS = 8000
 # closure 프롬프트에 실어 보낼 작성자 회신 수 상한(본문은 별도로 항상 포함)
-MAX_AUTHOR_REPLIES = 10
+# closure 프롬프트에 실을 작성자 회신 총량. 건수가 아니라 문자로 끊는다 —
+# #10066 은 회신이 14건이라 "최신 10건" 이면 가장 오래된 1라운드 회신(보류
+# 근거가 거기 있다)이 잘렸다. 예산은 넉넉히 두고, 호출 횟수로 비용을 잡는다.
+AUTHOR_REPLY_CHARS = 40000
 # 버려도 되는 글 한 덩이의 상한. CI 실패 로그 덤프가 #10066 에서 60,211자로
 # 대화의 71%를 먹었는데, 순서대로 버리면 값싼 지적 목록이 먼저 밀려난다.
 MAX_DROPPABLE_PART = 6000
@@ -341,57 +344,81 @@ def pr_author_identity(repo: str, pr: int) -> dict:
     return json.loads(proc.stdout)
 
 
-def issue_comments_structured(repo: str, pr: int) -> list[dict]:
-    """Issue comments with immutable author ids, sorted as GitHub returned them."""
-    proc = _run([
-        "api", f"repos/{repo}/issues/{pr}/comments", "--paginate",
-        "-q", ".[] | {id: (.id|tostring), author: .user.login, "
-              "author_id: (.user.id|tostring), created_at, body}",
-    ])
-    out = []
-    for line in proc.stdout.splitlines():
-        line = line.strip()
-        if line:
-            out.append(json.loads(line))
-    return out
+def _author_record(source: str, ident, login: str, created_at: str, url: str,
+                   body: str) -> dict:
+    """출처가 다르면 id 공간도 다르다 — (출처, id) 를 합쳐 한 값으로 쓴다.
 
-
-def finding_author_replies(comments: list[dict], fp: str, author_id: str,
-                           bot_login: str, pr_body: dict | None = None) -> list[dict]:
-    """Verified PR-author replies in this finding's comment windows, plus the PR body.
-
-    묶음 댓글이어도 지문 문자열을 요구하지 않는다 — 사람은 지문을 복붙하지 않으므로,
-    지적 2건 이상을 한 댓글로 올리는 지금 구성에서는 작성자 회신이 100% 누락됐다
-    (#10066: 같은 지적이 8회 재게시). 어느 지적에 대한 답인지는 closure 판정기가
-    가리고, 인용 검증과 운영자 게이트가 한 번 더 받는다.
-
-    봇이 쓴 글은 작성자 계정으로 올라와도 회신이 아니다 — 작성자도 자기 인스턴스를
-    돌리면 그 리뷰 코멘트가 같은 author_id 로 섞여 들어온다.
-
-    창이 여러 개면 모두 모은다(예전엔 마지막 창만 남겨서, 첫 라운드에 한 번 답하고
-    만 해명이 다음 라운드에 사라졌다). 대신 최신 MAX_AUTHOR_REPLIES 건으로 끊는다.
+    이슈 코멘트·리뷰·리뷰 코멘트는 서로 다른 번호 체계라, 그냥 id 만 저장하면
+    나중에 어느 글이었는지 되짚을 수 없다.
     """
-    marker = f"<!-- hermes:fp={fp} -->"
-    found: dict[str, dict] = {}
-    if pr_body and (pr_body.get("body") or "").strip():
-        found[str(pr_body["id"])] = pr_body
-    for idx, source in enumerate(comments):
-        if source.get("author") != bot_login or marker not in (source.get("body") or ""):
+    return {"id": f"{source}:{ident}", "source": source, "author": login,
+            "created_at": created_at or "", "url": url or "", "body": body}
+
+
+def collect_author_replies(repo: str, pr: int, author: dict) -> list[dict]:
+    """작성자가 직접 쓴 글을 네 출처에서 모은다 — 오래된 순.
+
+    closure 가 /issues/comments 하나만 읽고 있었다. #10066 실측으로 작성자 회신
+    10라운드 중 9라운드가 PR '리뷰 본문'(/pulls/reviews)에 있었고, 판정기에 닿은
+    건 작성자 글 32,469자 중 2,529자(7.8%)뿐이었다.
+
+    봇이 쓴 글은 제외한다 — 작성자도 자기 인스턴스를 돌리면 그 리뷰 코멘트가 같은
+    author_id 로 올라와(#10066 에서 10건) '작성자 회신'으로 섞인다.
+    """
+    author_id = str(author.get("id") or "")
+    login = author.get("login", "")
+    out = []
+
+    body = (author.get("body") or "").strip()
+    if body:
+        out.append(_author_record(
+            "body", "pr", login, author.get("created_at", ""),
+            f"https://github.com/{repo}/pull/{pr}", _clip_body(body)))
+
+    def take(source, args, url_key="html_url"):
+        proc = _run(args, check=False)
+        if proc.returncode != 0:
+            return
+        for line in proc.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                d = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            text = (d.get("body") or "").strip()
+            if (not text or FP_MARKER in text
+                    or str(d.get("author_id") or "") != author_id):
+                continue
+            out.append(_author_record(source, d.get("id"), login,
+                                      d.get("created_at", ""), d.get(url_key, ""), text))
+
+    q = ("{id, author_id: (.user.id|tostring), created_at, body, html_url}")
+    take("issue", ["api", f"repos/{repo}/issues/{pr}/comments", "--paginate", "-q", f".[] | {q}"])
+    take("review", ["api", f"repos/{repo}/pulls/{pr}/reviews", "--paginate",
+                    "-q", ".[] | {id, author_id: (.user.id|tostring), "
+                          "created_at: .submitted_at, body, html_url}"])
+    take("review_comment", ["api", f"repos/{repo}/pulls/{pr}/comments", "--paginate",
+                            "-q", f".[] | {q}"])
+    return sorted(out, key=lambda r: (r["created_at"], r["id"]))
+
+
+def trim_author_replies(replies: list[dict], pinned: str = "",
+                        budget: int = AUTHOR_REPLY_CHARS) -> list[dict]:
+    """예산을 넘으면 오래된 것부터 뺀다. 단 pinned(이미 결정 근거로 인용된 글)와
+    PR 본문은 남긴다 — 보류 근거는 대개 가장 오래된 회신에 있어서, 최신부터
+    담다가 끊으면 정작 필요한 글이 먼저 사라진다."""
+    keep = [r for r in replies if r["source"] == "body" or r["id"] == pinned]
+    rest = [r for r in replies if r not in keep]
+    used = sum(len(r["body"]) for r in keep)
+    chosen = list(keep)
+    for r in reversed(rest):  # 최신부터 채운다
+        if used + len(r["body"]) > budget:
             continue
-        for comment in comments[idx + 1:]:
-            body = comment.get("body") or ""
-            if comment.get("author") == bot_login and FP_MARKER in body:
-                break
-            if (str(comment.get("author_id") or "") == str(author_id)
-                    and FP_MARKER not in body and body.strip()):
-                found[str(comment["id"])] = {
-                    "id": str(comment["id"]), "author": comment.get("author", ""),
-                    "created_at": comment.get("created_at", ""), "body": body,
-                }
-    body_entry = found.pop(str(pr_body["id"]), None) if pr_body else None
-    replies = sorted(found.values(), key=lambda r: ((r.get("created_at") or ""), r["id"]))
-    replies = replies[-MAX_AUTHOR_REPLIES:]
-    return ([body_entry] if body_entry else []) + replies
+        chosen.append(r)
+        used += len(r["body"])
+    return sorted(chosen, key=lambda r: (r["created_at"], r["id"]))
 
 
 def comment_reactions(repo: str, comment_id: str) -> dict:

@@ -18,8 +18,6 @@ DEFERRED = {"deferred", "defer_pending"}
 
 # closure 프롬프트는 finding 하나만 판단하므로 리뷰보다 적은 예산으로 충분
 CLOSURE_DIFF_CHARS = 40000
-# 댓글이 아니라 PR 본문에서 나온 작성자 발언에 붙이는 가짜 댓글 id
-PR_BODY_ID = "pr-body"
 
 
 def _is_stale(card) -> bool:
@@ -55,15 +53,6 @@ def _stable_rule(f: dict) -> str:
     return f"{slug}-{digest}"
 
 
-def _author_body_reply(author: dict) -> dict | None:
-    """PR 본문도 작성자가 쓴 글이다 — '이건 보류' 를 댓글 대신 본문 표에 적는다."""
-    body = (author.get("body") or "").strip()
-    if not body:
-        return None
-    return {"id": PR_BODY_ID, "author": author.get("login", ""),
-            "created_at": author.get("created_at", ""), "body": body}
-
-
 def _verified_reply(verdict: dict, replies: list[dict]):
     comment_id = str(verdict.get("reply_comment_id") or "")
     evidence = (verdict.get("reply_evidence") or "").strip()
@@ -83,29 +72,31 @@ def _verified_follow_up(verdict: dict, reply: dict | None) -> str:
 
 
 def _run_closure(c, card, priors, diff, engine, wt, policy,
-                 author: dict, comments: list[dict], plan=None):
-    """Re-judge previous findings using backend-verified PR-author replies."""
+                 author: dict, all_replies: list[dict], plan=None):
+    """Re-judge previous findings using backend-verified PR-author replies.
+
+    회신은 카드당 한 번만 모은다. 예전엔 지적마다 '그 지적의 봇 댓글 뒤 창' 을
+    다시 훑었는데, 그 창 규칙이 #10066 에서 회신을 통째로 놓친 원인이었다.
+    지금은 작성자가 쓴 글 전부를 후보로 넘기고, 어느 지적에 대한 답인지는
+    판정기가 고른다 — 인용 검증과 운영자 게이트가 뒤를 받는다.
+    """
     prompt_file = profiles.prompt_name(policy, "closure")
     # 문자로 자르면 파일 중간에서 끊기므로 여기서도 파일 단위로 다시 담는다
     cdiff, cfiles, _ = prdiff.pack(diff, CLOSURE_DIFF_CHARS)
-    body_reply = _author_body_reply(author)
+    sources = {}
+    for r in all_replies:
+        sources[r["source"]] = sources.get(r["source"], 0) + 1
+    db.log_event(c, "closure_replies_collected", card["key"],
+                 {"count": len(all_replies), "sources": sources,
+                  "chars": sum(len(r["body"]) for r in all_replies)})
     for pf in priors:
         decision_head = pf["decision_head"]
-        if pf["status"] in {"dismissed", "deferred", "dismiss_pending", "defer_pending"}:
-            if decision_head == card["head_sha"]:
-                continue
+        if pf["status"] in DECIDED and decision_head == card["head_sha"]:
+            continue
 
-        replies = ghclient.finding_author_replies(
-            comments, pf["fp"], author.get("id", ""), ghclient.my_login(), body_reply,
-        )
-        if decision_head and decision_head != card["head_sha"] and pf["decision_comment_id"]:
-            decision_comment = next(
-                (x for x in comments if str(x.get("id")) == str(pf["decision_comment_id"])),
-                None,
-            )
-            if decision_comment:
-                replies = [x for x in replies
-                           if x.get("created_at", "") > decision_comment.get("created_at", "")]
+        # 이미 근거로 쓴 회신은 예산과 무관하게 남긴다
+        replies = ghclient.trim_author_replies(
+            all_replies, pinned=str(pf["decision_comment_id"] or ""))
         detail = _json.loads(pf["body"]) if pf["body"] else {}
         cprompt = prompt_tpl.render(
             prompt_file, FILE=pf["file"], LINE=pf["line"], TITLE=pf["title"],
@@ -161,6 +152,7 @@ def _run_closure(c, card, priors, diff, engine, wt, policy,
             db.clear_finding_decision(c, pf["id"], status)
         db.log_event(c, "finding_closure", card["key"],
                      {"fp": pf["fp"], "status": status,
+                      "replies_seen": len(replies),
                       "evidence": evidence,
                       "reply_comment_id": verified_reply["id"] if verified_reply else "",
                       "reply_evidence": (verdict.get("reply_evidence") or "").strip()})
@@ -173,7 +165,7 @@ def refresh_author_decisions(c, card):
         return
     try:
         author = ghclient.pr_author_identity(card["repo"], card["pr_number"])
-        comments = ghclient.issue_comments_structured(card["repo"], card["pr_number"])
+        replies = ghclient.collect_author_replies(card["repo"], card["pr_number"], author)
         # pr_diff는 대형 PR에서 DiffTooLarge(=GhError)를 던져 아래 except가 삼킨다.
         # 그러면 작성자 회신 재확인이 조용히 건너뛰어지므로 로컬 폴백을 쓴다.
         diff = prdiff.fetch(c, card)
@@ -184,7 +176,7 @@ def refresh_author_decisions(c, card):
     try:
         wt = worktree.make_worktree(card["repo"], card["pr_number"], card["head_sha"])
         _run_closure(c, card, priors, diff, card["engine"] or "claude", wt,
-                     profiles.policy_from_card(card), author, comments)
+                     profiles.policy_from_card(card), author, replies)
     finally:
         if wt:
             worktree.remove_worktree(card["repo"], wt)
@@ -207,9 +199,10 @@ def process(c, card):
     priors = db.prior_open_findings(c, repo, pr, card["id"])
     try:
         author_identity = ghclient.pr_author_identity(repo, pr) if priors else {}
-        structured_comments = ghclient.issue_comments_structured(repo, pr) if priors else []
+        author_replies = (ghclient.collect_author_replies(repo, pr, author_identity)
+                          if priors else [])
     except ghclient.GhError as e:
-        author_identity, structured_comments = {}, []
+        author_identity, author_replies = {}, []
         db.log_event(c, "closure_context_error", card["key"], {"error": str(e)})
     is_doc = policy.get("profile_type") == "doc"
     plan = None
@@ -236,7 +229,7 @@ def process(c, card):
                 _save_payload(c, card["id"], meta)
                 db.log_event(c, "doc_summary_planned", card["key"], meta["doc_summary"])
             _run_closure(c, card, priors, diff, engine, wt, policy,
-                         author_identity, structured_comments, plan)
+                         author_identity, author_replies, plan)
             context = doc_planner.build_context(wt, diff, changed_files, plan)
             prompt = prompt_tpl.render(
                 profiles.prompt_name(policy, "review", engine),
@@ -248,7 +241,7 @@ def process(c, card):
             )
         else:
             _run_closure(c, card, priors, diff, engine, wt, policy,
-                         author_identity, structured_comments)
+                         author_identity, author_replies)
             prompt = prompt_tpl.render(
                 profiles.prompt_name(policy, "review", engine),
                 REPO=repo, PR=pr, TITLE=meta.get("title", ""),

@@ -40,7 +40,7 @@ class ReviewerClosureTest(unittest.TestCase):
         rendered = []
         old_view, old_diff, old_conversation = ghclient.pr_view, ghclient.pr_diff, ghclient.pr_conversation
         old_author = ghclient.pr_author_identity
-        old_comments = ghclient.issue_comments_structured
+        old_comments = ghclient.collect_author_replies
         old_login = ghclient.my_login
         old_changed_files = ghclient.pr_changed_files
         old_make, old_remove = worktree.make_worktree, worktree.remove_worktree
@@ -50,14 +50,13 @@ class ReviewerClosureTest(unittest.TestCase):
             ghclient.pr_view = lambda *_: {"state": "OPEN", "headRefOid": "new"}
             ghclient.pr_diff = lambda *_: "diff"
             ghclient.pr_conversation = lambda *_: "author reply"
-            ghclient.pr_author_identity = lambda *_: {"login": "author", "id": "42"}
+            ghclient.pr_author_identity = lambda *_: {"login": "author", "id": "42",
+                                                      "body": "", "created_at": "0"}
             ghclient.my_login = lambda: "bot"
             ghclient.pr_changed_files = lambda *_: []
-            ghclient.issue_comments_structured = lambda *_: [
-                {"id": "10", "author": "bot", "author_id": "1", "created_at": "1",
-                 "body": commenter._marker(self.fp)},
-                {"id": "11", "author": "author", "author_id": "42", "created_at": "2",
-                 "body": reply_evidence or "일반 답변"},
+            ghclient.collect_author_replies = lambda *_: [
+                {"id": "issue:11", "source": "issue", "author": "author",
+                 "created_at": "2", "url": "", "body": reply_evidence or "일반 답변"},
             ]
             worktree.make_worktree = lambda *_: "/tmp/review"
             worktree.remove_worktree = lambda *_: None
@@ -76,7 +75,7 @@ class ReviewerClosureTest(unittest.TestCase):
                         raise RuntimeError("closure unavailable")
                     return {"status": closure_status, "reason": "author reply judged",
                             "evidence": evidence, "reply_evidence": reply_evidence,
-                            "reply_comment_id": "11" if reply_evidence else "",
+                            "reply_comment_id": "issue:11" if reply_evidence else "",
                             "follow_up": follow_up}
                 return {"findings": findings}
 
@@ -85,7 +84,7 @@ class ReviewerClosureTest(unittest.TestCase):
         finally:
             ghclient.pr_view, ghclient.pr_diff, ghclient.pr_conversation = old_view, old_diff, old_conversation
             ghclient.pr_author_identity = old_author
-            ghclient.issue_comments_structured = old_comments
+            ghclient.collect_author_replies = old_comments
             ghclient.my_login = old_login
             ghclient.pr_changed_files = old_changed_files
             worktree.make_worktree, worktree.remove_worktree = old_make, old_remove
@@ -113,7 +112,7 @@ class ReviewerClosureTest(unittest.TestCase):
                 self.assertEqual(finding["status"],
                                  "dismiss_pending" if status == "dismissed" else "defer_pending")
                 self.assertEqual(finding["card_id"], self.new_id)
-                self.assertEqual(finding["decision_comment_id"], "11")
+                self.assertEqual(finding["decision_comment_id"], "issue:11")
                 self.assertEqual(self.c.execute("SELECT COUNT(*) n FROM findings").fetchone()["n"], 1)
                 self.assertEqual(self.c.execute("SELECT status FROM cards WHERE id=?", (self.new_id,)).fetchone()["status"], "commented")
 
@@ -128,13 +127,13 @@ class ReviewerClosureTest(unittest.TestCase):
                 self.c.execute("UPDATE cards SET status='intake' WHERE id=?", (self.new_id,))
                 self.c.execute(
                     """UPDATE findings SET status=?,card_id=?,decision_head='old',
-                       decision_comment_id='11',decision_evidence='의도적으로 유지'""",
+                       decision_comment_id='issue:11',decision_evidence='의도적으로 유지'""",
                     (status, self.old_id),
                 )
                 self._run("unresolved", [])
                 finding = self.c.execute("SELECT * FROM findings WHERE fp=?", (self.fp,)).fetchone()
                 self.assertEqual(finding["status"], status)
-                self.assertEqual(finding["decision_comment_id"], "11")
+                self.assertEqual(finding["decision_comment_id"], "issue:11")
                 card = self.c.execute("SELECT * FROM cards WHERE id=?", (self.new_id,)).fetchone()
                 self.assertEqual(card["status"], "commented")
                 self.assertNotIn("force_post", json.loads(card["payload"]))
@@ -148,7 +147,7 @@ class ReviewerClosureTest(unittest.TestCase):
         """
         self.c.execute(
             """UPDATE findings SET status='dismiss_pending',card_id=?,decision_head='old',
-               decision_comment_id='11',decision_evidence='의도적으로 유지'""", (self.old_id,)
+               decision_comment_id='issue:11',decision_evidence='의도적으로 유지'""", (self.old_id,)
         )
         self._run("unresolved", [], evidence="src/example.ts:10 에서 여전히 저장 없이 goBack()")
         finding = self.c.execute("SELECT * FROM findings WHERE fp=?", (self.fp,)).fetchone()
@@ -301,7 +300,7 @@ class ReviewerClosureTest(unittest.TestCase):
                 self.c.execute("UPDATE cards SET status='intake' WHERE id=?", (self.new_id,))
                 self.c.execute(
                     """UPDATE findings SET status=?,card_id=?,decision_head='old',
-                       decision_comment_id='11',decision_follow_up='LOOK-123'""",
+                       decision_comment_id='issue:11',decision_follow_up='LOOK-123'""",
                     (status, self.old_id),
                 )
                 self._run("unresolved", [],
@@ -327,7 +326,7 @@ class ReviewerClosureTest(unittest.TestCase):
         db.set_finding_decision(
             self.c,
             self.c.execute("SELECT id FROM findings WHERE fp=?", (self.fp,)).fetchone()["id"],
-            "dismissed", "old", "11", "의도적으로 유지",
+            "dismissed", "old", "issue:11", "의도적으로 유지",
         )
         self._run("unresolved", [], evidence="src/helper.ts changed the trust boundary")
         finding = self.c.execute("SELECT * FROM findings WHERE fp=?", (self.fp,)).fetchone()
