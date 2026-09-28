@@ -811,16 +811,13 @@ function tile(c){
   const inspect=c.feedback&&c.feedback.needs_inspection?`<span class="pill" style="${pill('#fbbf24')}">피드백 확인</span>`:'';
   // 운영자가 눌러야 넘어가는 카드는 숫자 하나로 묻히면 안 된다 — 다른 카운터 옆에
   // 🧑‍⚖️2 로만 떠서 '댓글완료' 로 읽혔다(실사용 지적)
-  const gate=c.closure&&c.closure.pending?`<span class="pill" style="${pill('#a78bfa')}">🧑‍⚖️ 내 차례 · 작성자 결정 ${c.closure.pending}건</span>`:'';
-  // postable 은 '게시 후보였던 신규 지적' 이고 held 는 거기 포함되지 않는다(보류는
-  // postable 조회에서 이미 빠진다). 그래서 둘을 빼면 안 된다 — 게시가 0건이었으니
-  // 후보 전부가 중복이다. 처음에 빼도록 써서 '이미 지적됨 1'(실제 3)이 떴다.
-  const quiet=!c.quiet?'':(()=>{
-    const bits=[];
-    if(c.quiet.held_author_decision)bits.push(`내 결정 대기 ${c.quiet.held_author_decision}`);
-    if(c.quiet.postable)bits.push(`남이 이미 지적 ${c.quiet.postable}`);
-    return bits.length?`<span class="pill" title="이번에 댓글이 나가지 않은 이유">🤐 ${bits.join(' · ')}</span>`:'';
-  })();
+  // 칩 하나로 '무엇이 내 차례고 나머지는 왜 조용한가' 를 같이 말한다. 둘로 나눴더니
+  // 같은 내용을 다른 말로 두 번 하는 꼴이었다.
+  const todo=c.closure&&c.closure.pending||0;
+  const dup=c.quiet&&c.quiet.postable||0;
+  const gate=(todo||dup)?`<span class="pill" style="${pill(todo?'#a78bfa':'#6b7688')}">${
+    todo?`🧑‍⚖️ 내 결정 ${todo}건`:''}${todo&&dup?' · ':''}${dup?`남이 올림 ${dup}`:''}</span>`:'';
+  const quiet='';
   const rc=repoColor(c.repo);
   const repoPill=`<span class="repopill" style="${pill(rc)}"><span class="rdot" style="background:${rc}"></span>${esc(repoShort(c.repo))}</span>`;
   el.innerHTML=`${xbtn}<div class="pr">${repoPill} <span class="num">#${c.pr}</span></div>
@@ -846,23 +843,38 @@ function openModal(c){
   if(c.feedback&&(c.feedback.up||c.feedback.down||c.feedback.confused||c.feedback.replies)){
     html+=`<div class="lbl">리뷰 피드백</div><div class="pre">👍 ${c.feedback.up||0} · 👎 ${c.feedback.down||0} · 😕 ${c.feedback.confused||0} · 💬 ${c.feedback.replies||0}${c.feedback.needs_inspection?' · 확인 필요':''}</div>`;
   }
-  if(c.findings.length){html+=`<div class="lbl">리뷰 결과 · ${c.findings.length}건</div>`;
-    c.findings.forEach(f=>{const sc=SEVC[f.severity]||'#6b7688';
-      html+=`<div class="finding" style="border-left-color:${stripe(sc)}">
-        <div class="ft">${esc(f.title)}</div>
-        <div class="meta">
-          <span class="sevtag" style="${pill(sc)}">${esc(f.severity||'?')}</span>
-          <span>확신도 ${esc(f.confidence||'?')}</span><span>·</span>
-          <code>${esc(f.file||'')}${f.line?(':'+esc(f.line)):''}</code>
-          <span class="fstatus">${esc(f.status)}</span>
-        </div>
-        <div class="pre">${esc(f.problem)}</div>
-        ${f.fix?`<div class="lbl2">제안</div><div class="pre">${esc(f.fix)}</div>`:''}
-        ${f.comment_id==='exists'?`<div class="lbl2">내 할 일 없음</div><div class="pre">다른 인스턴스가 같은 지적을 이미 올렸습니다. 같은 말을 반복하지 않으려고 이 묶음에서 뺐고, 작성자는 그쪽 댓글에 답하면 됩니다.</div>`:''}
-        ${['dismiss_pending','defer_pending'].includes(f.status)?`<div class="lbl2">작성자 결정 근거</div><div class="pre">${esc(f.decision_evidence||'')}</div>${f.status==='defer_pending'?`<div class="lbl2">후속 참조</div><div class="pre">${esc(f.decision_follow_up||'후속 참조 없음')}</div>`:''}<div class="btns"><button class="go" onclick="acceptAuthorDecision(event,${f.id},'accept_author_decision')">🧑‍⚖️ 작성자 결정 수용</button></div>`:''}
-        ${f.status==='deferred'?`<div class="lbl2">작성자 결정 근거</div><div class="pre">${esc(f.decision_evidence||'')}</div><div class="lbl2">후속 참조</div><div class="pre">${esc(f.decision_follow_up||'후속 참조 없음')}</div>`:''}
-        ${['posted','confirmed','unresolved'].includes(f.status)?`<div class="btns"><button class="go" onclick="acceptAuthorDecision(event,${f.id},'operator_dismiss')">🧑‍⚖️ 운영자 직접 수용</button></div>`:''}
-      </div>`});
+  if(c.findings.length){
+    // 5건을 한 줄로 늘어놓고 전부에 🧑‍⚖️ 버튼을 달아 두면, 무엇이 내 차례인지
+    // 하나하나 읽어야 안다. '내가 할 일' 을 기준으로 묶는다.
+    const mine=f=>['dismiss_pending','defer_pending'].includes(f.status);
+    const others=f=>f.comment_id==='exists';
+    const groups=[
+      {k:'gate', t:'내 결정이 필요합니다', rows:c.findings.filter(mine)},
+      {k:'ours', t:'내가 올린 지적', rows:c.findings.filter(f=>!mine(f)&&!others(f))},
+      {k:'them', t:'남이 이미 올림 — 할 일 없음', rows:c.findings.filter(f=>!mine(f)&&others(f))},
+    ].filter(g=>g.rows.length);
+    html+=`<div class="lbl">리뷰 결과 · ${c.findings.length}건</div>`;
+    groups.forEach(g=>{
+      const open=g.k==='gate'?' open':'';
+      html+=`<details class="grp"${open}><summary>${g.k==='gate'?'🧑‍⚖️ ':''}${g.t} · ${g.rows.length}건</summary>`;
+      g.rows.forEach(f=>{const sc=SEVC[f.severity]||'#6b7688';
+        html+=`<div class="finding" style="border-left-color:${stripe(sc)}">
+          <div class="ft">${esc(f.title)}</div>
+          <div class="meta">
+            <span class="sevtag" style="${pill(sc)}">${esc(f.severity||'?')}</span>
+            <span>확신도 ${esc(f.confidence||'?')}</span><span>·</span>
+            <code>${esc(f.file||'')}${f.line?(':'+esc(f.line)):''}</code>
+            <span class="fstatus">${esc(f.status)}</span>
+          </div>
+          <div class="pre">${esc(f.problem)}</div>
+          ${f.fix?`<div class="lbl2">제안</div><div class="pre">${esc(f.fix)}</div>`:''}
+          ${g.k==='them'?`<div class="pre">다른 인스턴스가 같은 지적을 이미 올렸습니다. 같은 말을 반복하지 않으려고 이 묶음에서 뺐고, 작성자는 그쪽 댓글에 답하면 됩니다.</div>`:''}
+          ${g.k==='gate'?`<div class="lbl2">작성자가 이렇게 답했습니다</div><div class="pre">${esc(f.decision_evidence||'')}</div>${f.status==='defer_pending'?`<div class="lbl2">후속 참조</div><div class="pre">${esc(f.decision_follow_up||'후속 참조 없음')}</div>`:''}<div class="btns"><button class="go" onclick="acceptAuthorDecision(event,${f.id},'accept_author_decision')">🧑‍⚖️ 이 답변 수용</button></div>`:''}
+          ${f.status==='deferred'||f.status==='dismissed'?`<div class="lbl2">작성자 결정 근거</div><div class="pre">${esc(f.decision_evidence||'')}</div>`:''}
+          ${g.k==='ours'&&['posted','confirmed','unresolved'].includes(f.status)?`<div class="btns"><button class="go" onclick="acceptAuthorDecision(event,${f.id},'operator_dismiss')">🙅 내가 접기 (오탐·불필요)</button></div>`:''}
+        </div>`});
+      html+='</details>';
+    });
   }else html+='<p class="sub">아직 finding 없음</p>';
   if(c.comments.length){html+='<div class="lbl">게시된 / 게시될 댓글</div>';
     c.comments.forEach(cm=>{const pending=(cm.type==='comment_dryrun'&&c.dryrun_pending);
