@@ -7,7 +7,8 @@ import hashlib
 import json as _json
 import re
 
-from . import db, doc_planner, engines, ghclient, keys, prdiff, profiles, prompt_tpl, worktree
+from . import (db, doc_planner, engines, ghclient, keys, ledger, prdiff, profiles,
+               prompt_tpl, worktree)
 from .config import CFG
 
 ACTIONABLE_SEVERITY_DOC = {"blocking", "should-fix"}
@@ -235,18 +236,19 @@ def process(c, card):
     db.set_status(c, card["id"], "reviewing")
     raw_diff = prdiff.fetch(c, card)
     diff, manifest = prdiff.pack_logged(c, card, raw_diff)
-    conversation = ghclient.pr_conversation(repo, pr)
     meta = _payload(card)
     engine = card["engine"] or "claude"
+    is_doc = policy.get("profile_type") == "doc"
     priors = db.prior_open_findings(c, repo, pr, card["id"])
     try:
-        author_identity = ghclient.pr_author_identity(repo, pr) if priors else {}
-        author_replies = (ghclient.collect_author_replies(repo, pr, author_identity)
-                          if priors else [])
+        author_identity = ghclient.pr_author_identity(repo, pr)
+        author_replies = ghclient.collect_author_replies(repo, pr, author_identity)
     except ghclient.GhError as e:
         author_identity, author_replies = {}, []
         db.log_event(c, "closure_context_error", card["key"], {"error": str(e)})
-    is_doc = policy.get("profile_type") == "doc"
+    prior_findings, author_notes = ledger.build(c, repo, pr, author_replies)
+    # 전사는 doc 프로필 프롬프트만 쓴다 — 코드 리뷰는 원장으로 대체됐다
+    conversation = ghclient.pr_conversation(repo, pr) if is_doc else ""
     plan = None
     judged: set[str] = set()
 
@@ -278,7 +280,8 @@ def process(c, card):
                 profiles.prompt_name(policy, "review", engine),
                 REPO=repo, PR=pr, TITLE=meta.get("title", ""),
                 AUTHOR=meta.get("author", ""), HEAD=head, DIFF=diff, FILES=manifest,
-                CONVERSATION=conversation, MAX_FINDINGS=policy["max_findings"],
+                CONVERSATION=conversation, PRIOR_FINDINGS=prior_findings,
+                AUTHOR_NOTES=author_notes, MAX_FINDINGS=policy["max_findings"],
                 REVIEW_MODE=plan["review_mode"], PLAN_JSON=doc_planner.dumps(plan),
                 DOC_CONTEXT=context,
             )
@@ -289,7 +292,8 @@ def process(c, card):
                 profiles.prompt_name(policy, "review", engine),
                 REPO=repo, PR=pr, TITLE=meta.get("title", ""),
                 AUTHOR=meta.get("author", ""), HEAD=head, DIFF=diff, FILES=manifest,
-                CONVERSATION=conversation, MAX_FINDINGS=policy["max_findings"],
+                CONVERSATION=conversation, PRIOR_FINDINGS=prior_findings,
+                AUTHOR_NOTES=author_notes, MAX_FINDINGS=policy["max_findings"],
             )
         result = engines.run_json(prompt, engine=engine, cwd=wt, add_dir=wt)
     finally:

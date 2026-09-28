@@ -45,6 +45,7 @@ class ReviewerClosureTest(unittest.TestCase):
         old_changed_files = ghclient.pr_changed_files
         old_make, old_remove = worktree.make_worktree, worktree.remove_worktree
         old_changed = worktree.changed_files_between
+        old_foreign = ghclient.other_bot_findings
         old_plan, old_context = reviewer.doc_planner.build_plan, reviewer.doc_planner.build_context
         old_render, old_run = prompt_tpl.render, reviewer.engines.run_json
         try:
@@ -61,6 +62,7 @@ class ReviewerClosureTest(unittest.TestCase):
             ]
             worktree.make_worktree = lambda *_: "/tmp/review"
             worktree.changed_files_between = lambda *_: changed
+            ghclient.other_bot_findings = lambda *_: []
             worktree.remove_worktree = lambda *_: None
             reviewer.doc_planner.build_plan = lambda *_: {"summary_only": False, "review_mode": "full"}
             reviewer.doc_planner.build_context = lambda *_: ""
@@ -91,6 +93,7 @@ class ReviewerClosureTest(unittest.TestCase):
             ghclient.pr_changed_files = old_changed_files
             worktree.make_worktree, worktree.remove_worktree = old_make, old_remove
             worktree.changed_files_between = old_changed
+            ghclient.other_bot_findings = old_foreign
             reviewer.doc_planner.build_plan, reviewer.doc_planner.build_context = old_plan, old_context
             prompt_tpl.render, reviewer.engines.run_json = old_render, old_run
         return calls, rendered

@@ -179,23 +179,59 @@ def _finding_title(segment: str, fallback: str) -> str:
     return fallback
 
 
-def compact_findings(login: str, body: str) -> str:
-    """봇 리뷰 코멘트를 지적 한 줄씩으로 줄인다.
-
-    리뷰어에게 이 글이 필요한 이유는 '이미 뭘 지적했나' 하나뿐인데, 원문은 문제
-    서술·코드블록·제안까지 실려 한 건에 2~3천 자다. #10066 에서는 봇 65건이
-    64k자를 먹어 대화 예산을 통째로 차지했고, 예산에 밀려 목록이 잘리면 같은
-    문제를 새 지문으로 다시 찾는다. 제목·위치·rule 만 남기면 전부 실어도 7k자다.
-    """
-    lines = []
-    rest = body
+def parse_findings(body: str):
+    """봇 리뷰 코멘트에서 (fp, 제목, 위치) 를 뽑는다 — 우리가 쓴 마커가 근거다."""
+    out, rest = [], body
     for fp in re.findall(r"<!-- hermes:fp=(.+?) -->", body):
         segment, _, rest = rest.partition(f"<!-- hermes:fp={fp} -->")
         _, _, tail = fp.partition("#")
         _, _, loc = tail.partition(":")
         where, _, rule = loc.rpartition(":")
-        lines.append(f"- [{login}] {_finding_title(segment, rule)} — {where} (rule: {rule})")
+        out.append((fp, _finding_title(segment, rule), where, rule))
+    return out
+
+
+def compact_findings(login: str, body: str) -> str:
+    """봇 리뷰 코멘트를 지적 한 줄씩으로 줄인다 — doc 프로필의 대화 전사용."""
+    lines = [f"- [{login}] {title} — {where} (rule: {rule})"
+             for _fp, title, where, rule in parse_findings(body)]
     return "이미 올라간 지적:\n" + "\n".join(lines) if lines else ""
+
+
+def other_bot_findings(repo: str, pr: int, my: str):
+    """다른 인스턴스가 올린 지적 — 제목·위치만. 상태는 우리 DB 에 없어서 모른다.
+
+    #10066 은 인스턴스 4대가 붙어 55행 중 41행이 남의 것이었다. 이걸 빼면
+    리뷰어가 남이 이미 지적한 것을 다시 만든다.
+    """
+    seen, out = set(), []
+    for args, login_key in (
+        ([f"repos/{repo}/issues/{pr}/comments"], "user"),
+        ([f"repos/{repo}/pulls/{pr}/comments"], "user"),
+        ([f"repos/{repo}/pulls/{pr}/reviews"], "user"),
+    ):
+        proc = _run(["api", *args, "--paginate",
+                     "-q", f".[] | {{login: .{login_key}.login, body}}"], check=False)
+        if proc.returncode != 0:
+            continue
+        for line in proc.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                d = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            login = d.get("login", "?")
+            if login == my:
+                continue
+            for fp, title, where, rule in parse_findings(d.get("body") or ""):
+                if rule in seen:
+                    continue
+                seen.add(rule)
+                out.append({"login": login, "fp": fp, "title": title,
+                            "where": where, "rule": rule})
+    return out
 
 
 def _clip_body(body: str, limit: int = PR_BODY_CHARS) -> str:
