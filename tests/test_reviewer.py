@@ -207,6 +207,29 @@ class ReviewerClosureTest(unittest.TestCase):
         self.assertEqual(finding["last_judged_head"], "new")
         self.assertEqual(finding["last_seen_reply"], "2")
 
+    def test_skipped_unresolved_finding_is_not_re_raised(self):
+        """같은 말을 8번 반복한 원래 증상 — 달라진 게 없으면 다시 올리지 않는다."""
+        self.c.execute("UPDATE findings SET status='unresolved'")
+        self._judged()
+        self._run("unresolved", [], changed={"src/other.ts"})
+        card = self.c.execute("SELECT * FROM cards WHERE id=?", (self.new_id,)).fetchone()
+        self.assertNotIn("force_post", json.loads(card["payload"]))
+        finding = self.c.execute("SELECT * FROM findings WHERE fp=?", (self.fp,)).fetchone()
+        self.assertEqual(finding["status"], "unresolved")   # 사라지지 않는다
+        self.assertEqual(finding["card_id"], self.old_id)   # 이번 카드로 끌어오지 않는다
+        self.assertEqual(
+            [json.loads(e["detail"])["count"] for e in self.c.execute(
+                "SELECT detail FROM events WHERE type='review_unresolved_quiet'")], [1])
+
+    def test_unresolved_finding_is_re_raised_once_something_changes(self):
+        self.c.execute("UPDATE findings SET status='unresolved'")
+        self._judged()
+        self._run("unresolved", [], changed={"src/example.ts"})
+        card = self.c.execute("SELECT * FROM cards WHERE id=?", (self.new_id,)).fetchone()
+        self.assertTrue(json.loads(card["payload"])["force_post"])
+        finding = self.c.execute("SELECT * FROM findings WHERE fp=?", (self.fp,)).fetchone()
+        self.assertEqual(finding["card_id"], self.new_id)
+
     def test_code_profile_picks_the_engine_specific_review_prompt(self):
         """Regression: the code profile once pointed at a single review.md that
         no longer exists, which crashed every code review."""

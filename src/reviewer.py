@@ -118,6 +118,7 @@ def _run_closure(c, card, priors, diff, engine, wt, policy,
     newest_reply = max((r["created_at"] for r in all_replies), default="")
     head = card["head_sha"]
     changed_cache = {}
+    judged = set()
     for pf in priors:
         decision_head = pf["decision_head"]
         if pf["status"] in DECIDED and decision_head == head:
@@ -145,6 +146,9 @@ def _run_closure(c, card, priors, diff, engine, wt, policy,
             verdict = engines.run_json(cprompt, engine=engine, cwd=wt, add_dir=wt)
         except Exception as e:  # noqa: BLE001 - closure failure must block LGTM
             db.clear_finding_decision(c, pf["id"], "unresolved")
+            # 판정한 것으로 친다 — 실패를 '조용히 넘어간 지적' 으로 두면 LGTM 을
+            # 막으려던 의도가 쿨다운에 먹힌다
+            judged.add(pf["fp"])
             db.log_event(c, "finding_closure_error", card["key"],
                          {"fp": pf["fp"], "error": str(e)})
             continue
@@ -186,12 +190,14 @@ def _run_closure(c, card, priors, diff, engine, wt, policy,
         else:
             db.clear_finding_decision(c, pf["id"], status)
         db.mark_finding_judged(c, pf["id"], head, newest_reply)
+        judged.add(pf["fp"])
         db.log_event(c, "finding_closure", card["key"],
                      {"fp": pf["fp"], "status": status,
                       "replies_seen": len(replies),
                       "evidence": evidence,
                       "reply_comment_id": verified_reply["id"] if verified_reply else "",
                       "reply_evidence": (verdict.get("reply_evidence") or "").strip()})
+    return judged
 
 
 def refresh_author_decisions(c, card):
@@ -242,6 +248,7 @@ def process(c, card):
         db.log_event(c, "closure_context_error", card["key"], {"error": str(e)})
     is_doc = policy.get("profile_type") == "doc"
     plan = None
+    judged: set[str] = set()
 
     wt = None
     try:
@@ -264,8 +271,8 @@ def process(c, card):
                 }
                 _save_payload(c, card["id"], meta)
                 db.log_event(c, "doc_summary_planned", card["key"], meta["doc_summary"])
-            _run_closure(c, card, priors, diff, engine, wt, policy,
-                         author_identity, author_replies, plan)
+            judged = _run_closure(c, card, priors, diff, engine, wt, policy,
+                                  author_identity, author_replies, plan)
             context = doc_planner.build_context(wt, diff, changed_files, plan)
             prompt = prompt_tpl.render(
                 profiles.prompt_name(policy, "review", engine),
@@ -276,8 +283,8 @@ def process(c, card):
                 DOC_CONTEXT=context,
             )
         else:
-            _run_closure(c, card, priors, diff, engine, wt, policy,
-                         author_identity, author_replies)
+            judged = _run_closure(c, card, priors, diff, engine, wt, policy,
+                                  author_identity, author_replies)
             prompt = prompt_tpl.render(
                 profiles.prompt_name(policy, "review", engine),
                 REPO=repo, PR=pr, TITLE=meta.get("title", ""),
@@ -358,7 +365,16 @@ def process(c, card):
 
     # UNIQUE(repo, pr, fp) keeps a repeated finding on its original row. Closure
     # marks it unresolved; attach that row to this attempt so it is not lost.
-    unresolved = db.unresolved_findings(c, repo, pr)
+    #
+    # 단, 이번 라운드에 실제로 다시 판정한 것만 끌어온다. 코드도 안 바뀌고 작성자
+    # 말도 없어 건너뛴 지적을 매번 다시 올리면, 같은 말을 8번 반복하는 원래 증상이
+    # 그대로 남는다(#10066). 건너뛴 지적은 제 카드에 unresolved 로 남아 있다가
+    # 다음에 뭔가 달라지면 그때 다시 나간다.
+    all_unresolved = db.unresolved_findings(c, repo, pr)
+    unresolved = [pf for pf in all_unresolved if pf["fp"] in judged]
+    quiet = len(all_unresolved) - len(unresolved)
+    if quiet:
+        db.log_event(c, "review_unresolved_quiet", card["key"], {"count": quiet})
     for pf in unresolved:
         db.reattach_finding(c, pf["id"], card["id"], "confirmed")
     pending = db.pending_decision_findings(c, repo, pr)
