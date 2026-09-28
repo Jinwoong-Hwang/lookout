@@ -1,0 +1,34 @@
+replay-review.py
+  ccd20f93a69d91fd 1-226
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "78dc38ccc95a4e023af8b0ca2d62ace25dd7bf9e",
+  "prompts": {
+    "ccd20f93a69d91fd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "97337db1-58b9-4c29-b0e9-8f899e1450c3",
+        "model": "claude-opus-5"
+      },
+      "skills": [
+        {
+          "id": "clear",
+          "ts": "2026-09-23T00:55:25.149Z"
+        }
+      ],
+      "tool_counts": {
+        "Bash": 123,
+        "ToolSearch": 2,
+        "Monitor": 2,
+        "TaskStop": 2,
+        "Artifact": 3,
+        "Write": 4,
+        "Edit": 1
+      },
+      "total_additions": 226,
+      "total_deletions": 0,
+      "overriden_lines": 0
+    }
+  }
+}
