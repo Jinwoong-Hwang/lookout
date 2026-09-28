@@ -1,0 +1,21 @@
+src/db.py
+  h_03b13cada2edad 167-213
+src/keys.py
+  h_03b13cada2edad 37-48
+src/reviewer.py
+  h_03b13cada2edad 53-55
+tests/test_prdiff.py
+  h_03b13cada2edad 134-181
+tests/test_reviewer.py
+  h_03b13cada2edad 27-28
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "21655679e40df487e5188db349e6e99415d656cc",
+  "prompts": {},
+  "humans": {
+    "h_03b13cada2edad": {
+      "author": "woong@zigbang.com"
+    }
+  }
+}
