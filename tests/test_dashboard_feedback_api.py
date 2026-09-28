@@ -129,7 +129,12 @@ class CardSurfacesOperatorGateTest(unittest.TestCase):
         got = self._board()[card]
 
         self.assertEqual(got["closure"]["pending"], 1)
+        # postable 과 held 는 서로 다른 집합이다 — 빼면 안 된다. 처음에 빼도록 써서
+        # '이미 지적됨 1'(실제 3)이 떴고, 5건 중 2건만 눌러야 한다는 게 더 헷갈렸다.
         self.assertEqual(got["quiet"]["held_author_decision"], 2)
+        self.assertEqual(got["quiet"]["postable"], 3)
+        self.assertNotIn(got["quiet"]["postable"], (got["quiet"]["postable"]
+                                                   - got["quiet"]["held_author_decision"],))
         dup = next(f for f in got["findings"] if f["title"] == "남이 말한 것")
         self.assertEqual(dup["comment_id"], "exists")
 
