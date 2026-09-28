@@ -1,0 +1,21 @@
+prompts/closure.md
+  h_03b13cada2edad 62-66
+src/db.py
+  h_03b13cada2edad 487-489,493,497-503
+src/ghclient.py
+  h_03b13cada2edad 6,444-459
+src/reviewer.py
+  h_03b13cada2edad 95,121-122,176-180,403-405,411
+tests/test_reviewer.py
+  h_03b13cada2edad 165-169,171,198,216,241-270
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "154ace1eb0fedfdefd72e67accaae8e974bc2aa4",
+  "prompts": {},
+  "humans": {
+    "h_03b13cada2edad": {
+      "author": "woong@zigbang.com"
+    }
+  }
+}
