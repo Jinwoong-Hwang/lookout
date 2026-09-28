@@ -1,0 +1,17 @@
+prompts/closure.md
+  h_03b13cada2edad 53-59
+src/reviewer.py
+  h_03b13cada2edad 16-17,142-150
+tests/test_reviewer.py
+  h_03b13cada2edad 127,142-148,150-151,292-315,317-322,324
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "d383b50c95b64086722a9a14020b84cac6cc5848",
+  "prompts": {},
+  "humans": {
+    "h_03b13cada2edad": {
+      "author": "woong@zigbang.com"
+    }
+  }
+}
