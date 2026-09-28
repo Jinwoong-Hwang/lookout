@@ -73,6 +73,31 @@ def _verified_follow_up(verdict: dict, reply: dict | None) -> str:
             and follow_up in (reply.get("body") or "") else "")
 
 
+def _nothing_changed(card, pf, head, newest_reply, cache) -> bool:
+    """마지막 판정 이후 이 지적에 관해 달라진 게 없으면 다시 묻지 않는다.
+
+    #10066 에서 closure 35회 중 26회가 "아무것도 안 바뀜" 결론이었다.
+
+    건너뛰면 status 가 그대로 남는다. 그래서 posted 인 지적은 다시 올라가지 않는다
+    — 코드도 안 바뀌고 작성자 말도 없는데 매 라운드 같은 말을 반복하던 것을 여기서
+    끊는다. 이미 unresolved 로 내려간 지적은 종전대로 리마인드 대상이다.
+
+    같은 head 에서의 재확인(commenter 가 게시 직전에 부르는 것)은 건너뛰지 않는다.
+    그게 리뷰 패스의 오판을 되돌린 적이 실제로 있어서, 마지막 방어선으로 남긴다.
+    """
+    since = pf["last_judged_head"]
+    if not since or since == head:
+        return False
+    if (pf["last_seen_reply"] or "") != newest_reply:
+        return False  # 새 회신이 왔다
+    if since not in cache:
+        cache[since] = worktree.changed_files_between(card["repo"], since, head)
+    changed = cache[since]
+    if changed is None:
+        return False  # 뭐가 바뀌었는지 모르면 판정한다
+    return (pf["file"] or "") not in changed
+
+
 def _run_closure(c, card, priors, diff, engine, wt, policy,
                  author: dict, all_replies: list[dict], plan=None):
     """Re-judge previous findings using backend-verified PR-author replies.
@@ -90,9 +115,17 @@ def _run_closure(c, card, priors, diff, engine, wt, policy,
     db.log_event(c, "closure_replies_collected", card["key"],
                  {"count": len(all_replies), "sources": sources,
                   "chars": sum(len(r["body"]) for r in all_replies)})
+    newest_reply = max((r["created_at"] for r in all_replies), default="")
+    head = card["head_sha"]
+    changed_cache = {}
     for pf in priors:
         decision_head = pf["decision_head"]
-        if pf["status"] in DECIDED and decision_head == card["head_sha"]:
+        if pf["status"] in DECIDED and decision_head == head:
+            continue
+        if _nothing_changed(card, pf, head, newest_reply, changed_cache):
+            db.log_event(c, "finding_closure_skipped", card["key"],
+                         {"fp": pf["fp"], "status": pf["status"],
+                          "since": pf["last_judged_head"]})
             continue
 
         # 이미 근거로 쓴 회신은 예산과 무관하게 남긴다
@@ -152,6 +185,7 @@ def _run_closure(c, card, priors, diff, engine, wt, policy,
             db.clear_finding_decision(c, pf["id"], status)
         else:
             db.clear_finding_decision(c, pf["id"], status)
+        db.mark_finding_judged(c, pf["id"], head, newest_reply)
         db.log_event(c, "finding_closure", card["key"],
                      {"fp": pf["fp"], "status": status,
                       "replies_seen": len(replies),

@@ -35,7 +35,7 @@ class ReviewerClosureTest(unittest.TestCase):
         self.c.close()
 
     def _run(self, closure_status, findings, evidence="", reply_evidence="", follow_up="",
-             closure_error=False):
+             closure_error=False, changed=None):
         calls = []
         rendered = []
         old_view, old_diff, old_conversation = ghclient.pr_view, ghclient.pr_diff, ghclient.pr_conversation
@@ -44,6 +44,7 @@ class ReviewerClosureTest(unittest.TestCase):
         old_login = ghclient.my_login
         old_changed_files = ghclient.pr_changed_files
         old_make, old_remove = worktree.make_worktree, worktree.remove_worktree
+        old_changed = worktree.changed_files_between
         old_plan, old_context = reviewer.doc_planner.build_plan, reviewer.doc_planner.build_context
         old_render, old_run = prompt_tpl.render, reviewer.engines.run_json
         try:
@@ -59,6 +60,7 @@ class ReviewerClosureTest(unittest.TestCase):
                  "created_at": "2", "url": "", "body": reply_evidence or "일반 답변"},
             ]
             worktree.make_worktree = lambda *_: "/tmp/review"
+            worktree.changed_files_between = lambda *_: changed
             worktree.remove_worktree = lambda *_: None
             reviewer.doc_planner.build_plan = lambda *_: {"summary_only": False, "review_mode": "full"}
             reviewer.doc_planner.build_context = lambda *_: ""
@@ -88,6 +90,7 @@ class ReviewerClosureTest(unittest.TestCase):
             ghclient.my_login = old_login
             ghclient.pr_changed_files = old_changed_files
             worktree.make_worktree, worktree.remove_worktree = old_make, old_remove
+            worktree.changed_files_between = old_changed
             reviewer.doc_planner.build_plan, reviewer.doc_planner.build_context = old_plan, old_context
             prompt_tpl.render, reviewer.engines.run_json = old_render, old_run
         return calls, rendered
@@ -154,6 +157,55 @@ class ReviewerClosureTest(unittest.TestCase):
         self.assertEqual(finding["status"], "confirmed")
         card = self.c.execute("SELECT * FROM cards WHERE id=?", (self.new_id,)).fetchone()
         self.assertTrue(json.loads(card["payload"])["force_post"])
+
+    def _judged(self, head="old", reply="2"):
+        self.c.execute("UPDATE findings SET last_judged_head=?, last_seen_reply=?",
+                       (head, reply))
+
+    def _skips(self):
+        return [e["detail"] for e in self.c.execute(
+            "SELECT detail FROM events WHERE type='finding_closure_skipped'")]
+
+    def test_closure_is_skipped_when_nothing_about_the_finding_changed(self):
+        """#10066 에서 closure 35회 중 26회가 "아무것도 안 바뀜" 결론이었다.
+
+        건너뛰어도 동작은 같다 — 재게시는 호출이 아니라 status 가 결정한다.
+        """
+        self._judged()
+        calls, _ = self._run("unresolved", [], changed={"src/other.ts"})
+        self.assertEqual(calls, ["review.codex.md"])   # closure.md 호출 없음
+        self.assertEqual(len(self._skips()), 1)
+        finding = self.c.execute("SELECT * FROM findings WHERE fp=?", (self.fp,)).fetchone()
+        self.assertEqual(finding["status"], "posted")  # 상태가 그대로라 재게시도 안 된다
+        card = self.c.execute("SELECT * FROM cards WHERE id=?", (self.new_id,)).fetchone()
+        self.assertNotIn("force_post", json.loads(card["payload"]))
+
+    def test_closure_runs_when_the_finding_file_changed(self):
+        self._judged()
+        calls, _ = self._run("unresolved", [], changed={"src/example.ts"})
+        self.assertEqual(calls, ["closure.md", "review.codex.md"])
+        self.assertEqual(self._skips(), [])
+
+    def test_closure_runs_when_a_new_author_reply_arrived(self):
+        self._judged(reply="1")   # 수집된 최신 회신은 "2"
+        calls, _ = self._run("unresolved", [], changed={"src/other.ts"})
+        self.assertEqual(calls, ["closure.md", "review.codex.md"])
+
+    def test_closure_runs_when_the_change_set_is_unknown(self):
+        """옛 sha 가 force-push·gc 로 사라질 수 있다 — 모르면 건너뛰지 않는다."""
+        self._judged()
+        calls, _ = self._run("unresolved", [], changed=None)
+        self.assertEqual(calls, ["closure.md", "review.codex.md"])
+
+    def test_first_judgement_is_never_skipped(self):
+        calls, _ = self._run("unresolved", [], changed={"src/other.ts"})
+        self.assertEqual(calls, ["closure.md", "review.codex.md"])
+
+    def test_judging_records_the_baseline_for_next_time(self):
+        self._run("unresolved", [])
+        finding = self.c.execute("SELECT * FROM findings WHERE fp=?", (self.fp,)).fetchone()
+        self.assertEqual(finding["last_judged_head"], "new")
+        self.assertEqual(finding["last_seen_reply"], "2")
 
     def test_code_profile_picks_the_engine_specific_review_prompt(self):
         """Regression: the code profile once pointed at a single review.md that

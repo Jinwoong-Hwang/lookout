@@ -267,6 +267,25 @@ def make_worktree(repo: str, pr: int, head_sha: str) -> str:
     return wt
 
 
+def changed_files_between(repo: str, a: str, b: str):
+    """a..b 사이에 바뀐 파일 집합. 모르면 None — 호출부는 None 을 '건너뛰지 말라'로 읽는다.
+
+    force-push 나 gc 로 옛 sha 가 로컬에 없을 수 있어서, 실패를 '변경 없음'으로
+    오해하면 판정을 영영 건너뛰게 된다.
+    """
+    if not a or not b or a == b:
+        return None
+    try:
+        repo_dir = ensure_clone(repo)
+        with _repo_lock(repo):
+            proc = _git(repo_dir, "diff", "--name-only", f"{a}..{b}", check=False)
+    except Exception:  # noqa: BLE001 - 알 수 없으면 건너뛰지 않는다
+        return None
+    if proc.returncode != 0:
+        return None
+    return {line.strip() for line in proc.stdout.splitlines() if line.strip()}
+
+
 def local_diff(repo: str, pr: int, head_sha: str, base_ref: str) -> str:
     """Three-dot diff computed in the cached clone — the fallback for PRs whose
     diff GitHub's API refuses (>20k lines).

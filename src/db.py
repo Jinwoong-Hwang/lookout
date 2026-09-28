@@ -57,6 +57,8 @@ CREATE TABLE IF NOT EXISTS findings (
   decision_comment_id TEXT,
   decision_evidence TEXT,
   decision_follow_up TEXT,
+  last_judged_head TEXT,              -- closure 를 마지막으로 돌린 head
+  last_seen_reply TEXT,               -- 그때 본 작성자 회신 중 가장 최근 시각
   created_at REAL NOT NULL,
   updated_at REAL NOT NULL,
   UNIQUE(repo, pr_number, fp)
@@ -158,7 +160,8 @@ def init():
         if "engine" not in cols:
             c.execute("ALTER TABLE cards ADD COLUMN engine TEXT DEFAULT 'claude'")
         finding_cols = {r["name"] for r in c.execute("PRAGMA table_info(findings)").fetchall()}
-        for name in ("decision_head", "decision_comment_id", "decision_evidence", "decision_follow_up"):
+        for name in ("decision_head", "decision_comment_id", "decision_evidence",
+                     "decision_follow_up", "last_judged_head", "last_seen_reply"):
             if name not in finding_cols:
                 c.execute(f"ALTER TABLE findings ADD COLUMN {name} TEXT")
 
@@ -469,6 +472,12 @@ def set_finding_status(c, finding_id, status, comment_id=None):
         "UPDATE findings SET status=?, comment_id=COALESCE(?,comment_id), updated_at=? WHERE id=?",
         (status, comment_id, now(), finding_id),
     )
+
+
+def mark_finding_judged(c, finding_id, head, newest_reply):
+    """closure 를 돌린 시점을 남긴다 — 다음 head 에서 '뭐가 바뀌었나' 의 기준점."""
+    c.execute("UPDATE findings SET last_judged_head=?, last_seen_reply=? WHERE id=?",
+              (head, newest_reply or "", finding_id))
 
 
 def set_finding_decision(c, finding_id, status, head, comment_id, evidence, follow_up=""):
