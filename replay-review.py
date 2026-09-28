@@ -15,9 +15,13 @@
 clone 캐시는 라이브와 공유한다(zigbang-client 는 1.2G 라 재클론이 비현실적).
 worktree 는 스크래치에 만들고 끝나면 prune 한다.
 
+엔진은 config.default_review_engine 을 따른다(--engine 으로 덮어쓴다). 두 엔진의
+리뷰 프롬프트가 갈리고 closure 응답 형식도 엔진마다 다를 수 있어, 배포 전에는
+양쪽 다 돌려보는 편이 안전하다.
+
 사용:
   python3 replay-review.py zigbang/zigbang-client 10066
-  python3 replay-review.py zigbang/zigbang-client 10066 --engine codex
+  python3 replay-review.py zigbang/zigbang-client 10066 --engine claude
   python3 replay-review.py zigbang/zigbang-client 10066 --second-pass
 
 --second-pass 는 "커밋 하나 더 얹은 head" 를 흉내낸다. 1차 실행 뒤 모든 결정의
@@ -88,7 +92,14 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("repo")
     ap.add_argument("pr", type=int)
-    ap.add_argument("--engine", default="claude", choices=("claude", "codex"))
+    # 기본값은 운영 설정을 따른다 — 검증은 실제로 도는 엔진으로 해야 의미가 있다.
+    # claude 로만 확인하면 closure 계약(reply_comment_id + 정확한 연속 인용)을
+    # 그 엔진이 지켰다는 증거일 뿐이고, 리뷰 프롬프트도 엔진별로 갈린다.
+    default_engine = config.CFG.get("default_review_engine") or "codex"
+    if default_engine not in ("claude", "codex"):
+        default_engine = "codex"
+    ap.add_argument("--engine", default=default_engine, choices=("claude", "codex"),
+                    help=f"기본값은 config.default_review_engine (현재 {default_engine})")
     ap.add_argument("--workdir", default=os.path.join(HOME, ".replay"))
     ap.add_argument("--second-pass", action="store_true",
                     help="새 커밋이 온 상황을 흉내내 한 번 더 돌린다")
