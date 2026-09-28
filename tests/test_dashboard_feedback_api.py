@@ -1,7 +1,10 @@
 import json
+import os
+import shutil
+import tempfile
 import unittest
 
-from src import dashboard
+from src import config, dashboard, db
 
 
 class DashboardFeedbackApiTest(unittest.TestCase):
@@ -87,3 +90,53 @@ class DashboardFeedbackApiTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CardSurfacesOperatorGateTest(unittest.TestCase):
+    """카드가 '내 차례' 와 '왜 조용했나' 를 말해야 한다.
+
+    실사용에서 #10066 리뷰가 끝난 뒤 카드는 '댓글완료' 만 보였다. 실제로는 작성자
+    결정 2건이 운영자를 기다리고 3건은 남이 이미 지적해 생략된 상태였는데, 그걸
+    알려면 DB 를 열어야 했다.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.saved = config.CFG["db_path"]
+        config.CFG["db_path"] = os.path.join(self.tmp, "t.sqlite")
+        db.init()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.addCleanup(config.CFG.__setitem__, "db_path", self.saved)
+
+    def _card(self, c):
+        return db.upsert_card(c, "review:h", "review", "o/r", 1, "commented", "h",
+                              payload={"title": "t", "author": "a"})
+
+    def _board(self):
+        return {x["id"]: x for x in dashboard.build_board()}
+
+    def test_pending_decisions_and_quiet_reason_reach_the_card(self):
+        with db.connect() as c:
+            card = self._card(c)
+            db.upsert_finding(c, card, "o/r", 1, "h", "o/r#1:src/a.ts:held", "보류된 것",
+                              "{}", "src/a.ts", "1", "medium", "high", "defer_pending")
+            db.upsert_finding(c, card, "o/r", 1, "h", "o/r#1:src/b.ts:dup", "남이 말한 것",
+                              "{}", "src/b.ts", "2", "medium", "high", "posted")
+            c.execute("UPDATE findings SET comment_id='exists' WHERE fp LIKE '%dup'")
+            db.log_event(c, "comment_nothing_to_post", "review:h",
+                         {"postable": 3, "held_author_decision": 2, "force": False})
+
+        got = self._board()[card]
+
+        self.assertEqual(got["closure"]["pending"], 1)
+        self.assertEqual(got["quiet"]["held_author_decision"], 2)
+        dup = next(f for f in got["findings"] if f["title"] == "남이 말한 것")
+        self.assertEqual(dup["comment_id"], "exists")
+
+    def test_quiet_reason_clears_once_something_is_actually_posted(self):
+        with db.connect() as c:
+            card = self._card(c)
+            db.log_event(c, "comment_nothing_to_post", "review:h", {"postable": 1})
+            db.log_event(c, "comment_posted", "review:h", {"url": "u", "fps": []})
+
+        self.assertIsNone(self._board()[card]["quiet"])

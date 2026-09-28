@@ -70,10 +70,23 @@ def build_board():
                     "confidence": f["confidence"], "file": f["file"], "line": f["line"],
                     "title": f["title"], "problem": detail.get("problem", ""),
                     "fix": detail.get("fix", ""),
+                    "comment_id": f["comment_id"],
                     "decision_comment_id": f["decision_comment_id"],
                     "decision_evidence": f["decision_evidence"],
                     "decision_follow_up": f["decision_follow_up"],
                 })
+            # 마지막 게시 시도가 조용히 끝났으면 그 사유를 카드가 말해야 한다 —
+            # "댓글완료" 만 보이면 운영자가 DB 를 열어야 이유를 안다(실사용 지적)
+            qrow = c.execute(
+                "SELECT detail FROM events WHERE key=? AND type='comment_nothing_to_post' "
+                "ORDER BY id DESC LIMIT 1", (card["key"],)).fetchone()
+            quiet = json.loads(qrow["detail"]) if qrow and qrow["detail"] else None
+            if quiet and c.execute(
+                    "SELECT 1 FROM events WHERE key=? AND type IN "
+                    "('comment_posted','comment_dryrun') AND id > "
+                    "(SELECT MAX(id) FROM events WHERE key=? AND type='comment_nothing_to_post')"
+                    " LIMIT 1", (card["key"], card["key"])).fetchone():
+                quiet = None      # 그 뒤에 실제로 게시됐으면 사유를 띄우지 않는다
             ev = c.execute(
                 "SELECT type, detail FROM events WHERE key=? AND type IN ('comment_dryrun','comment_posted','comment_dryrun_published') ORDER BY id",
                 (card["key"],),
@@ -125,6 +138,7 @@ def build_board():
                 "findings": findings, "comments": comments,
                 "dryrun_pending": dryrun_pending,
                 "feedback": feedback.latest_for_card(c, card["id"]),
+                "quiet": quiet,
                 "closure": {"resolved": clo.get("resolved", 0),
                             "dismissed": clo.get("dismissed", 0),
                             "deferred": clo.get("deferred", 0),
@@ -795,11 +809,22 @@ function tile(c){
   const fb=c.feedback&&(c.feedback.up||c.feedback.down||c.feedback.confused||c.feedback.replies)
     ?`<span class="pill" title="리뷰 피드백 스냅샷">👍${c.feedback.up||0} 👎${c.feedback.down||0} 💬${c.feedback.replies||0}</span>`:'';
   const inspect=c.feedback&&c.feedback.needs_inspection?`<span class="pill" style="${pill('#fbbf24')}">피드백 확인</span>`:'';
+  // 운영자가 눌러야 넘어가는 카드는 숫자 하나로 묻히면 안 된다 — 다른 카운터 옆에
+  // 🧑‍⚖️2 로만 떠서 '댓글완료' 로 읽혔다(실사용 지적)
+  const gate=c.closure&&c.closure.pending?`<span class="pill" style="${pill('#a78bfa')}">🧑‍⚖️ 내 차례 · 작성자 결정 ${c.closure.pending}건</span>`:'';
+  const quiet=(!c.quiet||c.closure&&c.closure.pending)?'':(()=>{
+    const bits=[];
+    if(c.quiet.held_author_decision)bits.push(`작성자 결정 대기 ${c.quiet.held_author_decision}`);
+    const dup=(c.quiet.postable||0)-(c.quiet.held_author_decision||0);
+    if(dup>0)bits.push(`이미 지적됨 ${dup}`);
+    return bits.length?`<span class="pill" title="게시할 것이 없었던 이유">🤐 ${bits.join(' · ')}</span>`:'';
+  })();
   const rc=repoColor(c.repo);
   const repoPill=`<span class="repopill" style="${pill(rc)}"><span class="rdot" style="background:${rc}"></span>${esc(repoShort(c.repo))}</span>`;
   el.innerHTML=`${xbtn}<div class="pr">${repoPill} <span class="num">#${c.pr}</span></div>
     <div class="title">${esc(c.title)||'(제목없음)'}</div>
-    <div class="row">${statusPill}<span class="pill">${esc(c.author)}</span>${enginePill}${inspect}</div>
+    <div class="row">${statusPill}<span class="pill">${esc(c.author)}</span>${enginePill}${inspect}${gate}</div>
+    ${quiet?`<div class="row">${quiet}</div>`:''}
     <div class="row"><span>@${c.head}</span>${dots?`<span class="row">${dots} ${c.findings.length}건</span>`:''}${clo}${fb}</div>
     ${c.error?`<div class="errline ${c.status==='triage'?'warn':''}" title="${esc(c.error)}">${esc(c.error)}</div>`:''}${btns}`;
   el.onclick=()=>openModal(c);
@@ -831,6 +856,7 @@ function openModal(c){
         </div>
         <div class="pre">${esc(f.problem)}</div>
         ${f.fix?`<div class="lbl2">제안</div><div class="pre">${esc(f.fix)}</div>`:''}
+        ${f.comment_id==='exists'?`<div class="lbl2">게시 생략</div><div class="pre">다른 인스턴스가 같은 지적을 이미 올렸습니다 — 같은 말을 반복하지 않으려고 이 묶음에서 뺐습니다.</div>`:''}
         ${['dismiss_pending','defer_pending'].includes(f.status)?`<div class="lbl2">작성자 결정 근거</div><div class="pre">${esc(f.decision_evidence||'')}</div>${f.status==='defer_pending'?`<div class="lbl2">후속 참조</div><div class="pre">${esc(f.decision_follow_up||'후속 참조 없음')}</div>`:''}<div class="btns"><button class="go" onclick="acceptAuthorDecision(event,${f.id},'accept_author_decision')">🧑‍⚖️ 작성자 결정 수용</button></div>`:''}
         ${f.status==='deferred'?`<div class="lbl2">작성자 결정 근거</div><div class="pre">${esc(f.decision_evidence||'')}</div><div class="lbl2">후속 참조</div><div class="pre">${esc(f.decision_follow_up||'후속 참조 없음')}</div>`:''}
         ${['posted','confirmed','unresolved'].includes(f.status)?`<div class="btns"><button class="go" onclick="acceptAuthorDecision(event,${f.id},'operator_dismiss')">🧑‍⚖️ 운영자 직접 수용</button></div>`:''}
