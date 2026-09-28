@@ -51,6 +51,10 @@ from src import config  # noqa: E402
 
 
 
+class StageFailed(RuntimeError):
+    """단계가 깨졌다 — 뒤 단계·2차를 이어가면 같은 실패를 반복한다."""
+
+
 def log(*a):
     print(f"[{time.strftime('%H:%M:%S')}]", *a, flush=True)
 
@@ -137,8 +141,12 @@ def main():
     head = gh_text(["api", f"repos/{args.repo}/pulls/{args.pr}", "-q", ".head.sha"])
     log(f"{args.repo}#{args.pr} @ {head[:10]} · engine={args.engine}")
 
-    posted = run_pass(db, ghclient, reviewer, verifier, commenter, worktree,
-                      args, head, label="1차")
+    try:
+        posted = run_pass(db, ghclient, reviewer, verifier, commenter, worktree,
+                          args, head, label="1차")
+    except StageFailed as e:
+        log(f"!! {e} — 중단한다")
+        return 3
     if args.second_pass:
         parent = gh_text(["api", f"repos/{args.repo}/commits/{head}",
                           "-q", ".parents[0].sha"])
@@ -156,8 +164,12 @@ def main():
         changed = worktree.changed_files_between(args.repo, parent, head)
         log(f"결정 {n}건 · 판정시점 {m}건 되돌림 · 그 사이 변경 파일 "
             f"{len(changed) if changed is not None else '모름'}개")
-        posted += run_pass(db, ghclient, reviewer, verifier, commenter, worktree,
-                           args, head, label="2차")
+        try:
+            posted += run_pass(db, ghclient, reviewer, verifier, commenter, worktree,
+                               args, head, label="2차")
+        except StageFailed as e:
+            log(f"!! {e} — 중단한다")
+            return 3
 
     after = pr_fingerprint(args.repo, args.pr)
     log("")
@@ -205,7 +217,9 @@ def run_pass(db, ghclient, reviewer, verifier, commenter, worktree, args, head, 
                 fn(c, card)
             except Exception:
                 log(f"[{label}] {name} 실패\n{traceback.format_exc()}")
-                break
+                report(db, repo, pr, card_id, key, label)
+                # 단계가 깨진 뒤 2차를 이어가면 같은 실패를 한 번 더 반복할 뿐이다
+                raise StageFailed(f"{label} {name}")
             log(f"[{label}] {name} 완료 {time.time() - t0:.0f}s")
 
     return report(db, repo, pr, card_id, key, label)

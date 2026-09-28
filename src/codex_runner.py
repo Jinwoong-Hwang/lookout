@@ -10,6 +10,8 @@ import tempfile
 from . import config
 
 CFG = config.CFG
+# 리뷰용 상한. 엔진별로 따로 두되 설정에서 올릴 수 있게 한다.
+RUN_TIMEOUT = int(CFG.get("codex_timeout", 1200))
 CODEX = config.resolve_bin(CFG.get("codex_bin", "codex"))
 MODEL = CFG.get("codex_model")  # None -> codex default
 
@@ -83,7 +85,7 @@ def run_impl(prompt: str, cwd: str, timeout: int = 3600) -> str:
             pass
 
 
-def run(prompt: str, cwd: str = None, add_dir: str = None, timeout: int = 1200) -> str:
+def run(prompt: str, cwd: str = None, add_dir: str = None, timeout: int = None) -> str:
     out_fd, out_path = tempfile.mkstemp(suffix=".txt", prefix="codex_")
     os.close(out_fd)
     args = [
@@ -101,7 +103,7 @@ def run(prompt: str, cwd: str = None, add_dir: str = None, timeout: int = 1200) 
     args.append(STDIN_MARKER)
     try:
         proc = subprocess.run(args, cwd=cwd, input=prompt, capture_output=True, text=True,
-                              timeout=timeout, env=config.subprocess_env())
+                              timeout=timeout or RUN_TIMEOUT, env=config.subprocess_env())
         if proc.returncode != 0:
             raise CodexError(f"codex failed (rc={proc.returncode}): "
                              f"{_clean_stderr(proc.stderr)}{_signal_hint(proc.returncode)}")
