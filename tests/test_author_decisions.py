@@ -47,7 +47,8 @@ class AuthorDecisionBoundaryTest(unittest.TestCase):
             {"reply_comment_id": "2", "reply_evidence": "모델이 만든 문구"}, replies,
         ))
 
-    def test_bundled_comment_requires_explicit_fingerprint_link(self):
+    def test_bundled_comment_links_plain_author_reply(self):
+        """묶음 댓글이라고 지문 복붙을 요구하면 사람 회신은 절대 안 잡힌다(#10066)."""
         fp = "owner/repo#1:src/a.ts:1:rule-a"
         comments = [
             {"id": "1", "author": "bot", "author_id": "9", "created_at": "1",
@@ -55,22 +56,63 @@ class AuthorDecisionBoundaryTest(unittest.TestCase):
             {"id": "2", "author": "author", "author_id": "42", "created_at": "2",
              "body": "A만 의도적으로 유지"},
         ]
-        self.assertEqual(ghclient.finding_author_replies(comments, fp, "42", "bot"), [])
-        comments[1]["body"] += f"\n{fp}"
         self.assertEqual(
             [r["id"] for r in ghclient.finding_author_replies(comments, fp, "42", "bot")],
             ["2"],
         )
 
-    def test_bundled_fingerprint_link_rejects_prefix_collision(self):
+    def test_author_own_bot_comment_is_not_a_reply(self):
+        """작성자도 자기 인스턴스를 돌리면 봇 리뷰가 같은 author_id 로 들어온다."""
         fp = "owner/repo#1:src/a.ts:1:rule"
         comments = [
             {"id": "1", "author": "bot", "author_id": "9", "created_at": "1",
-             "body": f"<!-- hermes:fp={fp} -->\n<!-- hermes:fp={fp}-longer -->"},
+             "body": f"<!-- hermes:fp={fp} -->"},
             {"id": "2", "author": "author", "author_id": "42", "created_at": "2",
-             "body": f"{fp}-longer 는 의도적으로 유지"},
+             "body": "지적입니다\n<!-- hermes:fp=owner/repo#1:src/b.ts:2:other -->"},
+            {"id": "3", "author": "author", "author_id": "42", "created_at": "3",
+             "body": "의도적으로 유지합니다"},
         ]
-        self.assertEqual(ghclient.finding_author_replies(comments, fp, "42", "bot"), [])
+        self.assertEqual(
+            [r["id"] for r in ghclient.finding_author_replies(comments, fp, "42", "bot")],
+            ["3"],
+        )
+
+    def test_reply_from_an_earlier_window_is_not_dropped(self):
+        """한 번 답하고 만 해명이 다음 라운드에 사라지면 안 된다."""
+        fp = "owner/repo#1:src/a.ts:1:rule"
+        marker = f"<!-- hermes:fp={fp} -->"
+        comments = [
+            {"id": "1", "author": "bot", "author_id": "9", "created_at": "1",
+             "body": marker},
+            {"id": "2", "author": "author", "author_id": "42", "created_at": "2",
+             "body": "보류 — PO 결정 대기"},
+            {"id": "3", "author": "bot", "author_id": "9", "created_at": "3",
+             "body": marker},
+            {"id": "4", "author": "author", "author_id": "42", "created_at": "4",
+             "body": "다른 라운드 코멘트"},
+        ]
+        self.assertEqual(
+            [r["id"] for r in ghclient.finding_author_replies(comments, fp, "42", "bot")],
+            ["2", "4"],
+        )
+
+    def test_pr_body_is_offered_as_an_author_statement(self):
+        """작성자는 '보류' 를 댓글이 아니라 PR 본문 표에 적어 둔다."""
+        fp = "owner/repo#1:src/a.ts:1:rule"
+        comments = [
+            {"id": "1", "author": "bot", "author_id": "9", "created_at": "1",
+             "body": f"<!-- hermes:fp={fp} -->"},
+        ]
+        body = reviewer._author_body_reply(
+            {"login": "author", "id": "42", "created_at": "0",
+             "body": "## 보류 항목\n| 지적 | 사유 |"},
+        )
+        self.assertEqual(
+            [r["id"] for r in
+             ghclient.finding_author_replies(comments, fp, "42", "bot", body)],
+            ["pr-body"],
+        )
+        self.assertIsNone(reviewer._author_body_reply({"login": "author", "body": "  "}))
 
     def test_sticky_fingerprint_is_reverified_when_payload_changes(self):
         c = sqlite3.connect(":memory:")

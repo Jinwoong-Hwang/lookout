@@ -117,6 +117,40 @@ class ReviewerClosureTest(unittest.TestCase):
                 self.assertEqual(self.c.execute("SELECT COUNT(*) n FROM findings").fetchone()["n"], 1)
                 self.assertEqual(self.c.execute("SELECT status FROM cards WHERE id=?", (self.new_id,)).fetchone()["status"], "commented")
 
+    def test_pending_author_decision_survives_a_new_head(self):
+        """새 커밋마다 운영자 수용 대기 결정이 unresolved 로 떨어지면 리마인드가 다시 나간다.
+
+        작성자 회신은 보통 한 번뿐이라 새 head 에서는 '그 회신 이후의 새 답변'이
+        없다. 반박할 코드 근거가 없으면 결정을 그대로 두어야 한다.
+        """
+        for status in ("dismiss_pending", "defer_pending"):
+            with self.subTest(status=status):
+                self.c.execute("UPDATE cards SET status='intake' WHERE id=?", (self.new_id,))
+                self.c.execute(
+                    """UPDATE findings SET status=?,card_id=?,decision_head='old',
+                       decision_comment_id='11',decision_evidence='의도적으로 유지'""",
+                    (status, self.old_id),
+                )
+                self._run("unresolved", [])
+                finding = self.c.execute("SELECT * FROM findings WHERE fp=?", (self.fp,)).fetchone()
+                self.assertEqual(finding["status"], status)
+                self.assertEqual(finding["decision_comment_id"], "11")
+                card = self.c.execute("SELECT * FROM cards WHERE id=?", (self.new_id,)).fetchone()
+                self.assertEqual(card["status"], "commented")
+                self.assertNotIn("force_post", json.loads(card["payload"]))
+
+    def test_new_code_evidence_still_reopens_a_pending_decision(self):
+        """결정을 지키는 것과 덮어두는 것은 다르다 — 현재 head 근거가 있으면 다시 연다."""
+        self.c.execute(
+            """UPDATE findings SET status='defer_pending',card_id=?,decision_head='old',
+               decision_comment_id='11',decision_evidence='별도 후속'""", (self.old_id,)
+        )
+        self._run("unresolved", [], evidence="src/example.ts:10 에서 여전히 저장 없이 goBack()")
+        finding = self.c.execute("SELECT * FROM findings WHERE fp=?", (self.fp,)).fetchone()
+        self.assertEqual(finding["status"], "confirmed")
+        card = self.c.execute("SELECT * FROM cards WHERE id=?", (self.new_id,)).fetchone()
+        self.assertTrue(json.loads(card["payload"])["force_post"])
+
     def test_code_profile_picks_the_engine_specific_review_prompt(self):
         """Regression: the code profile once pointed at a single review.md that
         no longer exists, which crashed every code review."""

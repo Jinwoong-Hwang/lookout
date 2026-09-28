@@ -11,9 +11,13 @@ from . import db, doc_planner, engines, ghclient, keys, prdiff, profiles, prompt
 from .config import CFG
 
 ACTIONABLE_SEVERITY_DOC = {"blocking", "should-fix"}
+# 작성자 답변이 한 번 붙은 finding — 근거 없이 되돌리지 않는다
+DECIDED = {"dismissed", "deferred", "dismiss_pending", "defer_pending"}
 
 # closure 프롬프트는 finding 하나만 판단하므로 리뷰보다 적은 예산으로 충분
 CLOSURE_DIFF_CHARS = 40000
+# 댓글이 아니라 PR 본문에서 나온 작성자 발언에 붙이는 가짜 댓글 id
+PR_BODY_ID = "pr-body"
 
 
 def _is_stale(card) -> bool:
@@ -49,6 +53,15 @@ def _stable_rule(f: dict) -> str:
     return f"{slug}-{digest}"
 
 
+def _author_body_reply(author: dict) -> dict | None:
+    """PR 본문도 작성자가 쓴 글이다 — '이건 보류' 를 댓글 대신 본문 표에 적는다."""
+    body = (author.get("body") or "").strip()
+    if not body:
+        return None
+    return {"id": PR_BODY_ID, "author": author.get("login", ""),
+            "created_at": author.get("created_at", ""), "body": body}
+
+
 def _verified_reply(verdict: dict, replies: list[dict]):
     comment_id = str(verdict.get("reply_comment_id") or "")
     evidence = (verdict.get("reply_evidence") or "").strip()
@@ -73,6 +86,7 @@ def _run_closure(c, card, priors, diff, engine, wt, policy,
     prompt_file = profiles.prompt_name(policy, "closure")
     # 문자로 자르면 파일 중간에서 끊기므로 여기서도 파일 단위로 다시 담는다
     cdiff, cfiles, _ = prdiff.pack(diff, CLOSURE_DIFF_CHARS)
+    body_reply = _author_body_reply(author)
     for pf in priors:
         decision_head = pf["decision_head"]
         if pf["status"] in {"dismissed", "deferred", "dismiss_pending", "defer_pending"}:
@@ -80,7 +94,7 @@ def _run_closure(c, card, priors, diff, engine, wt, policy,
                 continue
 
         replies = ghclient.finding_author_replies(
-            comments, pf["fp"], author.get("id", ""), ghclient.my_login(),
+            comments, pf["fp"], author.get("id", ""), ghclient.my_login(), body_reply,
         )
         if decision_head and decision_head != card["head_sha"] and pf["decision_comment_id"]:
             decision_comment = next(
@@ -123,12 +137,15 @@ def _run_closure(c, card, priors, diff, engine, wt, policy,
                 (verdict.get("reply_evidence") or "").strip(),
                 follow_up,
             )
+        elif pf["status"] in DECIDED and status != "resolved" and not evidence:
+            # 새 head 재확인에서 반박 근거가 없으면 이전 결정을 그대로 둔다.
+            # 예전엔 dismissed/deferred 만 지켜서, 운영자 수용을 기다리던 *_pending
+            # 이 다음 커밋에 조용히 unresolved 로 떨어져 리마인드가 다시 나갔다.
+            status = pf["status"]
+            db.set_finding_status(c, pf["id"], status)
         elif status in {"dismissed", "deferred"}:
             status = "unresolved"
             db.clear_finding_decision(c, pf["id"], status)
-        elif pf["status"] in {"dismissed", "deferred"} and status == "unresolved" and not evidence:
-            status = pf["status"]
-            db.set_finding_status(c, pf["id"], status)
         else:
             db.clear_finding_decision(c, pf["id"], status)
         db.log_event(c, "finding_closure", card["key"],
