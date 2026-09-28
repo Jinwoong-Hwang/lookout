@@ -16,8 +16,10 @@ DECIDED = {"dismissed", "deferred", "dismiss_pending", "defer_pending"}
 # 그 중 보류는 코드 근거로 재개하지 않는다 — 아래 _run_closure 참고
 DEFERRED = {"deferred", "defer_pending"}
 
-# closure 프롬프트는 finding 하나만 판단하므로 리뷰보다 적은 예산으로 충분
-CLOSURE_DIFF_CHARS = 40000
+# closure 는 지적 하나만 판단한다. 그 지적의 파일은 prefer 로 반드시 싣고, 나머지
+# 파일은 이 예산만큼만 곁들인다 — 예전엔 PR 전체 diff 를 40,000자씩 지적마다
+# 다시 보냈고 그게 #10066 프롬프트 비용의 46%였다.
+CLOSURE_DIFF_CHARS = 4000
 
 
 def _is_stale(card) -> bool:
@@ -82,7 +84,6 @@ def _run_closure(c, card, priors, diff, engine, wt, policy,
     """
     prompt_file = profiles.prompt_name(policy, "closure")
     # 문자로 자르면 파일 중간에서 끊기므로 여기서도 파일 단위로 다시 담는다
-    cdiff, cfiles, _ = prdiff.pack(diff, CLOSURE_DIFF_CHARS)
     sources = {}
     for r in all_replies:
         sources[r["source"]] = sources.get(r["source"], 0) + 1
@@ -97,6 +98,7 @@ def _run_closure(c, card, priors, diff, engine, wt, policy,
         # 이미 근거로 쓴 회신은 예산과 무관하게 남긴다
         replies = ghclient.trim_author_replies(
             all_replies, pinned=str(pf["decision_comment_id"] or ""))
+        cdiff, cfiles, _ = prdiff.pack(diff, CLOSURE_DIFF_CHARS, prefer=[pf["file"]])
         detail = _json.loads(pf["body"]) if pf["body"] else {}
         cprompt = prompt_tpl.render(
             prompt_file, FILE=pf["file"], LINE=pf["line"], TITLE=pf["title"],

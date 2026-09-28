@@ -102,3 +102,32 @@ class CollectTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PackPreferTest(unittest.TestCase):
+    def _diff(self, sizes):
+        out = []
+        for path, n in sizes.items():
+            out.append(f"diff --git a/{path} b/{path}\n@@ -1 +1 @@\n")
+            out.append("+x" * n + "\n")
+        return "".join(out)
+
+    def test_preferred_file_is_included_even_when_it_blows_the_budget(self):
+        """지적 하나를 판정하는 호출에서 정작 그 파일이 예산에 밀려 빠지면 무의미하다."""
+        diff = self._diff({"big.ts": 4000, "other.ts": 100, "another.ts": 100})
+        text, manifest, _ = prdiff.pack(diff, budget=500, prefer=["big.ts"])
+        self.assertIn("a/big.ts", text)
+        self.assertIn("[포함]   big.ts", manifest)
+
+    def test_remaining_budget_still_goes_to_other_files(self):
+        diff = self._diff({"target.ts": 50, "other.ts": 50, "huge.ts": 9000})
+        text, _manifest, omitted = prdiff.pack(diff, budget=400, prefer=["target.ts"])
+        self.assertIn("a/target.ts", text)
+        self.assertIn("a/other.ts", text)
+        self.assertNotIn("a/huge.ts", text)
+        self.assertEqual(omitted, 1)
+
+    def test_prefer_is_optional_and_changes_nothing_by_default(self):
+        diff = self._diff({"a.ts": 50, "b.ts": 9000})
+        self.assertEqual(prdiff.pack(diff, budget=400),
+                         prdiff.pack(diff, budget=400, prefer=[]))

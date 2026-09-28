@@ -40,15 +40,20 @@ def split_by_file(diff: str):
     return files
 
 
-def pack(diff: str, budget: int = MAX_DIFF_CHARS):
+def pack(diff: str, budget: int = MAX_DIFF_CHARS, prefer=()):
     """(diff_text, manifest, omitted_count) — 파일 청크를 통째로 예산 안에 담는다.
 
     **추가 라인이 있는 파일(새 동작)** 에 예산을 먼저 주고, 삭제만 있는 파일은 남는
     예산으로 채운다. 대량 삭제 리팩터링에서 지워진 코드가 예산을 다 먹는 것을 막는다.
+
+    `prefer` 로 지목한 파일은 예산과 무관하게 넣는다. 지적 하나를 판정하는 호출에서
+    정작 그 지적이 가리키는 파일이 예산에 밀려 빠지면 아무 의미가 없다 — #10066 의
+    useLinkImportPress.ts 는 청크가 13,115자라 8,000 예산이면 통째로 사라진다.
     """
     files = split_by_file(diff)
     if not files:
         return diff[:budget], "", 0
+    prefer = {p for p in prefer if p}
 
     total_a = sum(f[2] for f in files)
     total_d = sum(f[3] for f in files)
@@ -56,14 +61,17 @@ def pack(diff: str, budget: int = MAX_DIFF_CHARS):
         return diff, (f"{len(files)} files changed, +{total_a} / -{total_d} "
                       f"— 전체 diff가 위에 포함됨."), 0
 
-    order = sorted(range(len(files)), key=lambda i: (files[i][2] == 0, i))
+    order = sorted(range(len(files)),
+                   key=lambda i: (files[i][0] not in prefer, files[i][2] == 0, i))
     kept, used = set(), 0
     for i in order:
         chunk = files[i][1]
-        if used + len(chunk) > budget:
+        forced = files[i][0] in prefer
+        if not forced and used + len(chunk) > budget:
             continue
         kept.add(i)
-        used += len(chunk)
+        if not forced:  # 지목 파일은 예산에서 빼지 않는다 — 곁들일 몫이 남아야 한다
+            used += len(chunk)
 
     text = "".join(files[i][1] for i in range(len(files)) if i in kept)
     lines = [
