@@ -1,0 +1,13 @@
+replay-review.py
+  h_03b13cada2edad 124-127
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "7593fcc49b2a8a506b72ed94b833687c93768bd5",
+  "prompts": {},
+  "humans": {
+    "h_03b13cada2edad": {
+      "author": "woong@zigbang.com"
+    }
+  }
+}
