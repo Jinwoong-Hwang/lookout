@@ -50,9 +50,13 @@ For `deferred`, `follow_up` may contain one exact URL or ticket token copied
 verbatim from that same author reply; otherwise leave it empty. Do not infer,
 normalize, or invent a follow-up reference. It is informational only.
 
-For a finding already `dismissed` or `deferred`, keep that status unless the
-latest head contains concrete new code evidence that refutes the author's
-answer. Do not reopen it merely because the code still looks the same. If you
+A `deferred` finding means the author already knows the code is broken and
+chose to postpone it. "The code still has this problem" is therefore never a
+reason to reopen it — that is what deferral means. Only a newer author reply
+withdrawing the deferral can change it; otherwise return `deferred`.
+
+For a finding already `dismissed`, keep that status unless the latest head
+contains concrete new code evidence that refutes the author's answer. Do not reopen it merely because the code still looks the same. If you
 set such a finding to `unresolved`, `evidence` must cite the current-head code
 (path and line) that refutes the answer.
 

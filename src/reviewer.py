@@ -13,6 +13,8 @@ from .config import CFG
 ACTIONABLE_SEVERITY_DOC = {"blocking", "should-fix"}
 # 작성자 답변이 한 번 붙은 finding — 근거 없이 되돌리지 않는다
 DECIDED = {"dismissed", "deferred", "dismiss_pending", "defer_pending"}
+# 그 중 보류는 코드 근거로 재개하지 않는다 — 아래 _run_closure 참고
+DEFERRED = {"deferred", "defer_pending"}
 
 # closure 프롬프트는 finding 하나만 판단하므로 리뷰보다 적은 예산으로 충분
 CLOSURE_DIFF_CHARS = 40000
@@ -137,6 +139,15 @@ def _run_closure(c, card, priors, diff, engine, wt, policy,
                 (verdict.get("reply_evidence") or "").strip(),
                 follow_up,
             )
+        elif pf["status"] in DEFERRED and status != "resolved":
+            # 보류는 "고장 난 걸 아는데 지금 안 고친다" 는 뜻이라, "아직 고장 나
+            # 있다" 는 코드 근거로는 재개될 수 없다 — 동어반복이기 때문이다.
+            # #10066 재현에서 판정기가 작성자가 보류한 내용을 그대로 인용해
+            # (심지어 "PO 결정 대기" 라고 적힌 코드 주석까지) 재개를 시도했고,
+            # 게시 직전 재확인이 아니었으면 리마인드가 다시 나갔다. 철회는
+            # 작성자의 새 회신이나 운영자만 할 수 있다.
+            status = pf["status"]
+            db.set_finding_status(c, pf["id"], status)
         elif pf["status"] in DECIDED and status != "resolved" and not evidence:
             # 새 head 재확인에서 반박 근거가 없으면 이전 결정을 그대로 둔다.
             # 예전엔 dismissed/deferred 만 지켜서, 운영자 수용을 기다리던 *_pending

@@ -124,7 +124,7 @@ class ReviewerClosureTest(unittest.TestCase):
         없다. 반박할 코드 근거가 없으면 결정을 그대로 두어야 한다.
         """
         for status in ("dismiss_pending", "defer_pending"):
-            with self.subTest(status=status):
+            with self.subTest(status=status):  # 보류는 DEFERRED 분기가 먼저 잡는다
                 self.c.execute("UPDATE cards SET status='intake' WHERE id=?", (self.new_id,))
                 self.c.execute(
                     """UPDATE findings SET status=?,card_id=?,decision_head='old',
@@ -139,11 +139,16 @@ class ReviewerClosureTest(unittest.TestCase):
                 self.assertEqual(card["status"], "commented")
                 self.assertNotIn("force_post", json.loads(card["payload"]))
 
-    def test_new_code_evidence_still_reopens_a_pending_decision(self):
-        """결정을 지키는 것과 덮어두는 것은 다르다 — 현재 head 근거가 있으면 다시 연다."""
+    def test_new_code_evidence_still_reopens_a_dismissal(self):
+        """반려는 다르다 — 작성자가 "의도적" 이라 했어도 새 코드가 그 주장을 뒤집으면 연다.
+
+        보류(deferred)와 갈라지는 지점이다. 보류는 "고장 난 걸 안다" 가 전제라
+        코드 근거가 새 정보가 아니지만, 반려는 "이 동작이 맞다" 는 주장이라
+        현재 head 가 그 주장을 반박할 수 있다.
+        """
         self.c.execute(
-            """UPDATE findings SET status='defer_pending',card_id=?,decision_head='old',
-               decision_comment_id='11',decision_evidence='별도 후속'""", (self.old_id,)
+            """UPDATE findings SET status='dismiss_pending',card_id=?,decision_head='old',
+               decision_comment_id='11',decision_evidence='의도적으로 유지'""", (self.old_id,)
         )
         self._run("unresolved", [], evidence="src/example.ts:10 에서 여전히 저장 없이 goBack()")
         finding = self.c.execute("SELECT * FROM findings WHERE fp=?", (self.fp,)).fetchone()
@@ -284,18 +289,39 @@ class ReviewerClosureTest(unittest.TestCase):
         finding = self.c.execute("SELECT * FROM findings WHERE fp=?", (self.fp,)).fetchone()
         self.assertIsNone(finding["decision_follow_up"])
 
-    def test_deferred_reopens_only_with_current_code_evidence(self):
-        self.c.execute("UPDATE findings SET status='deferred',decision_head='old',decision_follow_up='LOOK-123'")
-        self._run("unresolved", [])
-        finding = self.c.execute("SELECT * FROM findings WHERE fp=?", (self.fp,)).fetchone()
-        self.assertEqual(finding["status"], "deferred")
-        self.assertEqual(finding["decision_follow_up"], "LOOK-123")
+    def test_deferred_is_not_reopened_by_code_evidence(self):
+        """보류는 "고장 난 걸 알고 미룬다" — "아직 고장 나 있다" 는 재개 근거가 아니다.
 
-        self._run("unresolved", [], evidence="src/example.ts:10 changed behavior")
+        #10066 재현에서 판정기가 작성자가 보류한 내용을 그대로 인용해(코드에 적힌
+        "PO 결정 대기" 주석까지) 재개를 시도했다. 게시 직전 재확인이 우연히
+        되돌려 줬을 뿐, 두 번 다 그랬으면 리마인드가 다시 나갔다.
+        """
+        for status in ("deferred", "defer_pending"):
+            with self.subTest(status=status):
+                self.c.execute("UPDATE cards SET status='intake' WHERE id=?", (self.new_id,))
+                self.c.execute(
+                    """UPDATE findings SET status=?,card_id=?,decision_head='old',
+                       decision_comment_id='11',decision_follow_up='LOOK-123'""",
+                    (status, self.old_id),
+                )
+                self._run("unresolved", [],
+                          evidence="src/example.ts:10 여전히 저장 없이 goBack()")
+                finding = self.c.execute("SELECT * FROM findings WHERE fp=?",
+                                         (self.fp,)).fetchone()
+                self.assertEqual(finding["status"], status)
+                self.assertEqual(finding["decision_follow_up"], "LOOK-123")
+                card = self.c.execute("SELECT * FROM cards WHERE id=?",
+                                      (self.new_id,)).fetchone()
+                self.assertNotIn("force_post", json.loads(card["payload"]))
+
+    def test_deferred_still_closes_when_the_code_is_actually_fixed(self):
+        """재개만 막는 것이지 영원히 붙잡아 두는 게 아니다."""
+        self.c.execute(
+            """UPDATE findings SET status='deferred',card_id=?,decision_head='old',
+               decision_follow_up='LOOK-123'""", (self.old_id,))
+        self._run("resolved", [])
         finding = self.c.execute("SELECT * FROM findings WHERE fp=?", (self.fp,)).fetchone()
-        self.assertEqual(finding["status"], "confirmed")
-        self.assertEqual(finding["card_id"], self.new_id)
-        self.assertIsNone(finding["decision_follow_up"])
+        self.assertEqual(finding["status"], "resolved")
 
     def test_operator_decision_is_rechecked_on_every_new_head(self):
         db.set_finding_decision(
