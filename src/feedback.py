@@ -24,15 +24,25 @@ def _payload(card) -> dict:
         return {}
 
 
-def marker_tail(fp: str) -> str:
-    """마커를 rule 로만 매칭한다.
+def marker_pattern(fp: str) -> "re.Pattern":
+    """마커를 파일+rule 로 매칭한다. 그 사이의 줄 번호는 있어도 없어도 된다.
 
-    지문에서 줄 번호를 뺀 뒤(2165567), 이미 게시된 댓글에는 옛 `file:line:rule`
-    마커가 그대로 남는다. 전체 지문으로 비교하면 마이그레이션된 finding 의 기존
-    댓글이 전부 '내 것이 아닌' 것으로 보여 피드백 수집과 중복 검사가 끊긴다
-    (셀프 리뷰 2회차 지적). 마커는 형식이 어떻든 `:{rule} -->` 로 끝난다.
+    지문에서 줄 번호를 뺀 뒤(2165567) 이미 게시된 댓글에는 옛 `file:line:rule`
+    마커가 남는다. 전체 지문으로 비교하면 마이그레이션된 finding 의 기존 댓글이
+    전부 '내 것 아님' 으로 보여 피드백 수집과 중복 검사가 끊긴다(셀프 2회차).
+
+    그렇다고 rule 만 보면 반대로 과하다 — 지문은 file+rule 로 서로 다른 지적을
+    가르는데, 파일을 빼면 다른 파일의 같은 rule 이 '이미 게시됨' 으로 눌린다
+    (셀프 3회차). 그래서 파일은 지키고 줄 번호만 흘린다.
     """
-    return f":{fp.rsplit(':', 1)[-1]} -->"
+    body, _, rule = fp.rpartition(":")
+    file = body.rsplit(":", 1)[-1] if ":" in body.partition("#")[2] else body
+    return re.compile(
+        rf":{re.escape(file)}(?::[^:]*)?:{re.escape(rule)} -->")
+
+
+def marker_matches(fp: str, body: str) -> bool:
+    return marker_pattern(fp).search(body or "") is not None
 
 
 def _marker(fp: str) -> str:
@@ -125,7 +135,7 @@ def snapshot_card(c, card, snapshot_type: str = "manual",
                   pr_info: dict | None = None, comments: list[dict] | None = None) -> list[dict]:
     """Capture feedback for bot comments that contain this card's findings."""
     findings = db.findings_for_card(c, card["id"])
-    markers = [marker_tail(f["fp"]) for f in findings if f["fp"]]
+    markers = [f["fp"] for f in findings if f["fp"]]
     if not markers:
         return []
     if comments is None:
@@ -145,7 +155,7 @@ def snapshot_card(c, card, snapshot_type: str = "manual",
         if not _is_bot_review_comment(comment, bot_login):
             continue
         body = comment.get("body") or ""
-        if not any(m in body for m in markers):
+        if not any(marker_matches(fp, body) for fp in markers):
             continue
         replies = _author_replies(comments, idx, author, bot_login)
         snapshots.append(_upsert_snapshot(c, card, snapshot_type, comment, replies, pr_info))

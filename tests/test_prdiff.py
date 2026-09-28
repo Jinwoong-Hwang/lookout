@@ -179,3 +179,44 @@ class FpLineMigrationTest(unittest.TestCase):
         db._drop_line_from_fps(c)
         rows = c.execute("SELECT fp FROM findings").fetchall()
         self.assertEqual([r["fp"] for r in rows], ["o/r#1:src/a.ts:r"])
+
+
+class PurgeKeepsOpenFindingsTest(unittest.TestCase):
+    """재게시 쿨다운이 지적을 옛 카드에 남겨 두므로, archived 정리가 열려 있는 PR 의
+    미해결 지적까지 지우기 시작했다(셀프 리뷰 3회차). 게시 여부와 보존 수명은 별개다."""
+
+    def _conn(self):
+        c = sqlite3.connect(":memory:")
+        c.row_factory = sqlite3.Row
+        c.executescript(db.SCHEMA)
+        return c
+
+    def test_open_finding_survives_its_archived_card(self):
+        c = self._conn()
+        old = db.upsert_card(c, "old", "review", "o/r", 1, "archived", "h1")
+        db.upsert_finding(c, old, "o/r", 1, "h1", "o/r#1:src/a.ts:open-one", "열림",
+                          "{}", "src/a.ts", "1", "medium", "high", "posted")
+        db.upsert_finding(c, old, "o/r", 1, "h1", "o/r#1:src/b.ts:done-one", "닫힘",
+                          "{}", "src/b.ts", "2", "medium", "high", "resolved")
+        c.execute("UPDATE cards SET updated_at=0 WHERE id=?", (old,))
+
+        db.purge_old(c, days=1)
+
+        rows = {r["fp"].rsplit(":", 1)[-1]: r["status"]
+                for r in c.execute("SELECT fp, status FROM findings")}
+        self.assertEqual(rows, {"open-one": "posted"})
+        self.assertEqual(db.open_findings_count(c, "o/r", 1), 1)
+        # 지적이 남은 카드는 함께 지우지 않는다 — 고아 finding 을 만들지 않기 위해
+        self.assertIsNotNone(c.execute("SELECT 1 FROM cards WHERE id=?", (old,)).fetchone())
+
+    def test_a_fully_closed_card_is_still_purged(self):
+        c = self._conn()
+        old = db.upsert_card(c, "old", "review", "o/r", 1, "archived", "h1")
+        db.upsert_finding(c, old, "o/r", 1, "h1", "o/r#1:src/a.ts:done", "닫힘",
+                          "{}", "src/a.ts", "1", "medium", "high", "resolved")
+        c.execute("UPDATE cards SET updated_at=0 WHERE id=?", (old,))
+
+        out = db.purge_old(c, days=1)
+
+        self.assertEqual(out["findings"], 1)
+        self.assertEqual(out["cards"], 1)

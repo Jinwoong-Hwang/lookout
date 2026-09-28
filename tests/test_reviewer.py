@@ -273,12 +273,23 @@ class ReviewerClosureTest(unittest.TestCase):
         """판정기가 원래 보류 문구를 그대로 인용해 스스로 열어버릴 수 있었다."""
         self.c.execute(
             """UPDATE findings SET status='deferred',card_id=?,decision_head='old',
-               decision_comment_id='issue:11',decision_evidence='별도 후속'""",
+               decision_comment_id='issue:11',decision_evidence='별도 후속으로 처리'""",
             (self.old_id,))
+        # 같은 문구를 조금 늘려 인용해도 철회가 아니다
         self._run("unresolved", [], reply_evidence="별도 후속으로 처리합니다")
         finding = self.c.execute("SELECT * FROM findings WHERE fp=?", (self.fp,)).fetchone()
         self.assertEqual(finding["status"], "deferred")
         self.assertEqual(finding["decision_comment_id"], "issue:11")
+
+    def test_an_edited_reply_can_still_withdraw(self):
+        """id 만 보면 같은 글을 고쳐 철회하는 경로가 막힌다(셀프 리뷰 3회차)."""
+        self.c.execute(
+            """UPDATE findings SET status='deferred',card_id=?,decision_head='old',
+               decision_comment_id='issue:11',decision_evidence='별도 후속으로 처리'""",
+            (self.old_id,))
+        self._run("unresolved", [], reply_evidence="생각을 바꿔 이번에 고치겠습니다")
+        finding = self.c.execute("SELECT * FROM findings WHERE fp=?", (self.fp,)).fetchone()
+        self.assertEqual(finding["status"], "confirmed")
 
     def test_skipped_posted_finding_blocks_lgtm(self):
         """게이트가 재판정을 건너뛴 지적이 posted 로 남아도 LGTM 은 막아야 한다."""

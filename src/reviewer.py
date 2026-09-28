@@ -68,6 +68,31 @@ def _verified_reply(verdict: dict, replies: list[dict]):
                  and evidence in (reply.get("body") or "")), None)
 
 
+def _is_withdrawal(pf, reply: dict, verdict: dict) -> bool:
+    """이 회신이 '기존 결정의 철회' 인가.
+
+    두 방향으로 한 번씩 틀렸다. 처음엔 철회 경로가 아예 없어 봇도 사람도 못 여는
+    일방통행이었고(셀프 1회차), 열어 주자 판정기가 **원래 보류 문구를 그대로
+    인용해** 스스로 해제했다(셀프 2회차). 그래서 id 가 다를 것을 요구했는데,
+    이번엔 같은 댓글을 고쳐 철회하는 경로가 막혔다(셀프 3회차).
+
+    그래서 id 가 아니라 근거 문장으로 가른다 — 결정 당시 저장해 둔 인용과 겹치지
+    않는 문장을 들고 와야 철회다. 같은 글을 고쳐 새 문장을 적었으면 그것도 철회다.
+
+    같은 문장의 일부나 확장을 인용하는 것도 막는다(`A in B` 양방향) — 문장이
+    '다르다' 만 보면 판정기가 같은 보류 문구의 앞뒤를 조금 늘려 통과시킬 수 있다.
+    완전한 판별은 결정 당시 회신 본문의 지문을 저장해야 가능하고, 이건 그 전의
+    휴리스틱이다.
+    """
+    if str(reply["id"]) != str(pf["decision_comment_id"] or ""):
+        return True
+    fresh = (verdict.get("reply_evidence") or "").strip()
+    stored = (pf["decision_evidence"] or "").strip()
+    if not fresh or not stored:
+        return False  # 비교할 근거가 없으면 열지 않는다
+    return fresh not in stored and stored not in fresh
+
+
 def _verified_follow_up(verdict: dict, reply: dict | None) -> str:
     """Keep only a follow-up reference copied verbatim from the verified reply."""
     follow_up = (verdict.get("follow_up") or "").strip()
@@ -174,7 +199,7 @@ def _run_closure(c, card, priors, diff, engine, wt, policy,
                 follow_up,
             )
         elif (pf["status"] in DECIDED and status == "unresolved" and verified_reply
-              and str(verified_reply["id"]) != str(pf["decision_comment_id"] or "")):
+              and _is_withdrawal(pf, verified_reply, verdict)):
             # 작성자가 답을 뒤집었다 — 검증된 인용이 근거다. 보류 유지 분기보다
             # 먼저 와야 한다. 안 그러면 철회 경로가 아예 막혀, 봇도 사람도 못 여는
             # 일방통행이 된다.

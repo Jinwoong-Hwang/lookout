@@ -443,6 +443,10 @@ def unresolved_findings_count(c, repo, pr) -> int:
     return int(row["n"] if row else 0)
 
 
+OPEN_STATUSES = ("posted", "confirmed", "unresolved", "pending_verify",
+                 "dismiss_pending", "defer_pending")
+
+
 def open_findings_count(c, repo, pr) -> int:
     """이 PR 에 아직 닫히지 않은 지적 수 — LGTM 차단 기준.
 
@@ -452,10 +456,9 @@ def open_findings_count(c, repo, pr) -> int:
     없었다(셀프 리뷰 2회차 지적).
     """
     row = c.execute(
-        """SELECT COUNT(*) n FROM findings WHERE repo=? AND pr_number=?
-           AND status IN ('posted','confirmed','unresolved','pending_verify',
-                          'dismiss_pending','defer_pending')""",
-        (repo, pr),
+        "SELECT COUNT(*) n FROM findings WHERE repo=? AND pr_number=? "
+        f"AND status IN ({','.join('?' * len(OPEN_STATUSES))})",
+        (repo, pr, *OPEN_STATUSES),
     ).fetchone()
     return int(row["n"] if row else 0)
 
@@ -601,14 +604,22 @@ def purge_old(c, days: int = 14) -> dict:
     """N일 지난 종료(archived) 카드 + 거기 묶인 findings/events 삭제.
 
     살아있는(non-archived) 카드의 데이터는 절대 건드리지 않음. findings/events를
-    먼저 지우고(아직 카드 존재) 카드를 지운다. 카드가 이미 사라진 고아 이벤트도 정리."""
+    먼저 지우고(아직 카드 존재) 카드를 지운다. 카드가 이미 사라진 고아 이벤트도 정리.
+    열린 지적(OPEN_STATUSES)은 카드가 archived 여도 남긴다 — 아래 주석 참고."""
     cutoff = now() - days * 86400
     sub = "(SELECT id FROM cards WHERE status='archived' AND updated_at < ?)"
     subk = "(SELECT key FROM cards WHERE status='archived' AND updated_at < ?)"
-    findings = c.execute(f"DELETE FROM findings WHERE card_id IN {sub}", (cutoff,)).rowcount
+    # 열린 지적은 남긴다. 재게시 쿨다운이 지적을 옛 카드에 남겨 두므로, 카드가
+    # archived 되면 열려 있는 PR 의 미해결 지적까지 함께 지워졌다(셀프 리뷰 3회차).
+    # 게시 여부와 보존 수명은 별개다.
+    findings = c.execute(
+        f"DELETE FROM findings WHERE card_id IN {sub} "
+        f"AND status NOT IN ({','.join('?' * len(OPEN_STATUSES))})",
+        (cutoff, *OPEN_STATUSES)).rowcount
     events = c.execute(f"DELETE FROM events WHERE key IN {subk}", (cutoff,)).rowcount
     cards = c.execute(
-        "DELETE FROM cards WHERE status='archived' AND updated_at < ?", (cutoff,)
+        "DELETE FROM cards WHERE status='archived' AND updated_at < ? "
+        "AND id NOT IN (SELECT card_id FROM findings)", (cutoff,)
     ).rowcount
     events += c.execute(
         "DELETE FROM events WHERE ts < ? AND key IS NOT NULL "

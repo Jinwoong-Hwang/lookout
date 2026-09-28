@@ -16,9 +16,11 @@ def process(c, card):
     pending = db.findings_for_card(c, card["id"], status="pending_verify")
     if not pending:
         decision_pending = db.pending_decision_findings(c, repo, pr)
-        terminal = "commented" if decision_pending else (
-            policy["no_confirmed_terminal"] if policy.get("profile_type") == "doc" else "commenting"
-        )
+        if decision_pending or db.open_findings_count(c, repo, pr):
+            terminal = "commented"
+        else:
+            terminal = (policy["no_confirmed_terminal"]
+                        if policy.get("profile_type") == "doc" else "commenting")
         db.set_status(c, card["id"], terminal)
         return
 
@@ -62,7 +64,12 @@ def process(c, card):
 
     confirmed = db.findings_for_card(c, card["id"], status="confirmed")
     decision_pending = db.pending_decision_findings(c, repo, pr)
-    terminal = "commenting" if confirmed else (
-        "commented" if decision_pending else policy["no_confirmed_terminal"]
-    )
+    if confirmed:
+        terminal = "commenting"
+    elif decision_pending or db.open_findings_count(c, repo, pr):
+        # 신규 지적이 전부 기각돼도, 재판정을 건너뛴 기존 지적이 남아 있으면
+        # LGTM 이 아니다 — reviewer 쪽만 막아 두고 이 경로를 비워 뒀다(셀프 3회차)
+        terminal = "commented"
+    else:
+        terminal = policy["no_confirmed_terminal"]
     db.set_status(c, card["id"], terminal)

@@ -138,7 +138,7 @@ def process(c, card):
     # force면 마커 중복 무시하고 전부 게시, 아니면 아직 안 올라간 것만
     fresh = []
     for f in postable:
-        if not force and any(feedback.marker_tail(f["fp"]) in b for b in posted_bodies):
+        if not force and any(feedback.marker_matches(f["fp"], b) for b in posted_bodies):
             db.set_finding_status(c, f["id"], "posted", comment_id="exists")
         else:
             fresh.append(f)
@@ -198,7 +198,7 @@ def publish_dryrun(c, card) -> bool:
     already = any("hermes:fp" in b for b in posted_bodies)
     fresh = []
     for f in dry:
-        if any(feedback.marker_tail(f["fp"]) in b for b in posted_bodies):
+        if any(feedback.marker_matches(f["fp"], b) for b in posted_bodies):
             db.set_finding_status(c, f["id"], "posted", comment_id="exists")
         else:
             fresh.append(f)
