@@ -24,10 +24,12 @@ worktree 는 스크래치에 만들고 끝나면 prune 한다.
   python3 replay-review.py zigbang/zigbang-client 10066 --engine claude
   python3 replay-review.py zigbang/zigbang-client 10066 --second-pass
 
---second-pass 는 "커밋 하나 더 얹은 head" 를 흉내낸다. 1차 실행 뒤 모든 결정의
-decision_head 를 옛 sha 로 돌려놓고 한 번 더 돌린다. 작성자 회신이 한 번뿐인
-상태에서 새 커밋이 오면 보류가 풀리는지 — 재제기 루프가 실제로 멈췄는지 —
-이 경로로만 확인된다.
+--second-pass 는 "커밋 하나 더 얹은 head" 를 흉내낸다. 1차 실행 뒤 '마지막으로
+판정한 시점' 을 head 의 **실제 부모 커밋**으로 돌려놓고 한 번 더 돌린다. 가짜
+sha 를 쓰면 두 커밋 사이 변경 파일을 계산할 수 없어 호출 게이트가 늘 '모름' 으로
+빠지므로, 실제 조상이어야 한다. 이 경로로만 확인되는 것 둘 —
+  · 작성자 회신이 한 번뿐인 상태에서 새 커밋이 와도 보류가 유지되는가
+  · 달라진 게 없는 지적의 closure 호출을 실제로 건너뛰는가
 
 종료 코드: 게시될 뻔한 것이 있으면 1, 아니면 0.
 """
@@ -46,7 +48,7 @@ sys.path.insert(0, HOME)
 
 from src import config  # noqa: E402
 
-FAKE_OLD_HEAD = "0" * 40
+
 
 
 def log(*a):
@@ -138,14 +140,22 @@ def main():
     posted = run_pass(db, ghclient, reviewer, verifier, commenter, worktree,
                       args, head, label="1차")
     if args.second_pass:
+        parent = gh_text(["api", f"repos/{args.repo}/commits/{head}",
+                          "-q", ".parents[0].sha"])
         log("")
-        log("=== 2차: 새 커밋이 온 상황 — 기존 결정의 decision_head 를 옛 sha 로 ===")
+        log(f"=== 2차: 새 커밋이 온 상황 — 판정 시점을 부모 커밋 {parent[:10]} 로 ===")
         with db.connect() as c:
             n = c.execute(
                 """UPDATE findings SET decision_head=? WHERE repo=? AND pr_number=?
                    AND decision_head IS NOT NULL AND decision_head!=''""",
-                (FAKE_OLD_HEAD, args.repo, args.pr)).rowcount
-        log(f"결정 {n}건을 옛 head 로 되돌림")
+                (parent, args.repo, args.pr)).rowcount
+            m = c.execute(
+                """UPDATE findings SET last_judged_head=? WHERE repo=? AND pr_number=?
+                   AND last_judged_head IS NOT NULL AND last_judged_head!=''""",
+                (parent, args.repo, args.pr)).rowcount
+        changed = worktree.changed_files_between(args.repo, parent, head)
+        log(f"결정 {n}건 · 판정시점 {m}건 되돌림 · 그 사이 변경 파일 "
+            f"{len(changed) if changed is not None else '모름'}개")
         posted += run_pass(db, ghclient, reviewer, verifier, commenter, worktree,
                            args, head, label="2차")
 
@@ -206,7 +216,10 @@ def report(db, repo, pr, card_id, key, label):
         card = c.execute("SELECT * FROM cards WHERE id=?", (card_id,)).fetchone()
         log(f"[{label}] 카드 최종 상태: {card['status']}")
 
-        log(f"[{label}] closure 판정")
+        skipped = c.execute(
+            "SELECT COUNT(*) n FROM events WHERE key=? AND type='finding_closure_skipped'",
+            (key,)).fetchone()["n"]
+        log(f"[{label}] closure 판정 (건너뜀 {skipped}건)")
         for e in c.execute("SELECT detail FROM events WHERE key=? AND type='finding_closure'",
                            (key,)):
             d = json.loads(e["detail"])
