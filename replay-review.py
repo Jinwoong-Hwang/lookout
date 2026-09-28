@@ -121,6 +121,10 @@ def main():
 
     from src import commenter, db, ghclient, reviewer, verifier, worktree  # noqa: E402
 
+    # 라이브 DB 사본은 그 시점 스키마 그대로다 — 운영은 tick 이 db.init() 으로
+    # 마이그레이션하므로, 재현도 같은 단계를 거쳐야 새 칼럼이 생긴다.
+    db.init()
+
     def blocked(*_a, **_k):
         raise AssertionError("replay: GitHub 쓰기 시도가 차단됐다")
 
