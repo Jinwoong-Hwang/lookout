@@ -164,6 +164,53 @@ def init():
                      "decision_follow_up", "last_judged_head", "last_seen_reply"):
             if name not in finding_cols:
                 c.execute(f"ALTER TABLE findings ADD COLUMN {name} TEXT")
+        _drop_line_from_fps(c)
+
+
+def _fp_without_line(fp: str):
+    """옛 지문 repo#pr:file:line:rule → repo#pr:file:rule. 이미 새 형식이면 None.
+
+    파일 경로에는 ':' 이 없으므로, rule 을 떼어낸 나머지에 ':' 이 남아 있으면
+    그게 줄 번호다.
+    """
+    head, hash_, tail = fp.partition("#")
+    if not hash_ or ":" not in tail:
+        return None
+    pr, _, rest = tail.partition(":")
+    body, sep, rule = rest.rpartition(":")
+    if not sep or ":" not in body:
+        return None
+    return f"{head}#{pr}:{body.rsplit(':', 1)[0]}:{rule}"
+
+
+def _drop_line_from_fps(c):
+    """지문에서 줄 번호를 뺀다 — 안 하면 기존 지적 전부가 새 지문이 되어 한 번씩
+    중복 게시된다. 충돌(같은 file+rule 이 여러 줄에 흩어져 있던 경우)은 최근에
+    갱신된 행만 남긴다 — 그게 합쳐져야 할 같은 문제다."""
+    rows = c.execute("SELECT id, fp, repo, pr_number, updated_at FROM findings").fetchall()
+    plan = {}
+    for r in rows:
+        new = _fp_without_line(r["fp"])
+        if new:
+            plan.setdefault((r["repo"], r["pr_number"], new), []).append(r)
+    merged = 0
+    for (_repo, _pr, new), group in plan.items():
+        keep = max(group, key=lambda r: r["updated_at"] or 0)
+        for r in group:
+            if r["id"] != keep["id"]:
+                c.execute("DELETE FROM findings WHERE id=?", (r["id"],))
+                merged += 1
+        existing = c.execute(
+            "SELECT id FROM findings WHERE repo=? AND pr_number=? AND fp=? AND id!=?",
+            (_repo, _pr, new, keep["id"])).fetchone()
+        if existing:  # 이미 새 형식 행이 있으면 옛 행을 버린다
+            c.execute("DELETE FROM findings WHERE id=?", (keep["id"],))
+            merged += 1
+            continue
+        c.execute("UPDATE findings SET fp=? WHERE id=?", (new, keep["id"]))
+    if plan:
+        log_event(c, "fp_line_migration",
+                  detail={"rewritten": len(plan), "merged": merged})
 
 
 def get_meta(c, k: str, default=None):

@@ -131,3 +131,51 @@ class PackPreferTest(unittest.TestCase):
         diff = self._diff({"a.ts": 50, "b.ts": 9000})
         self.assertEqual(prdiff.pack(diff, budget=400),
                          prdiff.pack(diff, budget=400, prefer=[]))
+
+
+class FpLineMigrationTest(unittest.TestCase):
+    """지문에서 줄 번호를 뺄 때 기존 행을 옮겨 놓지 않으면, 열려 있던 지적 전부가
+    '처음 보는 지적' 이 되어 한 번씩 중복 게시된다."""
+
+    def _conn(self):
+        c = sqlite3.connect(":memory:")
+        c.row_factory = sqlite3.Row
+        c.executescript(db.SCHEMA)
+        return c
+
+    def test_old_shape_is_rewritten(self):
+        self.assertEqual(db._fp_without_line("o/r#1:src/a.ts:89-94:rule-x"),
+                         "o/r#1:src/a.ts:rule-x")
+        self.assertEqual(db._fp_without_line("o/r#1:pkg/src/a.ts:10:rule-x"),
+                         "o/r#1:pkg/src/a.ts:rule-x")
+
+    def test_new_shape_is_left_alone(self):
+        self.assertIsNone(db._fp_without_line("o/r#1:src/a.ts:rule-x"))
+        self.assertIsNone(db._fp_without_line("topic:123-4"))
+
+    def test_rows_split_by_line_are_merged_keeping_the_newest(self):
+        c = self._conn()
+        card = db.upsert_card(c, "k", "review", "o/r", 1, "intake", "head")
+        for line, status in (("89-94", "resolved"), ("87-94", "posted")):
+            db.upsert_finding(c, card, "o/r", 1, "head", f"o/r#1:src/a.ts:{line}:same",
+                              "제목", "{}", "src/a.ts", line, "medium", "high", status)
+        c.execute("UPDATE findings SET updated_at=? WHERE line=?", (1.0, "89-94"))
+        c.execute("UPDATE findings SET updated_at=? WHERE line=?", (2.0, "87-94"))
+
+        db._drop_line_from_fps(c)
+
+        rows = c.execute("SELECT fp, line, status FROM findings").fetchall()
+        self.assertEqual(len(rows), 1, "같은 문제는 한 행으로 합쳐진다")
+        self.assertEqual(rows[0]["fp"], "o/r#1:src/a.ts:same")
+        self.assertEqual(rows[0]["line"], "87-94")     # 최근 갱신된 쪽
+        self.assertEqual(rows[0]["status"], "posted")
+
+    def test_migration_is_idempotent(self):
+        c = self._conn()
+        card = db.upsert_card(c, "k", "review", "o/r", 1, "intake", "head")
+        db.upsert_finding(c, card, "o/r", 1, "head", "o/r#1:src/a.ts:10:r",
+                          "제목", "{}", "src/a.ts", "10", "medium", "high", "posted")
+        db._drop_line_from_fps(c)
+        db._drop_line_from_fps(c)
+        rows = c.execute("SELECT fp FROM findings").fetchall()
+        self.assertEqual([r["fp"] for r in rows], ["o/r#1:src/a.ts:r"])

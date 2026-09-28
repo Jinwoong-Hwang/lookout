@@ -50,7 +50,9 @@ def _stable_rule(f: dict) -> str:
     rule = (f.get("rule") or "").strip()
     if rule:
         return rule
-    raw = "|".join(str(f.get(k, "")) for k in ("category", "title", "file", "line"))
+    # line 을 넣으면 줄이 밀릴 때마다 rule 이 새로 생겨 지문에서 line 을 뺀 효과가
+    # 사라진다 — 모델이 rule 을 안 줄 때의 폴백도 위치에 흔들리지 않아야 한다
+    raw = "|".join(str(f.get(k, "")) for k in ("category", "title", "file"))
     slug = re.sub(r"[^a-z0-9]+", "-", raw.lower()).strip("-")[:48] or "doc-finding"
     digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:8]
     return f"{slug}-{digest}"

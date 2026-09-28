@@ -24,7 +24,8 @@ class ReviewerClosureTest(unittest.TestCase):
             payload={"review_policy": policy},
         )
         self.c.execute("UPDATE cards SET engine='codex' WHERE id=?", (self.new_id,))
-        self.fp = "owner/repo#1:src/example.ts:10:same-rule"
+        # 지문에 line 이 없다 — 줄이 밀려도 같은 문제로 묶이게 한 뒤(#10066)
+        self.fp = "owner/repo#1:src/example.ts:same-rule"
         db.upsert_finding(
             self.c, self.old_id, "owner/repo", 1, "old", self.fp, "same finding",
             json.dumps({"problem": "still relevant"}), "src/example.ts", 10,
