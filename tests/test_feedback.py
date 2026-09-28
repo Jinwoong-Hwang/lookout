@@ -125,3 +125,26 @@ class FeedbackTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MarkerTailTest(unittest.TestCase):
+    """지문에서 줄 번호를 뺀 뒤에도 이미 게시된 옛 마커를 계속 알아봐야 한다.
+
+    못 알아보면 피드백 수집이 끊기고, 같은 지적이 '아직 안 올렸다' 로 보여 중복
+    게시된다(셀프 리뷰 2회차 지적).
+    """
+
+    def test_old_and_new_markers_both_match(self):
+        tail = feedback.marker_tail("o/r#1:src/a.ts:my-rule")
+        old = "<!-- hermes:fp=o/r#1:src/a.ts:89-94:my-rule -->"
+        new = "<!-- hermes:fp=o/r#1:src/a.ts:my-rule -->"
+        self.assertIn(tail, old)
+        self.assertIn(tail, new)
+
+    def test_a_different_rule_does_not_match(self):
+        tail = feedback.marker_tail("o/r#1:src/a.ts:my-rule")
+        self.assertNotIn(tail, "<!-- hermes:fp=o/r#1:src/a.ts:other-rule -->")
+
+    def test_prefix_collision_does_not_match(self):
+        tail = feedback.marker_tail("o/r#1:src/a.ts:rule")
+        self.assertNotIn(tail, "<!-- hermes:fp=o/r#1:src/a.ts:rule-longer -->")

@@ -27,7 +27,9 @@ PHRASE = {
     "defer_pending": "작성자: 후속 이관 (운영자 확인 대기)",
 }
 EVIDENCE_CHARS = 90
-NOTE_CHARS = 1200
+# 작성자 글 총량. 글 하나를 앞에서 자르면 안 된다 — 보류 표는 본문·회신 '끝' 에
+# 붙어서, 앞 1200자만 남기면 정작 근거가 사라진다(셀프 리뷰 2회차 지적).
+NOTES_BUDGET = 24000
 
 
 def _cell(text: str, limit: int = 0) -> str:
@@ -72,15 +74,26 @@ def render(entries) -> str:
     return "\n".join(out)
 
 
-def author_notes(replies) -> str:
-    """작성자가 손으로 쓴 글. 사람이 쓴 분량은 원래 작아서 줄일 필요가 없다 —
-    #10066 도 본문 9,141 + 회신 23,328자다. 봇 글이 빠지면 예산 문제가 사라진다."""
+def author_notes(replies, budget: int = NOTES_BUDGET) -> str:
+    """작성자가 손으로 쓴 글. 사람이 쓴 분량은 원래 작아서 줄일 필요가 적다 —
+    #10066 도 본문 9,141 + 회신 23,328자다. 봇 글이 빠지면 예산 문제가 사라진다.
+
+    넘칠 때는 최신 글부터 담고, 담은 글은 앞뒤를 남기고 가운데만 줄인다. 앞에서
+    자르면 끝에 붙은 보류 표가 먼저 사라진다.
+    """
     if not replies:
         return "(작성자가 쓴 글 없음)"
-    return "\n\n".join(
-        f"[{r['source']} · {r['created_at']}] {r['body'][:NOTE_CHARS]}"
-        + ("…" if len(r["body"]) > NOTE_CHARS else "")
-        for r in replies)
+    share = max(1200, budget // max(1, len(replies)))
+    chosen, used = [], 0
+    for r in reversed(replies):  # 최신부터
+        text = ghclient._clip_body(r["body"], share)
+        if used + len(text) > budget and chosen:
+            continue
+        chosen.append((r, text))
+        used += len(text)
+    chosen.reverse()
+    return "\n\n".join(f"[{r['source']} · {r['created_at']}] {text}"
+                        for r, text in chosen)
 
 
 def build(c, repo: str, pr: int, replies) -> tuple:

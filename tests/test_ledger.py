@@ -83,11 +83,19 @@ class AuthorNotesTest(unittest.TestCase):
         self.assertIn("[body · 1] ## 보류 항목", out)
         self.assertIn("[review · 2] 2라운드 회신", out)
 
-    def test_long_note_is_clipped(self):
+    def test_clipping_keeps_the_tail_where_the_deferral_table_lives(self):
+        """앞에서 자르면 끝에 붙은 보류 표가 먼저 사라진다(셀프 리뷰 2회차 지적)."""
+        body = "머리" * 2500 + "### 보류 항목 — 이 PR 범위 밖"
+        out = ledger.author_notes(
+            [{"source": "body", "created_at": "1", "body": body}], budget=2000)
+        self.assertLess(len(out), len(body))
+        self.assertIn("보류 항목", out)          # 꼬리가 살아 있다
+        self.assertIn("본문 중략", out)
+
+    def test_a_note_within_budget_is_untouched(self):
         out = ledger.author_notes(
             [{"source": "review", "created_at": "1", "body": "가" * 5000}])
-        self.assertLess(len(out), 5000)
-        self.assertTrue(out.endswith("…"))
+        self.assertIn("가" * 5000, out)
 
     def test_no_notes_is_explicit(self):
         self.assertEqual(ledger.author_notes([]), "(작성자가 쓴 글 없음)")

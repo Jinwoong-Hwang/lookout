@@ -173,10 +173,14 @@ def _run_closure(c, card, priors, diff, engine, wt, policy,
                 (verdict.get("reply_evidence") or "").strip(),
                 follow_up,
             )
-        elif pf["status"] in DECIDED and status == "unresolved" and verified_reply:
+        elif (pf["status"] in DECIDED and status == "unresolved" and verified_reply
+              and str(verified_reply["id"]) != str(pf["decision_comment_id"] or "")):
             # 작성자가 답을 뒤집었다 — 검증된 인용이 근거다. 보류 유지 분기보다
             # 먼저 와야 한다. 안 그러면 철회 경로가 아예 막혀, 봇도 사람도 못 여는
-            # 일방통행이 된다(셀프 리뷰 지적).
+            # 일방통행이 된다.
+            #
+            # 단 '결정 근거로 이미 쓴 그 글' 은 철회 근거가 될 수 없다 — 판정기가
+            # 원래 보류 문구를 그대로 인용해 스스로 열어버린다(셀프 리뷰 2회차).
             db.clear_finding_decision(c, pf["id"], status)
         elif pf["status"] in DEFERRED and status != "resolved":
             # 보류는 "고장 난 걸 아는데 지금 안 고친다" 는 뜻이라, "아직 고장 나
@@ -410,6 +414,11 @@ def process(c, card):
                       "pending_decisions": len(pending), "engine": engine})
     elif all_unresolved:
         db.set_status(c, card["id"], "commenting")
+    elif db.open_findings_count(c, repo, pr):
+        # 재판정을 건너뛴 지적이 posted 로 남아 있다 — 조용히 두되 LGTM 은 막는다
+        db.set_status(c, card["id"], "commented")
+        db.log_event(c, "review_open_findings_block_lgtm", card["key"],
+                     {"count": db.open_findings_count(c, repo, pr)})
     elif pending:
         db.set_status(c, card["id"], "commented")
         db.log_event(c, "review_author_decision_pending", card["key"],

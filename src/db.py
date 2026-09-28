@@ -443,6 +443,23 @@ def unresolved_findings_count(c, repo, pr) -> int:
     return int(row["n"] if row else 0)
 
 
+def open_findings_count(c, repo, pr) -> int:
+    """이 PR 에 아직 닫히지 않은 지적 수 — LGTM 차단 기준.
+
+    unresolved 만 세면 안 된다. 호출 게이트가 재판정을 건너뛰면 지적이 posted /
+    confirmed 로 남는데, 그건 '문제가 없다' 가 아니라 '다시 묻지 않았다' 는 뜻이다.
+    게이트 전에는 closure 가 매번 판정해 unresolved 로 내려왔기 때문에 이 구멍이
+    없었다(셀프 리뷰 2회차 지적).
+    """
+    row = c.execute(
+        """SELECT COUNT(*) n FROM findings WHERE repo=? AND pr_number=?
+           AND status IN ('posted','confirmed','unresolved','pending_verify',
+                          'dismiss_pending','defer_pending')""",
+        (repo, pr),
+    ).fetchone()
+    return int(row["n"] if row else 0)
+
+
 def unresolved_findings(c, repo, pr):
     return c.execute(
         "SELECT * FROM findings WHERE repo=? AND pr_number=? AND status='unresolved'",

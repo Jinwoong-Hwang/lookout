@@ -24,6 +24,17 @@ def _payload(card) -> dict:
         return {}
 
 
+def marker_tail(fp: str) -> str:
+    """마커를 rule 로만 매칭한다.
+
+    지문에서 줄 번호를 뺀 뒤(2165567), 이미 게시된 댓글에는 옛 `file:line:rule`
+    마커가 그대로 남는다. 전체 지문으로 비교하면 마이그레이션된 finding 의 기존
+    댓글이 전부 '내 것이 아닌' 것으로 보여 피드백 수집과 중복 검사가 끊긴다
+    (셀프 리뷰 2회차 지적). 마커는 형식이 어떻든 `:{rule} -->` 로 끝난다.
+    """
+    return f":{fp.rsplit(':', 1)[-1]} -->"
+
+
 def _marker(fp: str) -> str:
     return f"<!-- hermes:fp={fp} -->"
 
@@ -114,7 +125,7 @@ def snapshot_card(c, card, snapshot_type: str = "manual",
                   pr_info: dict | None = None, comments: list[dict] | None = None) -> list[dict]:
     """Capture feedback for bot comments that contain this card's findings."""
     findings = db.findings_for_card(c, card["id"])
-    markers = [_marker(f["fp"]) for f in findings if f["fp"]]
+    markers = [marker_tail(f["fp"]) for f in findings if f["fp"]]
     if not markers:
         return []
     if comments is None:

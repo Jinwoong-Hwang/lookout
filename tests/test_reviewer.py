@@ -253,9 +253,10 @@ class ReviewerClosureTest(unittest.TestCase):
 
     def test_verified_withdrawal_reopens_a_deferral(self):
         """보류는 코드로는 못 열지만 작성자가 뒤집으면 열려야 한다 — 안 그러면 일방통행."""
+        # 보류 근거는 예전 회신(issue:9), 철회는 새 회신(issue:11 — _run 이 물린 것)
         self.c.execute(
             """UPDATE findings SET status='deferred',card_id=?,decision_head='old',
-               decision_comment_id='issue:11',decision_evidence='별도 후속'""",
+               decision_comment_id='issue:9',decision_evidence='별도 후속'""",
             (self.old_id,))
         self._run("unresolved", [], reply_evidence="이번 PR 에서 고치겠습니다")
         finding = self.c.execute("SELECT * FROM findings WHERE fp=?", (self.fp,)).fetchone()
@@ -267,6 +268,28 @@ class ReviewerClosureTest(unittest.TestCase):
         self._judged(reply=self._digest("고치기 전 회신"))
         calls, _ = self._run("unresolved", [], changed={"src/other.ts"})
         self.assertEqual(calls, ["closure.md", "review.codex.md"])
+
+    def test_the_deferral_evidence_cannot_withdraw_itself(self):
+        """판정기가 원래 보류 문구를 그대로 인용해 스스로 열어버릴 수 있었다."""
+        self.c.execute(
+            """UPDATE findings SET status='deferred',card_id=?,decision_head='old',
+               decision_comment_id='issue:11',decision_evidence='별도 후속'""",
+            (self.old_id,))
+        self._run("unresolved", [], reply_evidence="별도 후속으로 처리합니다")
+        finding = self.c.execute("SELECT * FROM findings WHERE fp=?", (self.fp,)).fetchone()
+        self.assertEqual(finding["status"], "deferred")
+        self.assertEqual(finding["decision_comment_id"], "issue:11")
+
+    def test_skipped_posted_finding_blocks_lgtm(self):
+        """게이트가 재판정을 건너뛴 지적이 posted 로 남아도 LGTM 은 막아야 한다."""
+        self._judged()
+        card = self._run("unresolved", [], changed={"src/other.ts"})
+        row = self.c.execute("SELECT * FROM cards WHERE id=?", (self.new_id,)).fetchone()
+        self.assertEqual(row["status"], "commented")   # lgtm 이 아니다
+        self.assertEqual(
+            [json.loads(e["detail"])["count"] for e in self.c.execute(
+                "SELECT detail FROM events WHERE type='review_open_findings_block_lgtm'")],
+            [1])
 
     def test_code_profile_picks_the_engine_specific_review_prompt(self):
         """Regression: the code profile once pointed at a single review.md that
