@@ -30,11 +30,17 @@ IMPL_ALLOWED = [
 IMPL_DISALLOWED = ["WebFetch", "WebSearch"]
 
 
+# 느린 엔진이 더 짧은 상한을 갖고 있었다 — codex 는 1200s 인데 claude 는 900s 였고,
+# #10066 리뷰가 872s·908s·983s 로 그 경계에 걸려 간헐 실패했다. 큰 PR 에서
+# 리뷰를 다 하고도 결과를 버리는 게 제일 아깝다.
+RUN_TIMEOUT = int(CFG.get("claude_timeout", 1800))
+
+
 class ClaudeError(RuntimeError):
     pass
 
 
-def run(prompt: str, cwd: str = None, add_dir: str = None, timeout: int = 900,
+def run(prompt: str, cwd: str = None, add_dir: str = None, timeout: int = None,
         model: str = None, effort: str = None) -> str:
     """Run claude headless, return the assistant's final text (the `result`).
 
@@ -53,8 +59,8 @@ def run(prompt: str, cwd: str = None, add_dir: str = None, timeout: int = 900,
         args += ["--effort", eff]
     if add_dir:
         args += ["--add-dir", add_dir]
-    proc = subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=timeout,
-                          env=config.subprocess_env())
+    proc = subprocess.run(args, cwd=cwd, capture_output=True, text=True,
+                          timeout=timeout or RUN_TIMEOUT, env=config.subprocess_env())
     if proc.returncode != 0:
         # 실패 사유는 stderr 맨 끝에 찍히므로 앞이 아니라 뒤를 남긴다
         raise ClaudeError(f"claude failed (rc={proc.returncode}): {proc.stderr.strip()[-500:]}")

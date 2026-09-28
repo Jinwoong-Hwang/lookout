@@ -24,7 +24,8 @@ class ReviewerClosureTest(unittest.TestCase):
             payload={"review_policy": policy},
         )
         self.c.execute("UPDATE cards SET engine='codex' WHERE id=?", (self.new_id,))
-        self.fp = "owner/repo#1:src/example.ts:10:same-rule"
+        # 지문에 line 이 없다 — 줄이 밀려도 같은 문제로 묶이게 한 뒤(#10066)
+        self.fp = "owner/repo#1:src/example.ts:same-rule"
         db.upsert_finding(
             self.c, self.old_id, "owner/repo", 1, "old", self.fp, "same finding",
             json.dumps({"problem": "still relevant"}), "src/example.ts", 10,
@@ -35,31 +36,34 @@ class ReviewerClosureTest(unittest.TestCase):
         self.c.close()
 
     def _run(self, closure_status, findings, evidence="", reply_evidence="", follow_up="",
-             closure_error=False):
+             closure_error=False, changed=None):
         calls = []
         rendered = []
         old_view, old_diff, old_conversation = ghclient.pr_view, ghclient.pr_diff, ghclient.pr_conversation
         old_author = ghclient.pr_author_identity
-        old_comments = ghclient.issue_comments_structured
+        old_comments = ghclient.collect_author_replies
         old_login = ghclient.my_login
         old_changed_files = ghclient.pr_changed_files
         old_make, old_remove = worktree.make_worktree, worktree.remove_worktree
+        old_changed = worktree.changed_files_between
+        old_foreign = ghclient.other_bot_findings
         old_plan, old_context = reviewer.doc_planner.build_plan, reviewer.doc_planner.build_context
         old_render, old_run = prompt_tpl.render, reviewer.engines.run_json
         try:
             ghclient.pr_view = lambda *_: {"state": "OPEN", "headRefOid": "new"}
             ghclient.pr_diff = lambda *_: "diff"
             ghclient.pr_conversation = lambda *_: "author reply"
-            ghclient.pr_author_identity = lambda *_: {"login": "author", "id": "42"}
+            ghclient.pr_author_identity = lambda *_: {"login": "author", "id": "42",
+                                                      "body": "", "created_at": "0"}
             ghclient.my_login = lambda: "bot"
             ghclient.pr_changed_files = lambda *_: []
-            ghclient.issue_comments_structured = lambda *_: [
-                {"id": "10", "author": "bot", "author_id": "1", "created_at": "1",
-                 "body": commenter._marker(self.fp)},
-                {"id": "11", "author": "author", "author_id": "42", "created_at": "2",
-                 "body": reply_evidence or "일반 답변"},
+            ghclient.collect_author_replies = lambda *_: [
+                {"id": "issue:11", "source": "issue", "author": "author",
+                 "created_at": "2", "url": "", "body": reply_evidence or "일반 답변"},
             ]
             worktree.make_worktree = lambda *_: "/tmp/review"
+            worktree.changed_files_between = lambda *_: changed
+            ghclient.other_bot_findings = lambda *_: []
             worktree.remove_worktree = lambda *_: None
             reviewer.doc_planner.build_plan = lambda *_: {"summary_only": False, "review_mode": "full"}
             reviewer.doc_planner.build_context = lambda *_: ""
@@ -76,7 +80,7 @@ class ReviewerClosureTest(unittest.TestCase):
                         raise RuntimeError("closure unavailable")
                     return {"status": closure_status, "reason": "author reply judged",
                             "evidence": evidence, "reply_evidence": reply_evidence,
-                            "reply_comment_id": "11" if reply_evidence else "",
+                            "reply_comment_id": "issue:11" if reply_evidence else "",
                             "follow_up": follow_up}
                 return {"findings": findings}
 
@@ -85,10 +89,12 @@ class ReviewerClosureTest(unittest.TestCase):
         finally:
             ghclient.pr_view, ghclient.pr_diff, ghclient.pr_conversation = old_view, old_diff, old_conversation
             ghclient.pr_author_identity = old_author
-            ghclient.issue_comments_structured = old_comments
+            ghclient.collect_author_replies = old_comments
             ghclient.my_login = old_login
             ghclient.pr_changed_files = old_changed_files
             worktree.make_worktree, worktree.remove_worktree = old_make, old_remove
+            worktree.changed_files_between = old_changed
+            ghclient.other_bot_findings = old_foreign
             reviewer.doc_planner.build_plan, reviewer.doc_planner.build_context = old_plan, old_context
             prompt_tpl.render, reviewer.engines.run_json = old_render, old_run
         return calls, rendered
@@ -113,9 +119,188 @@ class ReviewerClosureTest(unittest.TestCase):
                 self.assertEqual(finding["status"],
                                  "dismiss_pending" if status == "dismissed" else "defer_pending")
                 self.assertEqual(finding["card_id"], self.new_id)
-                self.assertEqual(finding["decision_comment_id"], "11")
+                self.assertEqual(finding["decision_comment_id"], "issue:11")
                 self.assertEqual(self.c.execute("SELECT COUNT(*) n FROM findings").fetchone()["n"], 1)
                 self.assertEqual(self.c.execute("SELECT status FROM cards WHERE id=?", (self.new_id,)).fetchone()["status"], "commented")
+
+    def test_pending_author_decision_survives_a_new_head(self):
+        """새 커밋마다 운영자 수용 대기 결정이 unresolved 로 떨어지면 리마인드가 다시 나간다.
+
+        작성자 회신은 보통 한 번뿐이라 새 head 에서는 '그 회신 이후의 새 답변'이
+        없다. 반박할 코드 근거가 없으면 결정을 그대로 두어야 한다.
+        """
+        for status in ("dismiss_pending", "defer_pending"):
+            with self.subTest(status=status):  # 보류는 DEFERRED 분기가 먼저 잡는다
+                self.c.execute("UPDATE cards SET status='intake' WHERE id=?", (self.new_id,))
+                self.c.execute(
+                    """UPDATE findings SET status=?,card_id=?,decision_head='old',
+                       decision_comment_id='issue:11',decision_evidence='의도적으로 유지'""",
+                    (status, self.old_id),
+                )
+                self._run("unresolved", [])
+                finding = self.c.execute("SELECT * FROM findings WHERE fp=?", (self.fp,)).fetchone()
+                self.assertEqual(finding["status"], status)
+                self.assertEqual(finding["decision_comment_id"], "issue:11")
+                card = self.c.execute("SELECT * FROM cards WHERE id=?", (self.new_id,)).fetchone()
+                self.assertEqual(card["status"], "commented")
+                self.assertNotIn("force_post", json.loads(card["payload"]))
+
+    def test_new_code_evidence_still_reopens_a_dismissal(self):
+        """반려는 다르다 — 작성자가 "의도적" 이라 했어도 새 코드가 그 주장을 뒤집으면 연다.
+
+        보류(deferred)와 갈라지는 지점이다. 보류는 "고장 난 걸 안다" 가 전제라
+        코드 근거가 새 정보가 아니지만, 반려는 "이 동작이 맞다" 는 주장이라
+        현재 head 가 그 주장을 반박할 수 있다.
+        """
+        self.c.execute(
+            """UPDATE findings SET status='dismiss_pending',card_id=?,decision_head='old',
+               decision_comment_id='issue:11',decision_evidence='의도적으로 유지'""", (self.old_id,)
+        )
+        self._run("unresolved", [], evidence="src/example.ts:10 에서 여전히 저장 없이 goBack()")
+        finding = self.c.execute("SELECT * FROM findings WHERE fp=?", (self.fp,)).fetchone()
+        self.assertEqual(finding["status"], "confirmed")
+        card = self.c.execute("SELECT * FROM cards WHERE id=?", (self.new_id,)).fetchone()
+        self.assertTrue(json.loads(card["payload"])["force_post"])
+
+    def _digest(self, body="일반 답변"):
+        """_run 이 물린 가짜 회신의 내용 지문 — 시각이 아니라 내용으로 비교한다."""
+        return ghclient.replies_digest([{"id": "issue:11", "body": body}])
+
+    def _judged(self, head="old", reply=None):
+        self.c.execute("UPDATE findings SET last_judged_head=?, last_seen_reply=?",
+                       (head, self._digest() if reply is None else reply))
+
+    def _skips(self):
+        return [e["detail"] for e in self.c.execute(
+            "SELECT detail FROM events WHERE type='finding_closure_skipped'")]
+
+    def test_closure_is_skipped_when_nothing_about_the_finding_changed(self):
+        """#10066 에서 closure 35회 중 26회가 "아무것도 안 바뀜" 결론이었다.
+
+        건너뛰어도 동작은 같다 — 재게시는 호출이 아니라 status 가 결정한다.
+        """
+        self._judged()
+        calls, _ = self._run("unresolved", [], changed={"src/other.ts"})
+        self.assertEqual(calls, ["review.codex.md"])   # closure.md 호출 없음
+        self.assertEqual(len(self._skips()), 1)
+        finding = self.c.execute("SELECT * FROM findings WHERE fp=?", (self.fp,)).fetchone()
+        self.assertEqual(finding["status"], "posted")  # 상태가 그대로라 재게시도 안 된다
+        card = self.c.execute("SELECT * FROM cards WHERE id=?", (self.new_id,)).fetchone()
+        self.assertNotIn("force_post", json.loads(card["payload"]))
+
+    def test_closure_runs_when_the_finding_file_changed(self):
+        self._judged()
+        calls, _ = self._run("unresolved", [], changed={"src/example.ts"})
+        self.assertEqual(calls, ["closure.md", "review.codex.md"])
+        self.assertEqual(self._skips(), [])
+
+    def test_closure_runs_when_a_new_author_reply_arrived(self):
+        self._judged(reply="stale")   # 수집된 회신의 지문과 다르다
+        calls, _ = self._run("unresolved", [], changed={"src/other.ts"})
+        self.assertEqual(calls, ["closure.md", "review.codex.md"])
+
+    def test_closure_runs_when_the_change_set_is_unknown(self):
+        """옛 sha 가 force-push·gc 로 사라질 수 있다 — 모르면 건너뛰지 않는다."""
+        self._judged()
+        calls, _ = self._run("unresolved", [], changed=None)
+        self.assertEqual(calls, ["closure.md", "review.codex.md"])
+
+    def test_first_judgement_is_never_skipped(self):
+        calls, _ = self._run("unresolved", [], changed={"src/other.ts"})
+        self.assertEqual(calls, ["closure.md", "review.codex.md"])
+
+    def test_judging_records_the_baseline_for_next_time(self):
+        self._run("unresolved", [])
+        finding = self.c.execute("SELECT * FROM findings WHERE fp=?", (self.fp,)).fetchone()
+        self.assertEqual(finding["last_judged_head"], "new")
+        self.assertEqual(finding["last_seen_reply"], self._digest())
+
+    def test_skipped_unresolved_finding_is_not_re_raised(self):
+        """같은 말을 8번 반복한 원래 증상 — 달라진 게 없으면 다시 올리지 않는다."""
+        self.c.execute("UPDATE findings SET status='unresolved'")
+        self._judged()
+        self._run("unresolved", [], changed={"src/other.ts"})
+        card = self.c.execute("SELECT * FROM cards WHERE id=?", (self.new_id,)).fetchone()
+        self.assertNotIn("force_post", json.loads(card["payload"]))
+        finding = self.c.execute("SELECT * FROM findings WHERE fp=?", (self.fp,)).fetchone()
+        self.assertEqual(finding["status"], "unresolved")   # 사라지지 않는다
+        self.assertEqual(finding["card_id"], self.old_id)   # 이번 카드로 끌어오지 않는다
+        self.assertEqual(
+            [json.loads(e["detail"])["count"] for e in self.c.execute(
+                "SELECT detail FROM events WHERE type='review_unresolved_quiet'")], [1])
+
+    def test_unresolved_finding_is_re_raised_once_something_changes(self):
+        self.c.execute("UPDATE findings SET status='unresolved'")
+        self._judged()
+        self._run("unresolved", [], changed={"src/example.ts"})
+        card = self.c.execute("SELECT * FROM cards WHERE id=?", (self.new_id,)).fetchone()
+        self.assertTrue(json.loads(card["payload"])["force_post"])
+        finding = self.c.execute("SELECT * FROM findings WHERE fp=?", (self.fp,)).fetchone()
+        self.assertEqual(finding["card_id"], self.new_id)
+
+    def test_quiet_unresolved_finding_still_blocks_lgtm(self):
+        """말을 아끼는 것과 "문제 없다" 고 선언하는 것은 다르다(셀프 리뷰 지적).
+
+        쿨다운으로 재게시를 건너뛴 미해결 지적이 있는데 카드가 lgtm 으로 가면,
+        승인 게이트까지 열려 미해결 결함이 통과한다.
+        """
+        self.c.execute("UPDATE findings SET status='unresolved'")
+        self._judged()
+        self._run("unresolved", [], changed={"src/other.ts"})
+        card = self.c.execute("SELECT * FROM cards WHERE id=?", (self.new_id,)).fetchone()
+        self.assertEqual(card["status"], "commenting")      # lgtm 이 아니다
+        self.assertNotIn("force_post", json.loads(card["payload"]))  # 그래도 조용하다
+
+    def test_verified_withdrawal_reopens_a_deferral(self):
+        """보류는 코드로는 못 열지만 작성자가 뒤집으면 열려야 한다 — 안 그러면 일방통행."""
+        # 보류 근거는 예전 회신(issue:9), 철회는 새 회신(issue:11 — _run 이 물린 것)
+        self.c.execute(
+            """UPDATE findings SET status='deferred',card_id=?,decision_head='old',
+               decision_comment_id='issue:9',decision_evidence='별도 후속'""",
+            (self.old_id,))
+        self._run("unresolved", [], reply_evidence="이번 PR 에서 고치겠습니다")
+        finding = self.c.execute("SELECT * FROM findings WHERE fp=?", (self.fp,)).fetchone()
+        self.assertEqual(finding["status"], "confirmed")
+        self.assertIsNone(finding["decision_comment_id"])
+
+    def test_edited_author_text_is_treated_as_a_new_reply(self):
+        """작성자가 PR 본문에 보류 표를 나중에 추가하면 created_at 은 그대로다."""
+        self._judged(reply=self._digest("고치기 전 회신"))
+        calls, _ = self._run("unresolved", [], changed={"src/other.ts"})
+        self.assertEqual(calls, ["closure.md", "review.codex.md"])
+
+    def test_the_deferral_evidence_cannot_withdraw_itself(self):
+        """판정기가 원래 보류 문구를 그대로 인용해 스스로 열어버릴 수 있었다."""
+        self.c.execute(
+            """UPDATE findings SET status='deferred',card_id=?,decision_head='old',
+               decision_comment_id='issue:11',decision_evidence='별도 후속으로 처리'""",
+            (self.old_id,))
+        # 같은 문구를 조금 늘려 인용해도 철회가 아니다
+        self._run("unresolved", [], reply_evidence="별도 후속으로 처리합니다")
+        finding = self.c.execute("SELECT * FROM findings WHERE fp=?", (self.fp,)).fetchone()
+        self.assertEqual(finding["status"], "deferred")
+        self.assertEqual(finding["decision_comment_id"], "issue:11")
+
+    def test_an_edited_reply_can_still_withdraw(self):
+        """id 만 보면 같은 글을 고쳐 철회하는 경로가 막힌다(셀프 리뷰 3회차)."""
+        self.c.execute(
+            """UPDATE findings SET status='deferred',card_id=?,decision_head='old',
+               decision_comment_id='issue:11',decision_evidence='별도 후속으로 처리'""",
+            (self.old_id,))
+        self._run("unresolved", [], reply_evidence="생각을 바꿔 이번에 고치겠습니다")
+        finding = self.c.execute("SELECT * FROM findings WHERE fp=?", (self.fp,)).fetchone()
+        self.assertEqual(finding["status"], "confirmed")
+
+    def test_skipped_posted_finding_blocks_lgtm(self):
+        """게이트가 재판정을 건너뛴 지적이 posted 로 남아도 LGTM 은 막아야 한다."""
+        self._judged()
+        card = self._run("unresolved", [], changed={"src/other.ts"})
+        row = self.c.execute("SELECT * FROM cards WHERE id=?", (self.new_id,)).fetchone()
+        self.assertEqual(row["status"], "commented")   # lgtm 이 아니다
+        self.assertEqual(
+            [json.loads(e["detail"])["count"] for e in self.c.execute(
+                "SELECT detail FROM events WHERE type='review_open_findings_block_lgtm'")],
+            [1])
 
     def test_code_profile_picks_the_engine_specific_review_prompt(self):
         """Regression: the code profile once pointed at a single review.md that
@@ -250,24 +435,45 @@ class ReviewerClosureTest(unittest.TestCase):
         finding = self.c.execute("SELECT * FROM findings WHERE fp=?", (self.fp,)).fetchone()
         self.assertIsNone(finding["decision_follow_up"])
 
-    def test_deferred_reopens_only_with_current_code_evidence(self):
-        self.c.execute("UPDATE findings SET status='deferred',decision_head='old',decision_follow_up='LOOK-123'")
-        self._run("unresolved", [])
-        finding = self.c.execute("SELECT * FROM findings WHERE fp=?", (self.fp,)).fetchone()
-        self.assertEqual(finding["status"], "deferred")
-        self.assertEqual(finding["decision_follow_up"], "LOOK-123")
+    def test_deferred_is_not_reopened_by_code_evidence(self):
+        """보류는 "고장 난 걸 알고 미룬다" — "아직 고장 나 있다" 는 재개 근거가 아니다.
 
-        self._run("unresolved", [], evidence="src/example.ts:10 changed behavior")
+        #10066 재현에서 판정기가 작성자가 보류한 내용을 그대로 인용해(코드에 적힌
+        "PO 결정 대기" 주석까지) 재개를 시도했다. 게시 직전 재확인이 우연히
+        되돌려 줬을 뿐, 두 번 다 그랬으면 리마인드가 다시 나갔다.
+        """
+        for status in ("deferred", "defer_pending"):
+            with self.subTest(status=status):
+                self.c.execute("UPDATE cards SET status='intake' WHERE id=?", (self.new_id,))
+                self.c.execute(
+                    """UPDATE findings SET status=?,card_id=?,decision_head='old',
+                       decision_comment_id='issue:11',decision_follow_up='LOOK-123'""",
+                    (status, self.old_id),
+                )
+                self._run("unresolved", [],
+                          evidence="src/example.ts:10 여전히 저장 없이 goBack()")
+                finding = self.c.execute("SELECT * FROM findings WHERE fp=?",
+                                         (self.fp,)).fetchone()
+                self.assertEqual(finding["status"], status)
+                self.assertEqual(finding["decision_follow_up"], "LOOK-123")
+                card = self.c.execute("SELECT * FROM cards WHERE id=?",
+                                      (self.new_id,)).fetchone()
+                self.assertNotIn("force_post", json.loads(card["payload"]))
+
+    def test_deferred_still_closes_when_the_code_is_actually_fixed(self):
+        """재개만 막는 것이지 영원히 붙잡아 두는 게 아니다."""
+        self.c.execute(
+            """UPDATE findings SET status='deferred',card_id=?,decision_head='old',
+               decision_follow_up='LOOK-123'""", (self.old_id,))
+        self._run("resolved", [])
         finding = self.c.execute("SELECT * FROM findings WHERE fp=?", (self.fp,)).fetchone()
-        self.assertEqual(finding["status"], "confirmed")
-        self.assertEqual(finding["card_id"], self.new_id)
-        self.assertIsNone(finding["decision_follow_up"])
+        self.assertEqual(finding["status"], "resolved")
 
     def test_operator_decision_is_rechecked_on_every_new_head(self):
         db.set_finding_decision(
             self.c,
             self.c.execute("SELECT id FROM findings WHERE fp=?", (self.fp,)).fetchone()["id"],
-            "dismissed", "old", "11", "의도적으로 유지",
+            "dismissed", "old", "issue:11", "의도적으로 유지",
         )
         self._run("unresolved", [], evidence="src/helper.ts changed the trust boundary")
         finding = self.c.execute("SELECT * FROM findings WHERE fp=?", (self.fp,)).fetchone()

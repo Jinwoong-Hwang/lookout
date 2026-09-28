@@ -125,3 +125,34 @@ class FeedbackTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MarkerMatchTest(unittest.TestCase):
+    """지문에서 줄 번호를 뺀 뒤에도 옛 마커를 알아봐야 하고, 그렇다고 파일을
+    흘려서도 안 된다 — 두 방향으로 한 번씩 틀렸다(셀프 리뷰 2·3회차)."""
+
+    FP = "o/r#1:src/a.ts:my-rule"
+
+    def test_old_and_new_markers_both_match(self):
+        self.assertTrue(feedback.marker_matches(
+            self.FP, "<!-- hermes:fp=o/r#1:src/a.ts:89-94:my-rule -->"))
+        self.assertTrue(feedback.marker_matches(
+            self.FP, "<!-- hermes:fp=o/r#1:src/a.ts:my-rule -->"))
+
+    def test_same_rule_in_another_file_does_not_match(self):
+        """rule 만 보면 다른 파일의 신규 지적이 '이미 게시됨' 으로 눌린다."""
+        self.assertFalse(feedback.marker_matches(
+            self.FP, "<!-- hermes:fp=o/r#1:src/b.ts:my-rule -->"))
+
+    def test_a_different_rule_does_not_match(self):
+        self.assertFalse(feedback.marker_matches(
+            self.FP, "<!-- hermes:fp=o/r#1:src/a.ts:other-rule -->"))
+
+    def test_prefix_collision_does_not_match(self):
+        self.assertFalse(feedback.marker_matches(
+            self.FP, "<!-- hermes:fp=o/r#1:src/a.ts:my-rule-longer -->"))
+
+    def test_nested_path_is_compared_by_its_basename_segment(self):
+        fp = "o/r#1:packages/screens/src/a.ts:my-rule"
+        self.assertTrue(feedback.marker_matches(
+            fp, "<!-- hermes:fp=o/r#1:packages/screens/src/a.ts:10:my-rule -->"))

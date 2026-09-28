@@ -57,6 +57,8 @@ CREATE TABLE IF NOT EXISTS findings (
   decision_comment_id TEXT,
   decision_evidence TEXT,
   decision_follow_up TEXT,
+  last_judged_head TEXT,              -- closure 를 마지막으로 돌린 head
+  last_seen_reply TEXT,               -- 그때 본 작성자 회신 중 가장 최근 시각
   created_at REAL NOT NULL,
   updated_at REAL NOT NULL,
   UNIQUE(repo, pr_number, fp)
@@ -158,9 +160,57 @@ def init():
         if "engine" not in cols:
             c.execute("ALTER TABLE cards ADD COLUMN engine TEXT DEFAULT 'claude'")
         finding_cols = {r["name"] for r in c.execute("PRAGMA table_info(findings)").fetchall()}
-        for name in ("decision_head", "decision_comment_id", "decision_evidence", "decision_follow_up"):
+        for name in ("decision_head", "decision_comment_id", "decision_evidence",
+                     "decision_follow_up", "last_judged_head", "last_seen_reply"):
             if name not in finding_cols:
                 c.execute(f"ALTER TABLE findings ADD COLUMN {name} TEXT")
+        _drop_line_from_fps(c)
+
+
+def _fp_without_line(fp: str):
+    """옛 지문 repo#pr:file:line:rule → repo#pr:file:rule. 이미 새 형식이면 None.
+
+    파일 경로에는 ':' 이 없으므로, rule 을 떼어낸 나머지에 ':' 이 남아 있으면
+    그게 줄 번호다.
+    """
+    head, hash_, tail = fp.partition("#")
+    if not hash_ or ":" not in tail:
+        return None
+    pr, _, rest = tail.partition(":")
+    body, sep, rule = rest.rpartition(":")
+    if not sep or ":" not in body:
+        return None
+    return f"{head}#{pr}:{body.rsplit(':', 1)[0]}:{rule}"
+
+
+def _drop_line_from_fps(c):
+    """지문에서 줄 번호를 뺀다 — 안 하면 기존 지적 전부가 새 지문이 되어 한 번씩
+    중복 게시된다. 충돌(같은 file+rule 이 여러 줄에 흩어져 있던 경우)은 최근에
+    갱신된 행만 남긴다 — 그게 합쳐져야 할 같은 문제다."""
+    rows = c.execute("SELECT id, fp, repo, pr_number, updated_at FROM findings").fetchall()
+    plan = {}
+    for r in rows:
+        new = _fp_without_line(r["fp"])
+        if new:
+            plan.setdefault((r["repo"], r["pr_number"], new), []).append(r)
+    merged = 0
+    for (_repo, _pr, new), group in plan.items():
+        keep = max(group, key=lambda r: r["updated_at"] or 0)
+        for r in group:
+            if r["id"] != keep["id"]:
+                c.execute("DELETE FROM findings WHERE id=?", (r["id"],))
+                merged += 1
+        existing = c.execute(
+            "SELECT id FROM findings WHERE repo=? AND pr_number=? AND fp=? AND id!=?",
+            (_repo, _pr, new, keep["id"])).fetchone()
+        if existing:  # 이미 새 형식 행이 있으면 옛 행을 버린다
+            c.execute("DELETE FROM findings WHERE id=?", (keep["id"],))
+            merged += 1
+            continue
+        c.execute("UPDATE findings SET fp=? WHERE id=?", (new, keep["id"]))
+    if plan:
+        log_event(c, "fp_line_migration",
+                  detail={"rewritten": len(plan), "merged": merged})
 
 
 def get_meta(c, k: str, default=None):
@@ -393,6 +443,26 @@ def unresolved_findings_count(c, repo, pr) -> int:
     return int(row["n"] if row else 0)
 
 
+OPEN_STATUSES = ("posted", "confirmed", "unresolved", "pending_verify",
+                 "dismiss_pending", "defer_pending")
+
+
+def open_findings_count(c, repo, pr) -> int:
+    """이 PR 에 아직 닫히지 않은 지적 수 — LGTM 차단 기준.
+
+    unresolved 만 세면 안 된다. 호출 게이트가 재판정을 건너뛰면 지적이 posted /
+    confirmed 로 남는데, 그건 '문제가 없다' 가 아니라 '다시 묻지 않았다' 는 뜻이다.
+    게이트 전에는 closure 가 매번 판정해 unresolved 로 내려왔기 때문에 이 구멍이
+    없었다(셀프 리뷰 2회차 지적).
+    """
+    row = c.execute(
+        "SELECT COUNT(*) n FROM findings WHERE repo=? AND pr_number=? "
+        f"AND status IN ({','.join('?' * len(OPEN_STATUSES))})",
+        (repo, pr, *OPEN_STATUSES),
+    ).fetchone()
+    return int(row["n"] if row else 0)
+
+
 def unresolved_findings(c, repo, pr):
     return c.execute(
         "SELECT * FROM findings WHERE repo=? AND pr_number=? AND status='unresolved'",
@@ -434,18 +504,23 @@ def revalidate_finding(c, card_id, repo, pr, head, fp, title, body, file, line,
         except (json.JSONDecodeError, AttributeError):
             return raw or ""
 
+    # line 은 비교하지 않는다 — 지문에서 뺀 이유와 같다. 인용 구간은 실행마다
+    # 흔들리는데(89-94→87-94→91-94 실측) 그걸 '내용이 바뀌었다' 로 읽으면 작성자
+    # 결정이 통째로 지워진다. 위치는 표시용이라 아래에서 값만 갱신한다.
     same_payload = meaningful_body(row["body"]) == meaningful_body(body) and all(
         (row[key] or "") == (str(value) if value is not None else "")
         for key, value in {
-            "title": title, "file": file, "line": line,
+            "title": title, "file": file,
             "severity": severity, "confidence": confidence,
         }.items()
     )
-    if row["status"] in {"dismiss_pending", "defer_pending"} and same_payload:
-        return "sticky"
-    if (row["status"] in {"dismissed", "deferred"}
-            and (not row["decision_head"] or row["decision_head"] == head)
-            and same_payload):
+    sticky = (row["status"] in {"dismiss_pending", "defer_pending"} and same_payload) or (
+        row["status"] in {"dismissed", "deferred"}
+        and (not row["decision_head"] or row["decision_head"] == head)
+        and same_payload)
+    if sticky:
+        if (row["line"] or "") != (str(line) if line is not None else ""):
+            c.execute("UPDATE findings SET line=? WHERE id=?", (line, row["id"]))
         return "sticky"
     previous = row["status"]
     c.execute(
@@ -469,6 +544,12 @@ def set_finding_status(c, finding_id, status, comment_id=None):
         "UPDATE findings SET status=?, comment_id=COALESCE(?,comment_id), updated_at=? WHERE id=?",
         (status, comment_id, now(), finding_id),
     )
+
+
+def mark_finding_judged(c, finding_id, head, newest_reply):
+    """closure 를 돌린 시점을 남긴다 — 다음 head 에서 '뭐가 바뀌었나' 의 기준점."""
+    c.execute("UPDATE findings SET last_judged_head=?, last_seen_reply=? WHERE id=?",
+              (head, newest_reply or "", finding_id))
 
 
 def set_finding_decision(c, finding_id, status, head, comment_id, evidence, follow_up=""):
@@ -523,14 +604,22 @@ def purge_old(c, days: int = 14) -> dict:
     """N일 지난 종료(archived) 카드 + 거기 묶인 findings/events 삭제.
 
     살아있는(non-archived) 카드의 데이터는 절대 건드리지 않음. findings/events를
-    먼저 지우고(아직 카드 존재) 카드를 지운다. 카드가 이미 사라진 고아 이벤트도 정리."""
+    먼저 지우고(아직 카드 존재) 카드를 지운다. 카드가 이미 사라진 고아 이벤트도 정리.
+    열린 지적(OPEN_STATUSES)은 카드가 archived 여도 남긴다 — 아래 주석 참고."""
     cutoff = now() - days * 86400
     sub = "(SELECT id FROM cards WHERE status='archived' AND updated_at < ?)"
     subk = "(SELECT key FROM cards WHERE status='archived' AND updated_at < ?)"
-    findings = c.execute(f"DELETE FROM findings WHERE card_id IN {sub}", (cutoff,)).rowcount
+    # 열린 지적은 남긴다. 재게시 쿨다운이 지적을 옛 카드에 남겨 두므로, 카드가
+    # archived 되면 열려 있는 PR 의 미해결 지적까지 함께 지워졌다(셀프 리뷰 3회차).
+    # 게시 여부와 보존 수명은 별개다.
+    findings = c.execute(
+        f"DELETE FROM findings WHERE card_id IN {sub} "
+        f"AND status NOT IN ({','.join('?' * len(OPEN_STATUSES))})",
+        (cutoff, *OPEN_STATUSES)).rowcount
     events = c.execute(f"DELETE FROM events WHERE key IN {subk}", (cutoff,)).rowcount
     cards = c.execute(
-        "DELETE FROM cards WHERE status='archived' AND updated_at < ?", (cutoff,)
+        "DELETE FROM cards WHERE status='archived' AND updated_at < ? "
+        "AND id NOT IN (SELECT card_id FROM findings)", (cutoff,)
     ).rowcount
     events += c.execute(
         "DELETE FROM events WHERE ts < ? AND key IS NOT NULL "

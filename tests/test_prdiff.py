@@ -102,3 +102,121 @@ class CollectTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PackPreferTest(unittest.TestCase):
+    def _diff(self, sizes):
+        out = []
+        for path, n in sizes.items():
+            out.append(f"diff --git a/{path} b/{path}\n@@ -1 +1 @@\n")
+            out.append("+x" * n + "\n")
+        return "".join(out)
+
+    def test_preferred_file_is_included_even_when_it_blows_the_budget(self):
+        """지적 하나를 판정하는 호출에서 정작 그 파일이 예산에 밀려 빠지면 무의미하다."""
+        diff = self._diff({"big.ts": 4000, "other.ts": 100, "another.ts": 100})
+        text, manifest, _ = prdiff.pack(diff, budget=500, prefer=["big.ts"])
+        self.assertIn("a/big.ts", text)
+        self.assertIn("[포함]   big.ts", manifest)
+
+    def test_remaining_budget_still_goes_to_other_files(self):
+        diff = self._diff({"target.ts": 50, "other.ts": 50, "huge.ts": 9000})
+        text, _manifest, omitted = prdiff.pack(diff, budget=400, prefer=["target.ts"])
+        self.assertIn("a/target.ts", text)
+        self.assertIn("a/other.ts", text)
+        self.assertNotIn("a/huge.ts", text)
+        self.assertEqual(omitted, 1)
+
+    def test_prefer_is_optional_and_changes_nothing_by_default(self):
+        diff = self._diff({"a.ts": 50, "b.ts": 9000})
+        self.assertEqual(prdiff.pack(diff, budget=400),
+                         prdiff.pack(diff, budget=400, prefer=[]))
+
+
+class FpLineMigrationTest(unittest.TestCase):
+    """지문에서 줄 번호를 뺄 때 기존 행을 옮겨 놓지 않으면, 열려 있던 지적 전부가
+    '처음 보는 지적' 이 되어 한 번씩 중복 게시된다."""
+
+    def _conn(self):
+        c = sqlite3.connect(":memory:")
+        c.row_factory = sqlite3.Row
+        c.executescript(db.SCHEMA)
+        return c
+
+    def test_old_shape_is_rewritten(self):
+        self.assertEqual(db._fp_without_line("o/r#1:src/a.ts:89-94:rule-x"),
+                         "o/r#1:src/a.ts:rule-x")
+        self.assertEqual(db._fp_without_line("o/r#1:pkg/src/a.ts:10:rule-x"),
+                         "o/r#1:pkg/src/a.ts:rule-x")
+
+    def test_new_shape_is_left_alone(self):
+        self.assertIsNone(db._fp_without_line("o/r#1:src/a.ts:rule-x"))
+        self.assertIsNone(db._fp_without_line("topic:123-4"))
+
+    def test_rows_split_by_line_are_merged_keeping_the_newest(self):
+        c = self._conn()
+        card = db.upsert_card(c, "k", "review", "o/r", 1, "intake", "head")
+        for line, status in (("89-94", "resolved"), ("87-94", "posted")):
+            db.upsert_finding(c, card, "o/r", 1, "head", f"o/r#1:src/a.ts:{line}:same",
+                              "제목", "{}", "src/a.ts", line, "medium", "high", status)
+        c.execute("UPDATE findings SET updated_at=? WHERE line=?", (1.0, "89-94"))
+        c.execute("UPDATE findings SET updated_at=? WHERE line=?", (2.0, "87-94"))
+
+        db._drop_line_from_fps(c)
+
+        rows = c.execute("SELECT fp, line, status FROM findings").fetchall()
+        self.assertEqual(len(rows), 1, "같은 문제는 한 행으로 합쳐진다")
+        self.assertEqual(rows[0]["fp"], "o/r#1:src/a.ts:same")
+        self.assertEqual(rows[0]["line"], "87-94")     # 최근 갱신된 쪽
+        self.assertEqual(rows[0]["status"], "posted")
+
+    def test_migration_is_idempotent(self):
+        c = self._conn()
+        card = db.upsert_card(c, "k", "review", "o/r", 1, "intake", "head")
+        db.upsert_finding(c, card, "o/r", 1, "head", "o/r#1:src/a.ts:10:r",
+                          "제목", "{}", "src/a.ts", "10", "medium", "high", "posted")
+        db._drop_line_from_fps(c)
+        db._drop_line_from_fps(c)
+        rows = c.execute("SELECT fp FROM findings").fetchall()
+        self.assertEqual([r["fp"] for r in rows], ["o/r#1:src/a.ts:r"])
+
+
+class PurgeKeepsOpenFindingsTest(unittest.TestCase):
+    """재게시 쿨다운이 지적을 옛 카드에 남겨 두므로, archived 정리가 열려 있는 PR 의
+    미해결 지적까지 지우기 시작했다(셀프 리뷰 3회차). 게시 여부와 보존 수명은 별개다."""
+
+    def _conn(self):
+        c = sqlite3.connect(":memory:")
+        c.row_factory = sqlite3.Row
+        c.executescript(db.SCHEMA)
+        return c
+
+    def test_open_finding_survives_its_archived_card(self):
+        c = self._conn()
+        old = db.upsert_card(c, "old", "review", "o/r", 1, "archived", "h1")
+        db.upsert_finding(c, old, "o/r", 1, "h1", "o/r#1:src/a.ts:open-one", "열림",
+                          "{}", "src/a.ts", "1", "medium", "high", "posted")
+        db.upsert_finding(c, old, "o/r", 1, "h1", "o/r#1:src/b.ts:done-one", "닫힘",
+                          "{}", "src/b.ts", "2", "medium", "high", "resolved")
+        c.execute("UPDATE cards SET updated_at=0 WHERE id=?", (old,))
+
+        db.purge_old(c, days=1)
+
+        rows = {r["fp"].rsplit(":", 1)[-1]: r["status"]
+                for r in c.execute("SELECT fp, status FROM findings")}
+        self.assertEqual(rows, {"open-one": "posted"})
+        self.assertEqual(db.open_findings_count(c, "o/r", 1), 1)
+        # 지적이 남은 카드는 함께 지우지 않는다 — 고아 finding 을 만들지 않기 위해
+        self.assertIsNotNone(c.execute("SELECT 1 FROM cards WHERE id=?", (old,)).fetchone())
+
+    def test_a_fully_closed_card_is_still_purged(self):
+        c = self._conn()
+        old = db.upsert_card(c, "old", "review", "o/r", 1, "archived", "h1")
+        db.upsert_finding(c, old, "o/r", 1, "h1", "o/r#1:src/a.ts:done", "닫힘",
+                          "{}", "src/a.ts", "1", "medium", "high", "resolved")
+        c.execute("UPDATE cards SET updated_at=0 WHERE id=?", (old,))
+
+        out = db.purge_old(c, days=1)
+
+        self.assertEqual(out["findings"], 1)
+        self.assertEqual(out["cards"], 1)

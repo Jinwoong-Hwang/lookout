@@ -78,6 +78,41 @@ class CommenterReminderTest(unittest.TestCase):
             "posted")
         self.assertEqual(_row(c, card_id)["status"], "commented")
 
+    def test_a_held_finding_does_not_block_the_others(self):
+        """보류 하나가 묶음 전체를 잡으면, 과잉 재제기를 고친 대가로 진짜 지적이 묻힌다.
+
+        #10066 재현에서 매 패스마다 신규 결함(prod 회귀 포함)이 보류 2건에 묶여
+        나가지 못했다.
+        """
+        other = "owner/repo#1:src/other.ts:20:another-rule"
+        c = _conn()
+        card_id = _card(c)
+        _finding(c, card_id, "defer_pending")            # 작성자 답변 대기
+        _finding(c, card_id, "confirmed", fp=other)      # 무관한 신규 지적
+        reviewer.refresh_author_decisions = lambda *_: None
+
+        commenter.process(c, _row(c, card_id))
+
+        self.assertEqual(len(self.posted), 1, "보류가 아닌 지적은 나가야 한다")
+        self.assertIn(other, self.posted[0])
+        self.assertNotIn(FP, self.posted[0])             # 보류 건은 빠진다
+        rows = dict(c.execute(
+            "SELECT fp, status FROM findings WHERE card_id=?", (card_id,)).fetchall())
+        self.assertEqual(rows[FP], "defer_pending")      # 보류는 그대로 대기
+        self.assertEqual(rows[other], "posted")
+        self.assertEqual(len(_events(c, "comment_held_author_decision")), 1)
+
+    def test_only_held_findings_means_nothing_is_posted(self):
+        c = _conn()
+        card_id = _card(c)
+        _finding(c, card_id, "defer_pending")
+        reviewer.refresh_author_decisions = lambda *_: None
+
+        commenter.process(c, _row(c, card_id))
+
+        self.assertEqual(self.posted, [])
+        self.assertEqual(_row(c, card_id)["status"], "commented")
+
     def test_nothing_to_post_is_logged(self):
         c = _conn()
         card_id = _card(c, force_post=False)

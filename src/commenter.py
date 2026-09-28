@@ -6,7 +6,7 @@ Ethan 봇 스타일 — 이모지/severity 데코 없이, 시니어 동료의 �
 """
 import json
 
-from . import db, ghclient, profiles, reviewer
+from . import db, feedback, ghclient, profiles, reviewer
 from .config import CFG
 
 BOT_PREFIX = "🤖 "
@@ -112,12 +112,16 @@ def process(c, card):
     force = bool(meta.get("force_post"))  # 미해결 리마인드 — 기존 댓글 있어도 다시 게시
     # A PR author can reply after review/verify but before this irreversible post.
     # Re-check only findings that have already been posted and can therefore have
-    # a linked reply.  Hold this bundle if the reply now awaits operator approval.
+    # a linked reply.
     reviewer.refresh_author_decisions(c, card)
-    if db.pending_decision_findings(c, repo, pr):
-        db.set_status(c, card["id"], "commented")
-        db.log_event(c, "comment_held_author_decision", card["key"])
-        return
+    # 예전엔 보류가 하나라도 있으면 묶음 전체를 잡았다. 그러면 작성자 답변을
+    # 기다리는 지적 하나가 무관한 신규 지적까지 묶어 세운다 — #10066 재현에서
+    # prod 회귀와 신규 결함이 매 패스 그렇게 묶여 못 나갔다. 과잉 재제기를 고쳤더니
+    # 이번엔 진짜 지적이 안 나가는 상태가 됐다. 보류는 그 지적만 빼고 나머지는 낸다.
+    held = db.pending_decision_findings(c, repo, pr)
+    if held:
+        db.log_event(c, "comment_held_author_decision", card["key"],
+                     {"held": [f["fp"] for f in held]})
 
     postable = db.postable_findings_for_card(c, card["id"])
     comment_policy = policy.get("comment_policy", "global")
@@ -134,7 +138,7 @@ def process(c, card):
     # force면 마커 중복 무시하고 전부 게시, 아니면 아직 안 올라간 것만
     fresh = []
     for f in postable:
-        if not force and any(_marker(f["fp"]) in b for b in posted_bodies):
+        if not force and any(feedback.marker_matches(f["fp"], b) for b in posted_bodies):
             db.set_finding_status(c, f["id"], "posted", comment_id="exists")
         else:
             fresh.append(f)
@@ -144,6 +148,7 @@ def process(c, card):
         db.set_status(c, card["id"], "commented")
         db.log_event(c, "comment_nothing_to_post", card["key"],
                      {"force": force, "postable": len(postable),
+                      "held_author_decision": len(held),
                       "card_findings": len(db.findings_for_card(c, card["id"]))})
         return
 
@@ -193,7 +198,7 @@ def publish_dryrun(c, card) -> bool:
     already = any("hermes:fp" in b for b in posted_bodies)
     fresh = []
     for f in dry:
-        if any(_marker(f["fp"]) in b for b in posted_bodies):
+        if any(feedback.marker_matches(f["fp"], b) for b in posted_bodies):
             db.set_finding_status(c, f["id"], "posted", comment_id="exists")
         else:
             fresh.append(f)

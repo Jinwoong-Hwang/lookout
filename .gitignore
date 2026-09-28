@@ -5,6 +5,7 @@ worktrees/
 repos/
 workspaces/
 logs/
+.replay/
 
 # 빌드 산출물
 macapp/Lookout.app/
