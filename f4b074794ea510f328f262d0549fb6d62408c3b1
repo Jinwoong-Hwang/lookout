@@ -1,0 +1,19 @@
+config.example.json
+  h_03b13cada2edad 104-107
+replay-review.py
+  h_03b13cada2edad 54-57,144-149,167-172,220-222
+src/claude_runner.py
+  h_03b13cada2edad 33-38,43,62-63
+src/codex_runner.py
+  h_03b13cada2edad 13-14,88,106
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "f4b074794ea510f328f262d0549fb6d62408c3b1",
+  "prompts": {},
+  "humans": {
+    "h_03b13cada2edad": {
+      "author": "woong@zigbang.com"
+    }
+  }
+}
