@@ -46,13 +46,6 @@ class CodexStdinTest(unittest.TestCase):
         self.assertNotIn(BIG, args, "프롬프트가 argv 에 실렸다 — 큰 입력에서 즉사한다")
         self.assertEqual(args[-1], codex_runner.STDIN_MARKER)
 
-    def test_run_impl_sends_prompt_on_stdin(self):
-        codex_runner.run_impl(BIG, cwd="/tmp")
-        args, kw = self._args_kw()
-        self.assertEqual(kw.get("input"), BIG)
-        self.assertNotIn(BIG, args)
-        self.assertEqual(args[-1], codex_runner.STDIN_MARKER)
-
     def test_no_argv_entry_is_prompt_sized(self):
         codex_runner.run(BIG, cwd="/tmp")
         args, _ = self._args_kw()

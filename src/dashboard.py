@@ -14,8 +14,8 @@ import ipaddress
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from . import (commenter, db, engines, feedback, ghclient, impl_verifier, keys,
-               poller, profiles, router, worktree)
+from . import (commenter, db, engines, feedback, ghclient, poller, profiles, router,
+               worktree)
 from .config import CFG
 
 
@@ -49,107 +49,19 @@ LANES = [
     ("failed", "⚠️ 실패 (재시도 필요)"),
 ]
 
-# 이슈 작업 보드 — 리뷰 보드와 **다른 뷰**다. 같은 보드에 레인을 붙이면 컬럼이
-# 16개가 되고 Triage에 PR 카드와 이슈 카드가 섞인다. 리뷰 흐름은 그대로 둔다.
-# 상태 이름은 리뷰 레인과 겹치지 않아야 한다(db.cards_in은 status만 보므로).
-WORK_LANES = [
-    ("triage", "📥 대기 (내 이슈)"),
-    ("spec", "🗣 설계 토론"),
-    ("spec_blocked", "🧑‍⚖️ 설계 승인 대기"),
-    ("implementing", "🛠 구현 중"),
-    ("impl_verify", "🧾 구현 검증"),
-    ("verify_blocked", "⚖️ 검토 필요"),
-    ("pr_blocked", "🔒 PR 승인 대기"),
-    ("pr_opening", "🚀 PR 올리는 중"),
-    ("done", "🏁 완료"),
-    ("failed", "⚠️ 실패 (재시도 필요)"),
-]
-
-
 def build_board():
     with db.connect() as c:
         cards = c.execute(
-            "SELECT * FROM cards WHERE kind!='root' AND status!='archived' ORDER BY updated_at DESC"
+            # kind='issue' 는 걷어낸 이슈 작업 기능의 옛 카드다 — 라이브 DB 에 남아 있어도
+            # 리뷰 보드에 PR 카드처럼 섞이지 않게 뺀다.
+            "SELECT * FROM cards WHERE kind NOT IN ('root','issue') AND status!='archived'"
+            " ORDER BY updated_at DESC"
         ).fetchall()
         out = []
         for card in cards:
             meta = json.loads(card["payload"]) if card["payload"] else {}
             if isinstance(meta, str):  # tolerate legacy double-encoded payloads
                 meta = json.loads(meta)
-            if card["kind"] == "issue":
-                impl_err = ""
-                if card["status"] == "failed":
-                    ev = c.execute(
-                        "SELECT type, detail FROM events WHERE key=? AND type IN"
-                        " ('impl_target_unknown','impl_no_changes','review_gave_up')"
-                        " ORDER BY id DESC LIMIT 1", (card["key"],)).fetchone()
-                    if ev:
-                        d = json.loads(ev["detail"]) if ev["detail"] else {}
-                        head = {"impl_target_unknown": "대상 저장소 미정 — 카드에서 고르세요",
-                                "impl_no_changes": "엔진이 아무 파일도 바꾸지 않음",
-                                "review_gave_up": "구현 실패"}.get(ev["type"], ev["type"])
-                        tail = (d.get("error") or d.get("summary") or "").strip()
-                        impl_err = f"{head} — {tail[:200]}" if tail else head
-                elif card["status"] == "triage":
-                    q = c.execute(
-                        "SELECT detail FROM events WHERE key=? AND type='review_quota_paused'"
-                        " ORDER BY id DESC LIMIT 1", (card["key"],)).fetchone()
-                    if q and q["detail"]:
-                        d = json.loads(q["detail"])
-                        impl_err = (f"⏸ {d.get('engine','')} 토큰 소진으로 대기열 복귀"
-                                    + (f" · {d.get('retry_at')} 이후 재시도" if d.get("retry_at") else ""))
-                # 이슈에는 head/findings/closure/피드백이 없다. PR용 조회를 태우면
-                # 전부 빈 값이 나오므로 여기서 끊고 작업 카드에 필요한 것만 싣는다.
-                out.append({
-                    "id": card["id"], "kind": "issue", "status": card["status"],
-                    "engine": card["engine"] or "claude",
-                    "repo": card["repo"], "pr": card["pr_number"],
-                    "display": meta.get("display") or f"#{card['pr_number']}",
-                    "title": meta.get("title", ""), "url": meta.get("url", ""),
-                    "author": ", ".join(meta.get("assignees") or []),
-                    "labels": meta.get("labels") or [],
-                    "assignees": meta.get("assignees") or [],
-                    # 에픽 소속. 폴러가 아직 안 돈 옛 카드는 비어 있으므로 에픽
-                    # 뷰는 '소속 없음'으로 떨어뜨린다(빈 값이 곧 미상이다).
-                    "issue_type": meta.get("issue_type", ""),
-                    "parent": meta.get("parent") or None,
-                    "sub": meta.get("sub") or {},
-                    "ticket_status": meta.get("ticket_status", ""),
-                    "ticket_board": meta.get("ticket_board", ""),
-                    "instruction": meta.get("instruction", ""),
-                    "mode": meta.get("mode", ""),
-                    "target_repo": meta.get("target_repo", ""),
-                    "branch": meta.get("branch", ""),
-                    "commit": meta.get("commit", ""),
-                    "worktree": meta.get("worktree", ""),
-                    "parent_repo_path": _impl_parent_path(meta.get("target_repo")),
-                    "changed": meta.get("changed") or [],
-                    "impl": meta.get("impl") or {},
-                    "verify": meta.get("verify") or {},
-                    "verify_exhausted": bool(meta.get("verify_exhausted")),
-                    "verify_override": bool(meta.get("verify_override")),
-                    "agreement": meta.get("agreement") or {},
-                    "spec_amendment": meta.get("spec_amendment", ""),
-                    "topic": meta.get("topic", ""),
-                    "debate_only": meta.get("mode") == "debate_only",
-                    "debate": meta.get("debate") or [],
-                    "pr_url": meta.get("pr_url", ""),
-                    "pr_dryrun": bool(meta.get("pr_dryrun")),
-                    "rounds": meta.get("impl_rounds") or 1,
-                    "updated_at": card["updated_at"],
-                    "timeline": [
-                        {"ts": e["ts"], "type": e["type"],
-                         "label": EVENT_LABELS.get(e["type"], e["type"]),
-                         "detail": _event_note(e["type"], e["detail"])}
-                        for e in c.execute(
-                            "SELECT ts, type, detail FROM events WHERE key=?"
-                            " ORDER BY id DESC LIMIT 40", (card["key"],)).fetchall()
-                    ],
-                    "head": "", "blocked": card["blocked"],
-                    "findings": [], "comments": [], "dryrun_pending": False,
-                    "feedback": None, "closure": {}, "error": impl_err,
-                })
-                continue
             findings = []
             for f in db.findings_for_card(c, card["id"]):
                 detail = json.loads(f["body"]) if f["body"] else {}
@@ -223,77 +135,10 @@ def build_board():
         return out
 
 
-def _impl_parent_path(repo: str) -> str:
-    """구현 브랜치가 실제로 들어 있는 로컬 체크아웃. 사람이 그 브랜치로 자기
-    워크트리를 파려면 이 경로가 필요하다."""
-    if not repo:
-        return ""
-    try:
-        return worktree.impl_parent(repo)
-    except Exception:  # noqa: BLE001 - 설정 없음/경로 없음 모두 표시만 생략
-        return ""
-
-
-def _event_note(type_: str, detail) -> str:
-    """이벤트 detail(JSON)에서 사람이 볼 한 줄만 꺼낸다. 전부 뿌리면 모달이 로그가 된다."""
-    try:
-        d = json.loads(detail) if detail else {}
-    except (TypeError, ValueError):
-        return ""
-    if not isinstance(d, dict):
-        return ""
-    for key in ("error", "reason", "note", "summary", "url", "title"):
-        if d.get(key):
-            return str(d[key])[:200]
-    bits = []
-    for key in ("engine", "branch", "commit", "secs", "files", "blocking", "round", "approved"):
-        if d.get(key) not in (None, ""):
-            bits.append(f"{key}={d[key]}")
-    return " · ".join(bits)[:200]
-
-
 ACTIVE_REVIEW = ("intake", "reviewing", "verifying", "commenting")
 
 
-# 대시보드가 시작시킬 수 있는 스테이지 = tick 에 집어가는 워커가 있는 스테이지.
-# 워커 없이 열면 카드가 그 레인에 조용히 서고 아무 일도 일어나지 않는다.
-WORK_START = {"start_impl": "implementing", "start_debate": "spec"}
-DEBATE_BONUS = 2   # 사람이 개입할 때 늘려주는 토론 라운드 수
-IMPL_BONUS = 1     # 사람이 수정을 요청할 때 늘려주는 구현·검증 라운드 수
-# 워커가 없어 막아둘 것이 생기면 여기에 둔다(버튼 비활성 + 서버 거부).
-WORK_START_PENDING: dict[str, tuple[str, str]] = {}
-
-# events 를 카드 모달에 사람이 읽을 수 있게 뿌리기 위한 라벨
-EVENT_LABELS = {
-    "issue_card_created": "카드 생성", "issue_card_delisted": "목록에서 빠짐",
-    "work_started": "작업 시작", "work_start_blocked": "시작 차단(엔진 미준비)",
-    "work_start_unavailable": "시작 차단(워커 없음)",
-    "impl_target_unknown": "대상 저장소 미정", "impl_worktree_ready": "워크트리 준비 완료",
-    "impl_engine_started": "엔진 편집 시작", "impl_engine_done": "엔진 편집 종료",
-    "impl_no_changes": "변경 없음", "impl_committed": "커밋 완료",
-    "impl_verify_started": "교차 검증 시작", "impl_verified": "교차 검증 완료",
-    "impl_rework": "재구현으로 되돌림", "impl_rounds_exhausted": "라운드 예산 소진 — 사람 판정으로",
-    "impl_verify_no_branch": "브랜치 정보 없음", "impl_verify_empty_diff": "diff 없음",
-    "operator_pr_approved": "PR 승인(사람)",
-    "operator_request_changes": "수정 요청(사람) — 구현으로 되돌림",
-    "operator_rerun_verify": "다시 검증(사람)", "reverify_done": "재검증 완료",
-    "operator_verify_override": "검증 미통과인데 PR 로(사람)",
-    "debate_turn_started": "토론 턴 시작", "debate_turn": "토론 턴",
-    "debate_finished": "토론 종료", "debate_engine_missing": "엔진 없음(토론 불가)",
-    "operator_spec_approved": "설계 승인(사람)", "operator_spec_rejected": "설계 반려(사람)",
-    "operator_debate_steer": "설계 피드백(사람) — 토론 재개",
-    "topic_created": "주제 토론 생성", "topic_accepted": "결과 채택(사람)",
-    "debate_parse_failed": "엔진 응답 파싱 실패 — 원문으로 진행",
-    "topic_promoted": "주제 결론 → 구현 승격(사람)",
-    "topic_promote_blocked": "승격 차단 — 대상 저장소 미설정",
-    "gate_stale": "게이트 거부 — 카드 상태가 이미 바뀜(중복/낡은 클릭)", "operator_retry": "재시도(사람)",
-    "pr_dryrun": "PR dry-run", "pr_opened": "PR 생성", "pr_open_no_branch": "브랜치 정보 없음",
-    "review_quota_paused": "토큰 소진 — 대기열 복귀", "review_gave_up": "재시도 포기",
-    "stage_error": "스테이지 오류",
-}
-
-
-def do_action(action, card_id, engine="claude", text=None, repo=None):
+def do_action(action, card_id, engine="claude"):
     if engine not in ("claude", "codex"):
         engine = "claude"
     kick = False
@@ -310,166 +155,13 @@ def do_action(action, card_id, engine="claude", text=None, repo=None):
             db.set_status(c, card["id"], "intake")
             db.log_event(c, "operator_start", card["key"], {"engine": engine})
             kick = True
-        elif action == "save_instruction" and card["kind"] == "issue":
-            # 시작 전에만 고칠 수 있다 — 워커가 seed를 읽은 뒤 바뀌면 로그와 실제 작업이 어긋난다.
-            if card["status"] != "triage":
-                return False
-            db.merge_payload(c, card["id"], {"instruction": (text or "").strip()})
-        elif action in WORK_START_PENDING and card["kind"] == "issue":
-            stage, why = WORK_START_PENDING[action]
-            db.log_event(c, "work_start_unavailable", card["key"],
-                         {"stage": stage, "reason": why})
-            return False
-        elif action in WORK_START and card["kind"] == "issue":
-            if card["status"] != "triage":
-                return False
-            if not engines.is_ready(engine):
-                db.log_event(c, "work_start_blocked", card["key"], {"engine": engine})
-                return False
-            mode = "debate" if action == "start_debate" else "implement"
-            db.set_engine(c, card["id"], engine)
-            db.merge_payload(c, card["id"], {"mode": mode})
-            db.set_status(c, card["id"], WORK_START[action])
-            db.log_event(c, "work_started", card["key"], {"mode": mode, "engine": engine})
-            kick = True
         elif action == "ignore":
             db.set_status(c, card["id"], "archived")
             db.log_event(c, "operator_ignore", card["key"])
         elif action == "retry" and card["status"] == "failed":
-            if card["kind"] == "issue":
-                # 실패한 스테이지로 돌아간다. 무조건 implementing 으로 보내면
-                # 설계 승인 전에 실패한 토론 카드가 승인을 건너뛰고 코드를 고친다.
-                meta_now = json.loads(card["payload"]) if card["payload"] else {}
-                back = meta_now.get("failed_from") or (
-                    "spec" if meta_now.get("mode") in ("debate", "debate_only")
-                    else "implementing")
-            else:
-                back = "intake"
-            db.set_status(c, card["id"], back)
+            db.set_status(c, card["id"], "intake")
             db.log_event(c, "operator_retry", card["key"],
-                         {"engine": card["engine"], "to": back})
-            kick = True
-        elif action == "approve_spec" and card["kind"] == "issue":
-            if card["status"] != "spec_blocked":
-                return False
-            meta_now = json.loads(card["payload"]) if card["payload"] else {}
-            if meta_now.get("mode") == "debate_only":
-                # 주제 토론은 구현으로 가지 않는다. 승인 = 결과 채택.
-                if (text or "").strip():
-                    db.merge_payload(c, card["id"], {"spec_amendment": (text or "").strip()})
-                if not db.gate(c, card, "done", blocked=0, event="topic_accepted"):
-                    return False
-                return True
-            amendment = (text or "").strip()
-            if amendment:
-                # 합의문을 고치지 않고 위에 얹는다 — 토론 기록은 그대로 남아야 한다
-                db.merge_payload(c, card["id"], {"spec_amendment": amendment})
-            if not db.gate(c, card, "implementing", blocked=0,
-                           event="operator_spec_approved", detail={"amended": bool(amendment)}):
-                return False
-            kick = True
-        elif action == "implement_topic" and card["kind"] == "issue":
-            # 주제 토론의 결론을 실제 작업으로 승격한다. 대상 저장소가 없으면
-            # 구현 워커가 "대상 미정"으로 죽으므로 여기서 막는다.
-            meta_now = json.loads(card["payload"]) if card["payload"] else {}
-            if card["status"] != "spec_blocked" or meta_now.get("mode") != "debate_only":
-                return False
-            target = (repo or meta_now.get("target_repo") or "").strip()
-            if not target or not (CFG.get("impl_repo_paths") or {}).get(target):
-                db.log_event(c, "topic_promote_blocked", card["key"],
-                             {"repo": target, "reason": "impl_repo_paths 에 없는 저장소"})
-                return False
-            patch = {"target_repo": target, "mode": "implement"}
-            if (text or "").strip():
-                patch["spec_amendment"] = (text or "").strip()
-            db.merge_payload(c, card["id"], patch)
-            if not db.gate(c, card, "implementing", blocked=0,
-                           event="topic_promoted", detail={"repo": target}):
-                return False
-            kick = True
-        elif action == "resume_debate" and card["kind"] == "issue":
-            if card["status"] != "spec_blocked":
-                return False
-            steer = (text or "").strip()
-            if not steer:
-                return False
-            meta = json.loads(card["payload"]) if card["payload"] else {}
-            turns = (meta.get("debate") or []) + [{"role": "operator", "claim": steer}]
-            # 라운드 예산을 늘려준다 — 상한에 걸려 끝난 토론을 그냥 재개하면
-            # 첫 턴에서 다시 상한에 걸린다.
-            db.merge_payload(c, card["id"], {
-                "debate": turns,
-                "debate_bonus": int(meta.get("debate_bonus") or 0) + DEBATE_BONUS,
-                "agreement": {}})
-            if not db.gate(c, card, "spec", blocked=0, event="operator_debate_steer",
-                           detail={"steer": steer[:200]}):
-                return False
-            kick = True
-        elif action == "reject_spec" and card["kind"] == "issue":
-            if card["status"] != "spec_blocked":
-                return False
-            # 기록은 남기고 다시 대기로. 재시작 시 이전 라운드가 이어붙지 않게 비운다.
-            meta = json.loads(card["payload"]) if card["payload"] else {}
-            db.merge_payload(c, card["id"], {
-                "debate_prev": (meta.get("debate_prev") or []) + [{
-                    "debate": meta.get("debate") or [],
-                    "agreement": meta.get("agreement") or {}}],
-                "debate": [], "agreement": {}, "mode": ""})
-            if not db.gate(c, card, "triage", blocked=0, event="operator_spec_rejected"):
-                return False
-        elif action == "request_changes" and card["kind"] == "issue":
-            # PR 게이트에서 되돌리는 경로. 사람이 본 diff 의 문제를 구현자에게 넘긴다.
-            if card["status"] not in ("pr_blocked", "verify_blocked"):
-                return False
-            note = (text or "").strip()
-            meta_now = json.loads(card["payload"]) if card["payload"] else {}
-            verify = meta_now.get("verify") or {}
-            # 검증이 남긴 미해결 지적은 사람이 다시 타이핑할 이유가 없다 — 비워두면
-            # 그대로 넘어간다. 사람이 쓴 것은 그 위에 얹혀 우선한다.
-            auto = "" if verify.get("approved") else impl_verifier.blockers_text(verify)
-            if not note and not auto:
-                return False
-            parts = []
-            if auto:
-                parts.append(f"[검증 미해결] {auto}")
-            if note:
-                parts.append(f"[운영자 수정 요청] {note}")
-            # 덮어쓴다 — 이전 라운드의 (이미 고친) 지적을 다시 보내면 되돌림이 돈다
-            db.merge_payload(c, card["id"], {
-                "feedback": "\n\n".join(parts),
-                "impl_bonus": int(meta_now.get("impl_bonus") or 0) + IMPL_BONUS,
-            })
-            if not db.gate(c, card, "implementing", blocked=0,
-                           event="operator_request_changes", detail={"note": note[:200]}):
-                return False
-            kick = True
-        elif action == "rerun_verify" and card["kind"] == "issue":
-            # 같은 커밋을 다시 검증한다. 새 구현이 없으므로 라운드를 쓰지 않는다.
-            if card["status"] != "verify_blocked":
-                return False
-            # 사람이 적어 보낸 관점을 함께 넘긴다 — 입력이 없으면 그냥 재검증이다.
-            # 재검증의 쓸모 대부분은 "이 관점으로 다시 보라"이고, 안 넘기면 완전히
-            # 같은 입력으로 같은 판정이 나온다.
-            note = (text or "").strip()
-            db.merge_payload(c, card["id"],
-                             {"reverify_only": True, "reverify_note": note})
-            if not db.gate(c, card, "impl_verify", blocked=0,
-                           event="operator_rerun_verify", detail={"note": note[:200]}):
-                return False
-            kick = True
-        elif action == "verify_override" and card["kind"] == "issue":
-            # 검증이 통과하지 못했는데 사람이 감수하고 PR 게이트로 넘긴다.
-            if card["status"] != "verify_blocked":
-                return False
-            db.merge_payload(c, card["id"], {"verify_override": True})
-            if not db.gate(c, card, "pr_blocked", blocked=1,
-                           event="operator_verify_override"):
-                return False
-        elif action == "unblock" and card["kind"] == "issue":
-            if card["status"] != "pr_blocked":
-                return False
-            if not db.gate(c, card, "pr_opening", blocked=0, event="operator_pr_approved"):
-                return False
+                         {"engine": card["engine"], "to": "intake"})
             kick = True
         elif action == "unblock" and card["kind"] == "approve":
             db.set_status(c, card["id"], "approving", blocked=0)
@@ -549,45 +241,12 @@ def do_finding_action(action, finding_id):
     return True
 
 
-TOPIC_REPO = "-"          # 이슈가 없으니 repo/pr_number 는 센티넬 (컬럼이 NOT NULL)
-
-
-def create_topic(text: str, repo: str = "") -> dict:
-    """이슈에 매달리지 않은 순수 토론 카드.
-
-    구현으로 가지 않는다 — 산출물은 합의문 하나다. 설계 스테이지를 그대로 쓰되
-    승인은 '결과 채택'이라 done 으로 끝난다."""
-    topic = (text or "").strip()
-    if not topic:
-        return {"ok": False, "reason": "주제가 비었습니다"}
-    title = topic.splitlines()[0][:90]
+def refresh_poll():
+    """Run the poller now (bypass the interval)."""
     with db.connect() as c:
-        seq = c.execute("SELECT COUNT(*) n FROM cards WHERE repo=?",
-                        (TOPIC_REPO,)).fetchone()["n"] + 1
-        key = keys.topic_key(seq, db.now())
-        card_id = db.upsert_card(
-            c, key, "issue", TOPIC_REPO, 0, status="spec",
-            payload={"display": f"TOPIC-{seq}", "title": title, "topic": topic,
-                     "mode": "debate_only", "target_repo": (repo or "").strip(),
-                     "labels": [], "assignees": []})
-        db.log_event(c, "topic_created", key, {"title": title, "repo": repo or "(없음)"})
-    kick_tick()
-    return {"ok": True, "card_id": card_id, "display": f"TOPIC-{seq}"}
-
-
-def refresh_poll(scope: str = "review"):
-    """Run the poller now (bypass the interval).
-
-    보고 있는 보드만 갱신한다 — 작업 뷰에서 '이슈 가져오기'를 눌렀는데 PR 폴링이
-    돌면 리뷰 카드가 예고 없이 늘어난다."""
-    kind = "issue" if scope == "work" else "review"
-    with db.connect() as c:
-        before = len(db.cards_in(c, ["triage"], kind=kind))
-        if scope == "work":
-            poller.poll_issues(c)
-        else:
-            poller.poll(c)
-        after = len(db.cards_in(c, ["triage"], kind=kind))
+        before = len(db.cards_in(c, ["triage"], kind="review"))
+        poller.poll(c)
+        after = len(db.cards_in(c, ["triage"], kind="review"))
     return {"added": max(0, after - before), "total": after}
 
 
@@ -787,56 +446,7 @@ h1{font-size:17px;margin:0;font-weight:750;letter-spacing:-.01em}
 .board.stack{display:block;overflow-y:auto;overflow-x:hidden}
 .toggle{display:flex;gap:6px;margin-left:6px}
 .toggle button.active{background:var(--btn-accent-bg);color:var(--btn-accent-fg);border-color:var(--btn-accent-bd);font-weight:650}
-/* 작업 보드는 카드가 아니라 **목록**이다. 항목이 한 자릿수고 행마다 할 일이
-   하나뿐이라, 카드로 깔면 262px 짜리 박스가 화면을 먹고 정작 훑기가 어렵다. */
-.rows{display:flex;flex-direction:column;border:1px solid var(--line);border-radius:12px;
-background:var(--panel);overflow:hidden}
-.irow{display:flex;gap:12px;align-items:center;padding:11px 14px;cursor:pointer;
-border-left:3px solid transparent;border-top:1px solid var(--line);transition:background .12s}
-.irow:first-child{border-top:none}
-.irow:hover{background:var(--panel2)}
-.irow .idot{flex:0 0 auto;width:8px;height:8px;border-radius:50%}
-.irow .imain{flex:1 1 auto;min-width:0}
-.irow .ihead{display:flex;gap:8px;align-items:baseline;min-width:0}
-.irow .inum{flex:0 0 auto;font-weight:700;font-size:12.5px;color:var(--ink);font-variant-numeric:tabular-nums}
-.irow .ititle{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
-font-size:13px;color:var(--ink)}
-.irow .imeta{display:flex;flex-wrap:wrap;gap:5px;align-items:center;margin-top:5px}
-.irow .iright{flex:0 0 auto;display:flex;gap:9px;align-items:center;color:var(--muted);font-size:11.5px}
-.irow .igo{color:var(--dim)}
-.irow:hover .igo{color:var(--accent)}
-.irow.gate{border-left-color:var(--warn);background:color-mix(in srgb,var(--warn) 7%,transparent)}
-.irow.gate .igo{color:var(--warn);font-weight:700}
-.irow .xbtn{position:static;opacity:0}
-.irow:hover .xbtn{opacity:1}
-.ghead{display:flex;gap:8px;align-items:center;margin:0 0 8px;font-size:12.5px;font-weight:700}
-.ghead .n,.esec .n,.thead .n{background:var(--panel2);border-radius:20px;padding:1px 9px;color:var(--muted);
-font-size:11px;font-weight:400}
-/* 에픽별 뷰 — 머리글이 에픽이고 그 아래 목록이 소속 태스크다. 왼쪽 레일이 소속을
-   잇는다(들여쓰기만 하면 스크롤 중에 어느 에픽 밑인지 놓친다). */
-.esec{margin:0 0 18px}
-.esec .ehead{display:flex;gap:9px;align-items:center;padding:0 2px 8px;border-bottom:1px solid var(--line)}
-.esec .ehead.go{cursor:pointer}
-.esec .ehead.go:hover .etitle{color:var(--accent)}
-.esec .etag{flex:0 0 auto}
-.esec .enum{flex:0 0 auto;font-weight:700;font-size:12.5px;color:var(--ink);font-variant-numeric:tabular-nums}
-.esec .etitle{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
-font-size:13.5px;font-weight:650;color:var(--ink)}
-.esec .ebits{flex:0 0 auto;display:flex;gap:5px;align-items:center}
-.esec .ebits a.open{text-decoration:none;color:var(--muted)}
-.esec .rows{margin:10px 0 0 15px;border-left:3px solid var(--line)}
-.esec.hasgate .rows{border-left-color:var(--warn)}
-.esec .empty{margin:8px 0 0 15px;text-align:left}
-.ghint{margin-left:auto;color:var(--muted);font-size:11.5px;font-weight:400}
-/* 대기 목록 안의 티켓 진행상태 소구간 머리글 */
-.thead{display:flex;gap:7px;align-items:center;margin:14px 0 6px;font-size:11.5px}
-.sec>.thead:first-of-type{margin-top:0}
 .sec{margin:0 0 16px}
-/* 작업 보드 — 게이트 섹션은 '지금 당신 차례'라서 눈에 먼저 걸려야 한다 */
-details.grp>summary{list-style:none;cursor:pointer}
-details.grp>summary::-webkit-details-marker{display:none}
-details.grp>summary h2{margin:0 0 10px}
-details.grp[open]>summary h2{margin-bottom:10px}
 .sec h2{font-size:14px;margin:0 0 10px;padding-bottom:7px;border-bottom:1px solid var(--line);display:flex;gap:8px;align-items:center}
 .sec .cards{display:flex;flex-direction:row;flex-wrap:wrap;gap:10px;padding:0}
 .sec .card{width:262px}
@@ -858,51 +468,6 @@ display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hi
 .dot{width:9px;height:9px;border-radius:50%;display:inline-block}
 .high{background:var(--bad)}.medium{background:var(--warn)}.low{background:var(--accent)}
 .btns{display:flex;gap:7px;margin-top:11px}
-.instr{margin-top:9px}
-.instr textarea{width:100%;box-sizing:border-box;min-height:44px;resize:vertical;
-  background:var(--panel);color:var(--fg);border:1px solid var(--line);border-radius:6px;
-  padding:6px 7px;font:inherit;font-size:11.5px;line-height:1.4}
-.instr textarea::placeholder{color:var(--dim)}
-.instr input{width:100%;box-sizing:border-box;margin-top:7px;background:var(--panel);
-  color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:6px 7px;
-  font:inherit;font-size:11.5px}
-.composer{padding:12px 22px;border-bottom:1px solid var(--line);background:var(--panel)}
-.composer textarea{width:100%;box-sizing:border-box;min-height:52px;resize:vertical;
-  background:var(--panel2);color:var(--ink);border:1px solid var(--line);border-radius:9px;
-  padding:8px 10px;font:inherit;font-size:12.5px;line-height:1.45}
-.composer .crow{display:flex;gap:8px;margin-top:8px;align-items:center}
-.composer input{flex:1 1 auto;min-width:0;background:var(--panel2);color:var(--ink);
-  border:1px solid var(--line);border-radius:9px;padding:7px 10px;font:inherit;font-size:12.5px}
-.composer button{flex:0 0 auto}
-.md{font-size:13px;line-height:1.62;color:var(--ink)}
-.md p{margin:6px 0}
-.md h5{margin:12px 0 5px;font-size:13px;font-weight:750;color:var(--ink)}
-.md ul,.md ol{margin:6px 0;padding-left:19px}
-.md li{margin:3px 0}
-.md code{background:var(--panel2);border:1px solid var(--line);border-radius:4px;
-  padding:.05em .35em;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
-.md pre.code{background:var(--panel2);border:1px solid var(--line);border-radius:8px;
-  padding:10px 12px;margin:8px 0;overflow-x:auto;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
-  font-size:11.8px;line-height:1.55;white-space:pre}
-.md pre.code code{background:none;border:none;padding:0}
-.md blockquote{margin:6px 0;padding:2px 0 2px 10px;border-left:2px solid var(--line);color:var(--muted)}
-.md strong{font-weight:700}
-details.sec{margin-top:12px;border:1px solid var(--line);border-radius:9px;background:var(--panel)}
-details.sec>summary{cursor:pointer;padding:9px 12px;font-size:12.5px;font-weight:700;
-  color:var(--ink);list-style:none;display:flex;justify-content:space-between;gap:8px}
-details.sec>summary::-webkit-details-marker{display:none}
-details.sec>summary::after{content:"▾";color:var(--dim);font-weight:400}
-details.sec[open]>summary::after{content:"▴"}
-details.sec>.body{padding:0 12px 12px}
-.tl{margin-top:6px;border:1px solid var(--line);border-radius:9px;overflow:hidden}
-.tlrow{display:grid;grid-template-columns:66px 116px 1fr;gap:8px;padding:5px 10px;
-  font-size:11.5px;border-bottom:1px solid var(--line);align-items:baseline}
-.tlrow:last-child{border-bottom:none}
-.tlrow code{color:var(--dim);font-size:11px}
-.tlrow .tlab{color:var(--ink);font-weight:600}
-.tlrow .tdet{color:var(--muted);word-break:break-word}
-.instrline{margin-top:6px;font-size:11px;line-height:1.35;color:var(--muted);
-  white-space:pre-wrap;word-break:break-word}
 .rev{display:flex;gap:7px;margin-top:11px}
 .rev button{flex:1}
 .rev button:disabled{background:var(--panel);border-color:var(--line);color:var(--dim);filter:none;cursor:not-allowed}
@@ -941,54 +506,6 @@ background:transparent;border:none;padding:3px 5px;border-radius:6px;opacity:.4}
 .ov{position:fixed;inset:0;z-index:1000;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;padding:24px}
 .ov.show{display:flex}
 .modal{background:var(--panel);border:1px solid var(--line);border-radius:14px;max-width:720px;width:100%;max-height:86vh;overflow:auto;padding:22px}
-/* 이슈 모달은 '읽고 결정하는' 문서다 — 머리(무엇인가)와 조작부(무엇을 할까)를
-   고정하고 가운데 근거만 스크롤한다. 블로커가 길면 버튼이 화면 밖으로 밀려
-   끝까지 내려야 결정할 수 있었다. */
-.modal.doc{display:flex;flex-direction:column;padding:0;max-width:780px;max-height:88vh;overflow:hidden}
-.doc .mhead{flex:0 0 auto;padding:18px 24px 13px;border-bottom:1px solid var(--line)}
-.doc .mbody{flex:1 1 auto;min-height:0;overflow-y:auto;padding:16px 24px 22px}
-.doc .mfoot{flex:0 0 auto;padding:13px 24px 16px;border-top:1px solid var(--line);background:var(--panel2)}
-.doc .mhead h3{margin:0 0 7px;font-size:17px;line-height:1.4}
-.doc .mhead .num{color:var(--accent);font-weight:800;margin-right:7px}
-/* 왜 지금 당신 차례인지 — 한 줄로, 눈에 먼저 걸리게 */
-.doc .why{display:flex;gap:9px;align-items:flex-start;padding:11px 13px;border-radius:10px;
-margin:0 0 4px;font-size:13px;line-height:1.55;color:var(--ink);
-background:color-mix(in srgb,var(--warn) 12%,transparent);
-border:1px solid color-mix(in srgb,var(--warn) 38%,transparent)}
-.doc .why.bad{background:color-mix(in srgb,var(--bad) 12%,transparent);
-border-color:color-mix(in srgb,var(--bad) 38%,transparent)}
-/* 구획 제목 — 대문자 변환은 한글에 아무 일도 안 하고 자간만 벌린다 */
-.doc .lbl{display:flex;gap:8px;align-items:center;font-size:12.5px;font-weight:750;
-color:var(--ink);letter-spacing:0;text-transform:none;margin:22px 0 9px;
-padding-bottom:7px;border-bottom:1px solid var(--line)}
-.doc .lbl::before{content:"";flex:0 0 auto;width:3px;height:13px;border-radius:2px;background:var(--accent)}
-.doc .lbl2{font-size:12px;font-weight:700;color:var(--muted);margin:14px 0 4px}
-.doc .md{font-size:13.5px;line-height:1.75}
-.doc .pre{font-size:13px;line-height:1.7}
-.doc .finding{padding:13px 15px;margin:11px 0;border-radius:10px}
-.doc .finding .ft{font-family:ui-monospace,Menlo,monospace;font-size:12.5px;
-font-weight:700;color:var(--muted);margin-bottom:8px;word-break:break-all}
-/* 모달에서는 자르지 않는다 — 실패 사유가 3줄에서 잘리면 원인을 못 읽는다 */
-.doc .errline{font-size:13px;line-height:1.6;display:block;-webkit-line-clamp:none;
-word-break:break-word;margin-top:8px}
-/* 끝난 카드는 '무엇을 결정하나'가 아니라 '무엇이 남았나'를 말해야 한다 */
-.doc .done{display:flex;gap:9px;align-items:flex-start;padding:11px 13px;border-radius:10px;
-margin:0 0 4px;font-size:13px;line-height:1.55;color:var(--ink);
-background:color-mix(in srgb,var(--good) 12%,transparent);
-border:1px solid color-mix(in srgb,var(--good) 38%,transparent)}
-.doc .done.flat{background:var(--panel2);border-color:var(--line);color:var(--muted)}
-.doc .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(104px,1fr));gap:8px;margin:11px 0 2px}
-.doc .stat{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:9px 11px}
-.doc .stat .k{font-size:11px;color:var(--muted);margin-bottom:3px}
-.doc .stat .v{font-size:14px;font-weight:750;color:var(--ink);font-variant-numeric:tabular-nums}
-.doc .stat .v.ok{color:var(--good)}
-.doc .stat .v.no{color:var(--bad)}
-.doc .outlink{display:inline-block;margin-top:12px;padding:8px 14px;border-radius:9px;
-background:var(--btn-accent-bg);color:var(--btn-accent-fg);border:1px solid var(--btn-accent-bd);
-font-weight:700;font-size:13px;text-decoration:none}
-.doc .instr{margin:0 0 9px}
-.doc .btns{margin-top:0;flex-wrap:wrap}
-.doc .sub{margin-top:8px;line-height:1.5}
 .modal h3{margin:0 0 6px;font-size:18px}
 .finding{border:1px solid var(--line);border-left:4px solid var(--dim);border-radius:11px;padding:14px;margin:12px 0;background:var(--panel2)}
 .finding .ft{font-weight:700;font-size:14px;margin-bottom:7px;color:var(--ink)}
@@ -1045,26 +562,16 @@ font-weight:700;font-size:13px;text-decoration:none}
   <button id="tLane" class="active" onclick="setView('lane')"><span>🗂 레인별</span><span class="cnt" id="cLane">0</span></button>
   <button id="tAuthor" onclick="setView('author')"><span>👤 사람별</span><span class="cnt" id="cAuthor">0</span></button>
   <button id="tFeedback" onclick="setView('feedback')"><span>💬 리뷰 피드백</span><span class="cnt" id="cFeedback">0</span></button>
-  <div class="grp">작업</div>
-  <button id="tWork" onclick="setView('work')"><span>🛠 이슈 보드</span><span class="cnt" id="cWork">0</span></button>
-  <button id="tEpic" onclick="setView('epic')"><span>🎯 에픽별</span><span class="cnt" id="cEpic">0</span></button>
 </nav>
 <div class="main">
 <div class="filterbar" id="filterbar"></div>
-<section class="composer" id="composer" style="display:none">
-  <textarea id="topicText" placeholder="주제를 던지면 두 엔진이 토론해서 결론만 돌려줍니다 — 이슈 없이도 됩니다 (예: 이 파이프라인의 취약점은 무엇인가)"></textarea>
-  <div class="crow">
-    <input id="topicRepo" placeholder="읽을 저장소 (선택) — 예: zigbang/ceo-client">
-    <button class="go" onclick="newTopic()">🗣 토론 시작</button>
-  </div>
-</section>
 <section class="mentions" id="mentions" style="display:none"></section>
 <div class="board" id="board"></div>
 </div>
 </div>
 <div class="ov" id="ov"><div class="modal" id="modal"></div></div>
 <script>
-const LANES=__LANES__;const WORK_LANES=__WORK_LANES__;const TOPIC_REPO=__TOPIC_REPO__;
+const LANES=__LANES__;
 // Slack 미연동 — 멘션 섹션 숨김. Slack 연결 시 true 로 바꾸면 부활.
 const SHOW_MENTIONS=false;
 // ── 테마 (시스템/라이트/다크) — 클릭 순환, localStorage 저장 ──
@@ -1104,68 +611,16 @@ const STATUS_META={
   commenting:{c:'#fbbf24',ko:'댓글작성'}, commented:{c:'#4ade80',ko:'댓글완료'},
   lgtm:{c:'#4ade80',ko:'LGTM'}, approve_blocked:{c:'#a78bfa',ko:'승인대기'},
   approving:{c:'#a78bfa',ko:'승인중'}, done:{c:'#6b7688',ko:'완료'},
-  failed:{c:'#fb7185',ko:'실패'},
-  spec:{c:'#a78bfa',ko:'설계토론'}, spec_blocked:{c:'#a78bfa',ko:'설계승인대기'}, implementing:{c:'#fbbf24',ko:'구현중'},
-  impl_verify:{c:'#fbbf24',ko:'구현검증'}, verify_blocked:{c:'#fb7185',ko:'검토필요'}, pr_blocked:{c:'#a78bfa',ko:'PR승인대기'},
-  pr_opening:{c:'#a78bfa',ko:'PR생성중'}};
+  failed:{c:'#fb7185',ko:'실패'}};
 function smeta(s){return STATUS_META[s]||{c:'#6b7688',ko:s};}
-function ago(ts){if(!ts)return '';const s=Math.max(0,Date.now()/1000-ts);
-  if(s<60)return Math.floor(s)+'초';if(s<3600)return Math.floor(s/60)+'분';
-  if(s<86400)return Math.floor(s/3600)+'시간';return Math.floor(s/86400)+'일';}
-function hhmm(ts){const d=new Date(ts*1000);
-  return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0')
-    +':'+String(d.getSeconds()).padStart(2,'0');}
 function esc(s){return (s||"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]))}
-// 엔진은 **굵게**·`코드`·```펜스```·- 목록 으로 답한다. 그대로 뿌리면 기호가 노출되고
-// 긴 설계안은 읽을 수가 없다. esc() 로 먼저 막고 우리 태그만 넣는다(XSS 안전).
-// 주의: 이 파일의 HTML 은 파이썬 문자열 리터럴이라 JS 안에서 개행 이스케이프를 쓸 수
-// 없다(모듈 로드 시 실제 개행이 되어 스크립트가 죽는다). NL 상수로 대신한다.
-const NL=String.fromCharCode(10);
-function md(t){
-  if(!t)return '';
-  let s=esc(String(t));
-  const blocks=[];
-  s=s.replace(/```[a-zA-Z0-9]*([\s\S]*?)```/g,(m,code)=>{
-    blocks.push(code.trim());   // 이스케이프(\\r·\\n)를 피한다
-    return '@@B'+(blocks.length-1)+'@@';});
-  s=s.replace(/`([^`]+?)`/g,'<code>$1</code>');
-  s=s.replace(/\*\*([^*]+?)\*\*/g,'<strong>$1</strong>');
-  const out=[]; let list=null;
-  const close=()=>{if(list){out.push('</'+list+'>');list=null;}};
-  for(const line of s.split(NL)){
-    const t2=line.trim();
-    const blk=t2.match(/^@@B(\d+)@@$/);
-    if(blk){close();out.push('<pre class="code">'+blocks[+blk[1]]+'</pre>');continue;}
-    const h=t2.match(/^#{1,6}\s+(.+)$/);
-    if(h){close();out.push('<h5>'+h[1]+'</h5>');continue;}
-    const ul=t2.match(/^[-*·]\s+(.+)$/), ol=t2.match(/^\d+[.)]\s+(.+)$/);
-    if(ul||ol){
-      const want=ul?'ul':'ol';
-      if(list&&list!==want)close();
-      if(!list){out.push('<'+want+'>');list=want;}
-      out.push('<li>'+(ul?ul[1]:ol[1])+'</li>');continue;}
-    close();
-    if(!t2)continue;
-    if(t2.startsWith('&gt;'))out.push('<blockquote>'+t2.slice(4).trim()+'</blockquote>');
-    else out.push('<p>'+t2+'</p>');
-  }
-  close();
-  return '<div class="md">'+out.join('')+'</div>';
-}
 function repoShort(r){return (r||'').split('/')[1]||r;}
 const REPO_COLORS=['#2dd4bf','#a78bfa','#fbbf24','#60a5fa','#4ade80','#fb7185'];
 function repoColor(r){let h=0;for(const ch of (r||''))h=(h*31+ch.charCodeAt(0))>>>0;return REPO_COLORS[h%REPO_COLORS.length];}
 function setRepo(r){REPO=r;renderFilter();render();}
-// 리뷰 뷰는 이슈 카드를 보지 않고, 작업 뷰는 이슈 카드만 본다. 한 보드에 섞으면
-// Triage에 PR과 이슈가 뒤엉킨다.
-// 이슈 보드(행동별)와 에픽별은 **같은 카드를 다른 축으로** 보는 두 뷰다. 스코프·
-// 새로고침·필터는 공유하므로 뷰 이름이 아니라 계열로 묻는다.
-function isWorkView(){return VIEW==='work'||VIEW==='epic';}
-function scopedData(){return isWorkView()?DATA.filter(c=>c.kind==='issue')
-                                         :DATA.filter(c=>c.kind!=='issue');}
-function viewData(){const src=scopedData();return REPO==='all'?src:src.filter(c=>c.repo===REPO);}
+function viewData(){const src=DATA;return REPO==='all'?src:src.filter(c=>c.repo===REPO);}
 function viewFeedbackData(){return REPO==='all'?FEEDBACK:FEEDBACK.filter(f=>f.repo===REPO);}
-function filterSource(){return VIEW==='feedback'?FEEDBACK:scopedData();}
+function filterSource(){return VIEW==='feedback'?FEEDBACK:DATA;}
 function normalizeRepo(){const src=filterSource();if(REPO!=='all'&&!src.some(x=>x.repo===REPO))REPO='all';}
 function renderFilter(){
   normalizeRepo();
@@ -1179,23 +634,15 @@ function renderFilter(){
     h+=`<button class="chip ${on?'on':''}" style="${onStyle}" onclick="setRepo('${r}')"><span class="rdot" style="background:${col}"></span>${esc(repoShort(r))} <b>${n}</b></button>`;});
   bar.innerHTML=h;
 }
-const VIEW_TABS=[['tLane','lane'],['tAuthor','author'],['tFeedback','feedback'],
-                ['tWork','work'],['tEpic','epic']];
+const VIEW_TABS=[['tLane','lane'],['tAuthor','author'],['tFeedback','feedback']];
 function setView(v){VIEW=v;
   for(const [id,name] of VIEW_TABS)
     document.getElementById(id).classList.toggle('active',v===name);
-  document.getElementById('refreshBtn').textContent=isWorkView()?'🔄 이슈 가져오기':'🔄 PR 가져오기';
-  // 주제 토론 카드는 에픽에 안 묶인다 — 소속을 보는 뷰에서 만들 이유가 없다.
-  document.getElementById('composer').style.display=(v==='work')?'':'none';
   renderFilter();render();}
 function renderSideCounts(){
-  const review=DATA.filter(c=>c.kind!=='issue').length;
-  const work=DATA.filter(c=>c.kind==='issue').length;
-  document.getElementById('cLane').textContent=review;
-  document.getElementById('cAuthor').textContent=review;
+  document.getElementById('cLane').textContent=DATA.length;
+  document.getElementById('cAuthor').textContent=DATA.length;
   document.getElementById('cFeedback').textContent=FEEDBACK.length;
-  document.getElementById('cWork').textContent=work;
-  document.getElementById('cEpic').textContent=work;
 }
 function forceRender(){render_();}
 async function load(){
@@ -1204,7 +651,7 @@ async function load(){
   try{FEEDBACK=await rf.json();}catch(e){FEEDBACK=[];}
   try{ENGINES=await re.json();}catch(e){}
   document.getElementById('sub').textContent=
-    (isWorkView()?scopedData().length+'개 이슈':scopedData().length+'개 카드');
+    DATA.length+'개 카드';
   renderEngStat();
   renderSideCounts();
   renderFilter();
@@ -1254,13 +701,7 @@ async function mAct(id,action){
   await fetch('/api/mention-action',{method:'POST',headers:{'Content-Type':'application/json','X-Lookout-Action':'1'},body:JSON.stringify({action,mention_id:id})});
   loadMentions();
 }
-// 5초 폴링이 카드 DOM 을 통째로 다시 그린다. 입력 중이던 textarea 가 새로 만들어져
-// 내용이 날아가므로 (1) 입력값을 DRAFTS 에 붙들고 (2) 보드 안에서 타이핑 중이면
-// 그 사이클의 보드 재렌더를 건너뛴다(포커스·캐럿 위치까지 지키려면 이게 필요하다).
-const DRAFTS={};
-function draft(el){if(el&&el.id)DRAFTS[el.id]=el.value;}
-function dval(id,fallback){return DRAFTS[id]!==undefined?DRAFTS[id]:(fallback||'');}
-function clearDraft(id){delete DRAFTS[id];}
+// 5초 폴링이 보드를 통째로 다시 그린다 — 보드 안에서 타이핑 중이면 그 사이클은 건너뛴다.
 function typingInBoard(){
   const a=document.activeElement;
   if(!a||!/^(TEXTAREA|INPUT)$/.test(a.tagName))return false;
@@ -1272,7 +713,7 @@ function render(){
   return render_();
 }
 function render_(){VIEW==='feedback'?renderFeedback():VIEW==='author'?renderByAuthor()
-    :VIEW==='epic'?renderEpics():VIEW==='work'?renderWork():renderLanes(LANES);}
+    :renderLanes(LANES);}
 function renderFeedback(){
   const list=viewFeedbackData();
   const board=document.getElementById('board');board.className='board stack';board.innerHTML='';
@@ -1294,158 +735,6 @@ function feedbackItem(f){
     <div class="acts">${open}</div>`;
   el.onclick=()=>openFeedbackModal(f);
   return el;
-}
-// 작업 보드는 칸반이 아니다. 레인 이동은 워커가 시키고 사람이 하는 일은
-// **게이트에 선 카드에 응답하는 것** 하나뿐이다 — 드래그도, 레인 간 이동도 없다.
-// 레인 10개에 카드 4장이면 가로 폭의 80%가 빈 칸이고, 스크롤 비용만 내고
-// 정보는 안 나온다. 그래서 '무슨 단계냐'가 아니라 '내가 뭘 해야 하냐'로 묶는다.
-// (리뷰 보드는 카드가 수백 장이라 레인이 실제로 채워지므로 그대로 둔다.)
-const WORK_GROUPS=[
-  {key:'gate',label:'⚠️ 내 차례',lanes:['spec_blocked','verify_blocked','pr_blocked'],
-   hint:'응답해야 다음으로 갑니다',empty:'지금 결정할 카드가 없습니다',always:true},
-  {key:'run',label:'🔄 돌아가는 중',lanes:['spec','implementing','impl_verify','pr_opening'],
-   hint:'엔진이 작업 중 — 기다리면 됩니다',empty:'돌고 있는 작업 없음',always:true},
-  {key:'wait',label:'📥 대기 (내 이슈)',lanes:['triage'],
-   hint:'여기서 작업을 시작합니다',empty:'할당된 이슈 없음',always:true},
-  {key:'end',label:'🏁 끝난 것',lanes:['done','failed'],fold:true}];
-const WORK_OPEN={};   // <details> 접힘 상태를 5초 갱신 너머로 보존
-// 티켓 진행상태 = GitHub Project 의 Status 필드. **읽기 전용**이다 — 팀 공용
-// 보드라 봇이 되돌려 쓰지 않는다. 대기 목록이 전부 같은 얼굴이던 게 문제였다:
-// 실측 12건이 Backlog(아직)·Ready dev(착수 가능)·Developing(이미 진행 중)으로
-// 갈린다. 순서는 프로젝트의 워크플로 순서가 아니라 '지금 고를 것부터'다.
-const TICKET_ORDER=['Ready dev','Developing','Acceptance Test','Ready FV',
-  'Feature Verification','Ready RT','Regression Test','Ready Deploy','Done',
-  'In requirement','Backlog','NextPatch','Next Patch'];
-function trank(s){const i=TICKET_ORDER.indexOf(s);return i<0?99:i;}
-function tcolor(s){
-  if(s==='Ready dev')return '#4ade80';
-  if(s==='Backlog'||s==='In requirement')return '#6b7688';
-  if(s==='NextPatch'||s==='Next Patch')return '#a78bfa';
-  return s?'#60a5fa':'#6b7688';
-}
-function ticketSplit(list){
-  // 폴러가 아직 안 돌아 상태가 하나도 없으면 예전처럼 한 덩어리 — 전부 '상태
-  // 미상' 아래로 밀어넣으면 없던 고장처럼 보인다.
-  if(!list.some(c=>c.ticket_status))return [['',list]];
-  const by=new Map();
-  list.forEach(c=>{const k=c.ticket_status||'';if(!by.has(k))by.set(k,[]);by.get(k).push(c);});
-  return [...by.entries()].sort((a,b)=>trank(a[0])-trank(b[0]));
-}
-function renderWork(){
-  const board=document.getElementById('board');
-  board.querySelectorAll('details.grp').forEach(d=>WORK_OPEN[d.dataset.g]=d.open);
-  const top=board.scrollTop;
-  const by={};viewData().forEach(c=>{(by[c.status]=by[c.status]||[]).push(c)});
-  board.className='board stack';board.innerHTML='';
-  for(const g of WORK_GROUPS){
-    const list=g.lanes.reduce((a,k)=>a.concat(by[k]||[]),[]);
-    if(!list.length&&!g.always)continue;
-    const head=`<span>${g.label}</span><span class="n">${list.length}</span>`
-      +(g.hint&&list.length?`<span class="ghint">${g.hint}</span>`:'');
-    let host;
-    if(g.fold){
-      host=document.createElement('details');host.className='grp sec';host.dataset.g=g.key;
-      host.open=!!WORK_OPEN[g.key];
-      host.innerHTML=`<summary><div class="ghead">${head}</div></summary>`;
-    }else{
-      host=document.createElement('div');host.className='sec g-'+g.key;
-      host.innerHTML=`<div class="ghead">${head}</div>`;
-    }
-    if(!list.length){
-      const cc=document.createElement('div');
-      cc.innerHTML=`<div class="empty">${g.empty||'—'}</div>`;
-      host.appendChild(cc);
-    }else{
-      // 대기만 가른다 — 여기가 '뭘 시작할까'를 고르는 곳이다. 나머지 묶음은
-      // Lookout 이 이미 상태를 쥐고 있어 두 축을 겹쳐 적을 이유가 없다.
-      const parts=(g.key==='wait')?ticketSplit(list):[['',list]];
-      for(const [st,rows] of parts){
-        if(parts.length>1){
-          const th=document.createElement('div');th.className='thead';
-          th.innerHTML=`<span class="pill" style="${pill(tcolor(st))}">${esc(st||'상태 미상')}</span>`
-            +`<span class="n">${rows.length}</span>`
-            +(trank(st)===0?'<span class="ghint">GitHub 기준 착수 가능</span>':'');
-          host.appendChild(th);
-        }
-        const cc=document.createElement('div');cc.className='rows';
-        rows.forEach(c=>cc.appendChild(issueRow(c)));
-        host.appendChild(cc);
-      }
-    }
-    board.appendChild(host);
-  }
-  board.scrollTop=top;
-}
-// 에픽별 뷰 — 행동별 보드와 **같은 카드를 다른 축으로** 본다. 저쪽이 "지금 뭘
-// 해야 하나"라면 이쪽은 "이 에픽이 어디까지 왔나"에 답한다. 소속은 GitHub 네이티브
-// sub-issue 관계(issue_type/parent)를 그대로 쓴다 — 우리가 추정하지 않는다.
-// 에픽이 내 보드에 없는 경우가 실측 11건 중 4건이라, 머리글은 에픽 카드가 없어도
-// 자식이 들고 온 parent 정보로 세운다. 안 그러면 그 태스크들이 전부 '소속 없음'이 된다.
-const EPIC_RANK={};WORK_GROUPS.forEach((g,i)=>g.lanes.forEach(l=>{EPIC_RANK[l]=i;}));
-function erank(c){const r=EPIC_RANK[c.status];return r===undefined?9:r;}
-function epicGroups(list){
-  const G=new Map();
-  const get=k=>{if(!G.has(k))G.set(k,{key:k,head:null,parent:null,rows:[]});return G.get(k);};
-  list.forEach(c=>{
-    if(c.issue_type==='Epic'){get('n'+c.pr).head=c;return;}   // 에픽은 머리글이지 행이 아니다
-    if(c.parent){const g=get('n'+c.parent.number);if(!g.parent)g.parent=c.parent;g.rows.push(c);return;}
-    get('none').rows.push(c);
-  });
-  const out=[...G.values()];
-  out.forEach(g=>{
-    const all=g.head?g.rows.concat([g.head]):g.rows;
-    g.gates=all.filter(c=>GATES.includes(c.status)).length;
-    g.rank=Math.min(...all.map(erank));
-    g.num=g.head?g.head.pr:(g.parent?g.parent.number:0);
-    // 에픽 안에서도 순서는 행동 우선 — 게이트·진행 중이 위로 온다(EPIC_RANK).
-    g.rows.sort((a,b)=>erank(a)-erank(b)||b.updated_at-a.updated_at);
-  });
-  // '소속 없음'은 항상 맨 아래. 나머지는 내 차례가 걸린 에픽부터, 그다음 최신순.
-  out.sort((a,b)=>(a.key==='none')-(b.key==='none')||a.rank-b.rank||b.num-a.num);
-  return out;
-}
-function epicHead(g){
-  if(g.key==='none')
-    return '<div class="ehead"><span class="etag">📄</span>'
-      +'<span class="etitle">소속 없음</span>'
-      +'<span class="n">'+g.rows.length+'</span>'
-      +'<span class="ghint">에픽에 안 묶인 이슈 · 주제 토론</span></div>';
-  const e=g.head,p=g.parent;
-  const disp=e?e.display:p.display, title=(e?e.title:p.title)||'(제목없음)';
-  const sub=(e&&e.sub)||{};
-  const bits=[];
-  if(e)bits.push(`<span class="statuspill" style="${pill(smeta(e.status).c)}">${smeta(e.status).ko}</span>`);
-  // GitHub 진행도와 보드 건수는 **다른 수**다(내게 할당 안 된 자식도 세므로) — 출처를 붙여 적는다.
-  if(sub.total)bits.push(`<span class="pill" title="GitHub 기준 하위 이슈 진행 — 내게 할당되지 않은 것도 포함">GitHub ${sub.done||0}/${sub.total}</span>`);
-  if(g.gates)bits.push(`<span class="pill" style="${pill('#fbbf24')}">⚠️ 내 차례 ${g.gates}</span>`);
-  if(!e)bits.push(`<span class="pill" title="에픽 자체가 내게 할당되지 않아 카드가 없습니다">보드 밖</span>`
-    +(p.url?`<a class="open" href="${esc(p.url)}" target="_blank" title="GitHub에서 열기">↗</a>`:''));
-  return `<div class="ehead${e?' go':''}"><span class="etag">🎯</span>`
-    +`<span class="enum">${esc(disp)}</span><span class="etitle">${esc(title)}</span>`
-    +`<span class="n" title="보드에 올라온 소속 태스크">${g.rows.length}</span>`
-    +`<span class="ebits">${bits.join('')}</span></div>`;
-}
-function renderEpics(){
-  const board=document.getElementById('board');
-  const top=board.scrollTop;
-  board.className='board stack';board.innerHTML='';
-  const groups=epicGroups(viewData());
-  if(!groups.length){
-    const sec=document.createElement('div');sec.className='sec';
-    sec.innerHTML='<div class="empty">이슈 카드가 없습니다</div>';
-    board.appendChild(sec);return;
-  }
-  for(const g of groups){
-    const sec=document.createElement('div');
-    sec.className='sec esec'+(g.gates?' hasgate':'');
-    sec.innerHTML=epicHead(g);
-    if(g.head)sec.querySelector('.ehead').onclick=()=>openIssueModal(g.head);
-    const cc=document.createElement('div');cc.className=g.rows.length?'rows':'';
-    if(!g.rows.length)cc.innerHTML='<div class="empty">보드에 올라온 하위 태스크 없음</div>';
-    g.rows.forEach(c=>cc.appendChild(issueRow(c)));
-    sec.appendChild(cc);board.appendChild(sec);
-  }
-  board.scrollTop=top;
 }
 function renderLanes(lanes){
   lanes=lanes||LANES;
@@ -1479,50 +768,7 @@ function renderByAuthor(){
     sec.appendChild(cc);board.appendChild(sec);
   });
 }
-// 보드는 **훑는 곳**이고 모달은 **결정하는 곳**이다. 카드마다 입력칸과 버튼을
-// 달면 항목 4개에 화면이 꽉 차고, 정작 결정에 필요한 근거(블로커·합의문)는
-// 카드에 안 들어가 어차피 모달을 열어야 했다. 행은 한 줄로 상태만 말한다.
-const GATES=['spec_blocked','verify_blocked','pr_blocked','failed'];
-function issueRow(c){
-  const el=document.createElement('div');
-  const gate=GATES.includes(c.status);
-  el.className='irow'+(gate?' gate':'');
-  const sm=smeta(c.status), rc=repoColor(c.repo);
-  const RUNNING=['spec','implementing','impl_verify','pr_opening'];
-  const v=c.verify||{}, ag=c.agreement||{};
-  const P=[];
-  P.push(`<span class="statuspill" style="${pill(sm.c)}">${sm.ko}</span>`);
-  // GitHub 이 아는 진행상태 — Lookout 레인과 **다른 축**이라 나란히 붙인다.
-  if(c.ticket_status)P.push(`<span class="pill" style="${pill(tcolor(c.ticket_status))}"`
-    +` title="${esc(c.ticket_board||'GitHub Project')} 의 Status — Lookout 은 읽기만 합니다">`
-    +`🎫 ${esc(c.ticket_status)}</span>`);
-  if(c.repo&&c.repo!==TOPIC_REPO)
-    P.push(`<span class="repopill" style="${pill(rc)}"><span class="rdot" style="background:${rc}"></span>${esc(repoShort(c.repo))}</span>`);
-  if(c.status!=='triage'&&c.engine)P.push(`<span class="pill">${esc(c.engine)}</span>`);
-  if(c.mode)P.push(`<span class="pill">${c.mode==='debate'?'설계부터':'바로구현'}</span>`);
-  if(v.engine)P.push(`<span class="pill" style="${pill(v.approved?'#4ade80':'#fb7185')}">🧾 ${esc(v.engine)} ${v.approved?'통과':'블로커 '+((v.blocking||[]).length)}</span>`);
-  if(c.verify_override)P.push(`<span class="pill" style="${pill('#fbbf24')}">⚠️ 미통과 감수</span>`);
-  if(ag.rounds)P.push(`<span class="pill" style="${pill(ag.blocked?'#fb7185':ag.settled?'#4ade80':'#fbbf24')}">🗣 ${ag.rounds}R ${ag.blocked?'결렬':ag.settled?'합의':'미합의'}</span>`);
-  if(c.rounds>1)P.push(`<span class="pill">구현 ${c.rounds}R</span>`);
-  if((c.changed||[]).length)P.push(`<span class="pill">${c.changed.length}개 파일</span>`);
-  if(c.error)P.push(`<span class="pill" style="${pill('#fb7185')}" title="${esc(c.error)}">⚠️ ${esc(c.error.slice(0,40))}</span>`);
-  const right=(RUNNING.includes(c.status)?`<span title="이 상태로 머문 시간">⏱ ${ago(c.updated_at)}</span>`
-              :`<span>${ago(c.updated_at)} 전</span>`)
-    +`<span class="igo">${gate?'확인 →':'→'}</span>`
-    +((c.status==='triage'||c.status==='failed')
-      ?`<button class="xbtn" title="목록에서 제외" onclick="ignoreCard(event,${c.id})">✕</button>`:'');
-  el.innerHTML=`<span class="idot" style="background:${sm.c}"></span>
-    <div class="imain">
-      <div class="ihead"><span class="inum">${esc(c.display)}</span>
-        <span class="ititle">${esc(c.title)||'(제목없음)'}</span></div>
-      <div class="imeta">${P.join('')}</div>
-    </div>
-    <div class="iright">${right}</div>`;
-  el.onclick=()=>openIssueModal(c);
-  return el;
-}
 function tile(c){
-  if(c.kind==='issue')return issueRow(c);
   const el=document.createElement('div');el.className='card';
   const dots=c.findings.map(f=>`<span class="dot ${f.severity||'low'}"></span>`).join('');
   let btns='', xbtn='';
@@ -1598,176 +844,6 @@ function openModal(c){
   m.className='modal';
   m.innerHTML=html;document.getElementById('ov').classList.add('show');
 }
-function openIssueModal(c){
-  // 구성 원칙: 위에는 "지금 결정에 필요한 것"만, 나머지는 접어 둔다.
-  // 긴 본문은 md() 로 렌더한다 — 엔진이 마크다운으로 답하므로 원문 그대로는 못 읽는다.
-  const m=document.getElementById('modal'), sm=smeta(c.status);
-  const AG=c.agreement||{}, IM=c.impl||{}, V=c.verify||{};
-  const sec=(title,body,open)=>body?`<details class="sec"${open?' open':''}>`
-      +`<summary><span>${title}</span></summary><div class="body">${body}</div></details>`:'';
-
-  const head=`<span class="close" onclick="closeM()">✕ 닫기</span>
-    <h3><span class="num">${esc(c.display)}</span>${esc(c.title)||'(제목없음)'}</h3>
-    <div class="msub">${esc(c.repo===TOPIC_REPO?'주제 토론':c.repo)}${(c.assignees||[]).length?' · '+esc((c.assignees||[]).join(', ')):''}
-      <span class="statuspill" style="${pill(sm.c)}">${sm.ko}</span>
-      ${c.mode?`<span class="pill">${c.mode==='debate'?'설계부터':c.mode==='debate_only'?'주제 토론':'바로 구현'}</span>`:''}
-      ${c.engine&&c.status!=='triage'?`<span class="pill">${esc(c.engine)}</span>`:''}
-      ${c.url?`<a href="${esc(c.url)}" target="_blank">이슈 ↗</a>`:''}
-      ${c.pr_url?`<a href="${esc(c.pr_url)}" target="_blank">PR ↗</a>`:''}</div>`;
-
-  // ── 1. 지금 사람이 봐야 할 것 ─────────────────────────────
-  // 왜 이 카드가 내 차례인지를 **한 줄로** 먼저 말한다. 근거는 그 아래다.
-  const WHY={
-    verify_blocked:['⚖️','엔진끼리 합의하지 못했습니다 — 아래 블로커를 직접 판단하세요',''],
-    spec_blocked:['🧑‍⚖️','설계가 나왔습니다 — 구현을 시작할지 결정하세요',''],
-    pr_blocked:['🔒','검증을 통과했습니다 — PR 로 올릴지 결정하세요',''],
-    failed:['⚠️','실패한 카드입니다 — 사유를 보고 재시도할지 정하세요','bad'],
-    triage:['📥','아직 시작하지 않은 이슈입니다 — 지시를 적고 방식을 고르세요',''],
-  }[c.status];
-  let h='';
-  if(WHY)h+=`<div class="why ${WHY[2]}"><span>${WHY[0]}</span><span>${WHY[1]}</span></div>`;
-
-  // ── 끝난 카드: 결정이 아니라 **결과**를 먼저 말한다 ─────────
-  // 전에는 어떻게 끝났는지가 어디에도 없고, 접힌 섹션 7개를 열어 봐야
-  // PR 이 나갔는지 알 수 있었다.
-  if(c.status==='done'){
-    const done=c.pr_url?['🏁',`PR 로 나갔습니다 — draft 이므로 <b>ready 전환은 직접</b> 하셔야 합니다`,'']
-      :c.pr_dryrun?['🧪','dry-run 이라 실제 PR 은 올라가지 않았습니다','flat']
-      :c.debate_only?['🗣','주제 토론으로 종료했습니다 — 구현하지 않았습니다','flat']
-      :['🏁','완료 처리됐습니다','flat'];
-    h+=`<div class="done ${done[2]}"><span>${done[0]}</span><span>${done[1]}</span></div>`;
-    const T=c.timeline||[];
-    const span=T.length>1?ago(Math.min(...T.map(e=>e.ts))):'';
-    const st=[];
-    if(c.rounds)st.push(['구현',`${c.rounds}라운드`,'']);
-    if(V.engine)st.push(['교차 검증',`${V.engine} ${V.approved?'통과':'미통과'}`,V.approved?'ok':'no']);
-    if((c.changed||[]).length)st.push(['변경',`${c.changed.length}개 파일`,'']);
-    if((c.debate||[]).length)st.push(['설계 토론',`${c.debate.length}턴`,'']);
-    if(span)st.push(['첫 기록',`${span} 전`,'']);
-    if(st.length)
-      h+=`<div class="stats">`+st.map(x=>`<div class="stat"><div class="k">${x[0]}</div>`
-        +`<div class="v ${x[2]}">${esc(x[1])}</div></div>`).join('')+`</div>`;
-    if(c.pr_url)h+=`<a class="outlink" href="${esc(c.pr_url)}" target="_blank">PR 열기 ↗</a>`;
-  }
-  if(c.verify_override)
-    h+=`<div class="why bad"><span>⚠️</span><span>검증 미통과를 감수하고 넘어온 카드입니다 — 블로커가 남아 있습니다</span></div>`;
-  if(c.error)h+=`<div class="lbl">실패 사유</div><div class="errline">${esc(c.error)}</div>`;
-
-  const blk=(V.blocking||[]).map(b=>`<div class="finding" style="border-left-color:${stripe('#fb7185')}">
-      <div class="ft">${esc(b.file||'')}${b.line?(':'+esc(b.line)):''}</div>
-      ${md(b.problem)}${b.fix?`<div class="lbl2">고치는 방향</div>${md(b.fix)}`:''}</div>`).join('');
-  if(V.engine)
-    h+=`<div class="lbl">교차 검증 · ${esc(V.engine)}${V.fallback?' (동일 엔진 폴백)':''} · `
-      +`${V.approved?'통과':'미통과 '+(V.blocking||[]).length+'건'}</div>`
-      +(V.summary?md(V.summary):'')+blk
-      +((V.out_of_scope||[]).length?`<div class="lbl2">스코프 밖 변경</div>${md((V.out_of_scope||[]).map(x=>'- '+x).join(NL))}`:'');
-
-  // 설계 게이트에서만 "결정하라"가 성립한다 — 그 뒤 레인엔 누를 버튼이 없으므로
-  // 같은 문구를 띄우면 사람에게 할 수 없는 일을 요구하게 된다.
-  if((AG.unresolved||[]).length)
-    h+=`<div class="lbl">${c.status==='spec_blocked'
-        ?`미합의 ${AG.unresolved.length}건 — 승인 전에 결정해야 합니다`
-        :c.status==='done'
-        ?`후속 확인 ${AG.unresolved.length}건 — PR 본문에도 체크박스로 들어갔습니다`
-        :`설계 단계 미합의 ${AG.unresolved.length}건 — PR 본문에 함께 남습니다`}</div>`
-      +md(AG.unresolved.map(x=>'- '+x).join(NL));
-
-  // ── 2. 조작부 — 입력칸과 버튼은 **여기** 하나뿐이다 ─────────
-  // 보드 행에도 두면 id 가 겹치고(specText 가 엉뚱한 칸을 읽는다) 무엇보다
-  // 근거를 읽기 전에 누르게 된다.
-  const INPUT={
-    triage:['ins','추가 지시 (선택) — 이 이슈를 어떻게 처리할지',c.instruction],
-    spec_blocked:['spec','합의에 대한 피드백 (선택) — 승인 시 수정 지시로, 다시 토론 시 방향 지시로 쓰입니다',''],
-    verify_blocked:['spec',"선택 — 수정 요청이면 구현자에게(비우면 남은 블로커 그대로), 다시 검증이면 검증자에게 '이 관점으로 보라'로 갑니다",''],
-    pr_blocked:['spec','수정 요청 (선택) — 비워두면 검증이 남긴 지적을 그대로 넘깁니다',''],
-  }[c.status];
-  let f='';
-  if(INPUT)
-    f+=`<div class="instr"><textarea id="${INPUT[0]}${c.id}" placeholder="${esc(INPUT[1])}"
-        oninput="draft(this)">${esc(dval(INPUT[0]+c.id,INPUT[2]||''))}</textarea>`
-      +(c.status==='spec_blocked'&&c.debate_only
-        ?`<input id="trepo${c.id}" placeholder="구현할 저장소 (예: zigbang/ceo-client)"
-            value="${esc(dval('trepo'+c.id,c.target_repo))}" oninput="draft(this)">`:'')
-      +`</div>`;
-  if(c.status==='triage')
-    f+=`<div class="btns"><button class="go" onclick="startWork(event,${c.id},'implement')">🛠 바로 구현</button>`
-      +`<button onclick="startWork(event,${c.id},'debate')">🗣 설계부터</button></div>`;
-  if(c.status==='failed')
-    f+=`<div class="btns"><button class="go" onclick="act(event,'retry',${c.id})">↻ 재시도</button></div>`;
-  if(c.status==='spec_blocked')
-    f+=`<div class="btns">${c.debate_only
-      ?`<button class="go" onclick="implementTopic(event,${c.id})">🛠 이 결론으로 구현</button><button onclick="approveSpec(event,${c.id})">✅ 완료로 닫기</button>`
-      :`<button class="go" onclick="approveSpec(event,${c.id})">${AG.settled?'✅ 설계 승인 — 구현 시작':'⚠️ 미합의인데 승인'}</button>`}`
-      +`<button onclick="resumeDebate(event,${c.id})">🔁 다시 토론</button>`
-      +`<button onclick="rejectSpec(event,${c.id})">↩︎ 반려</button></div>`;
-  if(c.status==='verify_blocked')
-    f+=`<div class="btns"><button class="go" onclick="requestChanges(event,${c.id})">↩︎ 수정 요청</button>`
-      +`<button onclick="rerunVerify(event,${c.id})">🔁 다시 검증</button>`
-      +`<button onclick="verifyOverride(event,${c.id})">⚠️ 그래도 PR 로</button></div>`
-      +`<div class="sub">수정 요청·다시 검증 모두 위 입력칸의 내용을 넘깁니다 — 수정 요청은 구현자에게(비우면 위 블로커가 그대로), 다시 검증은 검증자에게 "이 관점으로 보라"로 갑니다.</div>`;
-  if(c.status==='pr_blocked')
-    f+=`<div class="btns"><button class="go" onclick="approvePr(event,${c.id})">${c.verify_override?'⚠️ 미통과인데 PR 올리기':'🚀 PR 올리기 승인'}</button>`
-      +`<button onclick="requestChanges(event,${c.id})">↩︎ 수정 요청</button></div>`;
-
-  // ── 3. 접어 두는 상세 ─────────────────────────────────────
-  const implBody=(IM.summary?md(IM.summary):'')
-    +(IM.verification?`<div class="lbl2">검증 실행</div>${md(IM.verification)}`:'')
-    +((IM.open_questions||[]).length?`<div class="lbl2">남은 결정</div>${md(IM.open_questions.map(x=>'- '+x).join(NL))}`:'')
-    +(IM.risk?`<div class="lbl2">위험</div>${md(IM.risk)}`:'');
-  h+=sec(`🛠 구현 요약${IM.done===false?' · 부분 구현':''}`, implBody, true);
-
-  const agWarn=(AG.rounds&&(AG.settled===null||AG.settled===undefined))
-    ?`<div class="errline warn">합의 여부 미기록(구버전 카드) — 합의된 것인지 판단할 수 없습니다. 토론 기록을 직접 읽으세요.</div>`
-    :(AG.rounds&&AG.settled===false
-      ?`<div class="errline warn">양쪽이 AGREE 로 끝나지 않았습니다 — 아래는 마지막 제안자 안이고 반대신문이 남아 있습니다.</div>`:'');
-  h+=sec(`📄 합의된 설계${AG.rounds?` · ${AG.rounds}라운드`:''}${AG.settled===false?' · 미합의':''}`,
-         AG.design?agWarn+md(AG.design):'', c.status==='spec_blocked');
-
-  if((c.debate||[]).length){
-    const turns=c.debate.map(t=>{
-      if(t.role==='operator')return `<div class="finding" style="border-left-color:${stripe('#2dd4bf')}">
-        <div class="ft">🧑 운영자 개입</div>${md(t.claim)}</div>`;
-      const col=t.role==='proposer'?'#e19267':'#8faedc';
-      return `<div class="finding" style="border-left-color:${stripe(col)}">
-        <div class="ft">r${t.round} · ${t.role==='proposer'?'제안':'반대신문'}(${esc(t.engine||'')}) · ${esc(t.verdict||'')}</div>
-        ${md(t.claim)}
-        ${(t.evidence||[]).length?`<div class="lbl2">근거</div><div class="pre">${esc((t.evidence||[]).join(', '))}</div>`:''}
-        ${t.proposal?`<div class="lbl2">안</div>${md(t.proposal)}`:''}</div>`;}).join('');
-    h+=sec(`🗣 토론 기록 · ${c.debate.length}턴`, turns);
-  }
-
-  h+=sec(`📝 지시·피드백`,
-    (c.instruction?`<div class="lbl2">운영자 지시</div>${md(c.instruction)}`:'')
-    +(c.spec_amendment?`<div class="lbl2">설계 수정 지시</div>${md(c.spec_amendment)}`:'')
-    +(c.feedback?`<div class="lbl2">구현자에게 넘어간 지적</div>${md(c.feedback)}`:''));
-
-  h+=sec(`📁 변경 파일 · ${(c.changed||[]).length}개`,
-    (c.changed||[]).length?`<div class="pre">${(c.changed||[]).map(f=>`<div>${esc(f)}</div>`).join('')}</div>`:'');
-
-  if(c.branch&&c.parent_repo_path){
-    const name=c.branch.split('/').pop();
-    h+=sec('💻 직접 돌려보기',
-      `<div class="pre"><div>대상 <code>${esc(c.target_repo||'')}</code> · 브랜치 <code>${esc(c.branch)}</code>`
-      +`${c.commit?` · 커밋 <code>${esc(c.commit)}</code>`:''}</div></div>`
-      +`<div class="lbl2">내 워크트리 (권장 — orca)</div>`
-      +`<div class="pre"><div><code>orca worktree create --repo path:${esc(c.parent_repo_path)} --name ${esc(name)} --setup run</code></div>`
-      +`<div class="tdet">봇 워크트리(<code>${esc(c.worktree||'-')}</code>)는 다른 카드가 시작하면 브랜치가 갈립니다</div></div>`);
-  }
-
-  if((c.timeline||[]).length){
-    const rows=c.timeline.map(e=>`<div class="tlrow"><code>${hhmm(e.ts)}</code>`
-      +`<span class="tlab">${esc(e.label)}</span><span class="tdet">${esc(e.detail||'')}</span></div>`).join('');
-    h+=sec(`⏱ 진행 기록 · ${c.timeline.length}건`, `<div class="tl">${rows}</div>`);
-  }
-  if(c.pr_dryrun&&!c.pr_url&&c.status!=='done')
-    h+=`<div class="sub" style="margin-top:10px">🧪 dry_run_pr=true — 실제 PR 은 올라가지 않았습니다</div>`;
-
-  m.className='modal doc';
-  m.innerHTML=`<div class="mhead">${head}</div><div class="mbody">${h}</div>`
-    +(f?`<div class="mfoot">${f}</div>`:'');
-  m.querySelector('.mbody').scrollTop=0;
-  document.getElementById('ov').classList.add('show');
-}
 function openFeedbackModal(f){
   const m=document.getElementById('modal');const rc=repoColor(f.repo);
   let html=`<span class="close" onclick="closeM()">✕ 닫기</span>
@@ -1784,7 +860,7 @@ function openFeedbackModal(f){
 }
 function closeM(){document.getElementById('ov').classList.remove('show')}
 document.getElementById('ov').onclick=e=>{if(e.target.id==='ov')closeM()};
-const ACT_MSG={approve_spec:'설계 승인 — 구현을 시작합니다 ✅',reject_spec:'설계 반려 — 대기로 되돌렸습니다',start:'리뷰 시작 — 곧 분석을 시작합니다 ⏳',rereview:'재리뷰 시작 — 곧 분석을 시작합니다 🔄',unblock:'승인 진행 중 🔓',ignore:'목록에서 제외됨',stop:'리뷰 중지됨 🛑'};
+const ACT_MSG={start:'리뷰 시작 — 곧 분석을 시작합니다 ⏳',rereview:'재리뷰 시작 — 곧 분석을 시작합니다 🔄',unblock:'승인 진행 중 🔓',ignore:'목록에서 제외됨',stop:'리뷰 중지됨 🛑'};
 async function act(e,action,id,engine){e.stopPropagation();
   showToast(ACT_MSG[action]||'처리됨', action!=='ignore');
   let j={};
@@ -1799,90 +875,6 @@ function showToast(msg,spin){
   t.classList.add('show');clearTimeout(window._tt);
   window._tt=setTimeout(()=>t.classList.remove('show'),2600);
 }
-async function startWork(e,id,mode){e.stopPropagation();
-  const ta=document.getElementById('ins'+id);
-  const text=ta?ta.value:'';
-  showToast(mode==='debate'?'설계 토론 시작 🗣':'구현 시작 🛠',true);
-  const send=(body)=>fetch('/api/action',{method:'POST',
-    headers:{'Content-Type':'application/json','X-Lookout-Action':'1'},
-    body:JSON.stringify(body)}).then(r=>r.json()).catch(()=>({ok:false}));
-  // 지시를 먼저 저장한다 — 시작이 먼저 들어가면 워커가 지시 없는 seed를 읽을 수 있다
-  if(text.trim()&&!(await send({action:'save_instruction',card_id:id,text})).ok){
-    showToast('지시 저장 실패 — 시작하지 않았습니다',false);load();return;}
-  const j=await send({action:mode==='debate'?'start_debate':'start_impl',card_id:id,engine:'claude'});
-  if(j.ok===false)showToast('시작할 수 없습니다 — 엔진 상태를 확인하세요',false);
-  else clearDraft('ins'+id);
-  load();}
-function specText(id){const t=document.getElementById('spec'+id);return t?t.value.trim():'';}
-async function sendAction(body){
-  return fetch('/api/action',{method:'POST',
-    headers:{'Content-Type':'application/json','X-Lookout-Action':'1'},
-    body:JSON.stringify(body)}).then(r=>r.json()).catch(()=>({ok:false}));}
-async function approveSpec(e,id){e.stopPropagation();
-  const t=specText(id);
-  if(!confirm(t?'이 수정 지시를 얹어 구현을 시작할까요? — '+t:'합의된 설계 그대로 구현을 시작할까요?'))return;
-  showToast(t?'설계 승인(수정 지시 포함) ✅':'설계 승인 — 구현을 시작합니다 ✅',true);
-  const j=await sendAction({action:'approve_spec',card_id:id,text:t});
-  if(j.ok===false)showToast('승인할 수 없습니다',false);
-  else clearDraft('spec'+id);
-  load();}
-async function implementTopic(e,id){e.stopPropagation();
-  const ri=document.getElementById('trepo'+id), repo=ri?ri.value.trim():'';
-  if(!repo){showToast('구현할 저장소를 입력하세요 (config 의 impl_repo_paths 에 있는 것)',false);return;}
-  const t=specText(id);
-  if(!confirm('이 결론으로 '+repo+' 에서 구현을 시작할까요?'+(t?' 추가 지시: '+t:'')))return;
-  showToast('구현 시작 🛠',true);
-  const j=await sendAction({action:'implement_topic',card_id:id,repo,text:t});
-  if(j.ok===false)showToast('시작할 수 없습니다 — 저장소가 impl_repo_paths 에 있는지 확인하세요',false);
-  else {clearDraft('spec'+id);clearDraft('trepo'+id);}
-  load();}
-async function resumeDebate(e,id){e.stopPropagation();
-  const t=specText(id);
-  if(!t){showToast('피드백을 입력해야 다시 토론할 수 있습니다',false);return;}
-  if(!confirm('이 피드백을 넣고 토론을 재개할까요? — '+t))return;
-  showToast('토론 재개 🔁',true);
-  const j=await sendAction({action:'resume_debate',card_id:id,text:t});
-  if(j.ok===false)showToast('재개할 수 없습니다',false);
-  else {clearDraft('spec'+id);}
-  load();}
-function rejectSpec(e,id){e.stopPropagation();
-  if(confirm('설계를 반려하고 대기로 되돌릴까요? 토론 기록은 보관됩니다.'))act(e,'reject_spec',id);}
-async function rerunVerify(e,id){e.stopPropagation();
-  const t=specText(id);
-  if(!confirm(t?'이 관점으로 같은 커밋을 다시 검증할까요? — '+t
-               :'같은 커밋을 다시 검증할까요? (구현은 바뀌지 않고 검증만 재실행합니다)'))return;
-  showToast(t?'다시 검증 🔁 관점 전달':'다시 검증 🔁',true);
-  const j=await sendAction({action:'rerun_verify',card_id:id,text:t});
-  if(j.ok===false)showToast('재검증할 수 없습니다',false);
-  else clearDraft('spec'+id);
-  load();}
-async function verifyOverride(e,id){e.stopPropagation();
-  if(!confirm('검증이 통과하지 못한 상태 그대로 PR 승인 단계로 넘길까요? 블로커는 PR 본문에 남습니다.'))return;
-  const j=await sendAction({action:'verify_override',card_id:id});
-  if(j.ok===false)showToast('넘길 수 없습니다',false);
-  load();}
-async function requestChanges(e,id){e.stopPropagation();
-  const t=specText(id);
-  if(!confirm(t?'이 지적을 넘겨 구현 단계로 되돌릴까요? — '+t
-               :'검증이 남긴 지적을 그대로 넘겨 구현 단계로 되돌릴까요?'))return;
-  showToast('수정 요청 ↩︎ 구현으로 되돌립니다',true);
-  const j=await sendAction({action:'request_changes',card_id:id,text:t});
-  if(j.ok===false)showToast('되돌릴 수 없습니다',false);
-  else clearDraft('spec'+id);
-  load();}
-function approvePr(e,id){e.stopPropagation();
-  if(confirm('이 브랜치를 push하고 draft PR을 올릴까요? (ready 전환은 직접 하셔야 합니다)'))act(e,'unblock',id);}
-async function newTopic(){
-  const ta=document.getElementById('topicText'), ri=document.getElementById('topicRepo');
-  const text=ta.value.trim();
-  if(!text){showToast('주제를 입력하세요',false);return;}
-  showToast('토론 시작 🗣',true);
-  const r=await fetch('/api/new-topic',{method:'POST',
-    headers:{'Content-Type':'application/json','X-Lookout-Action':'1'},
-    body:JSON.stringify({text,repo:ri.value.trim()})}).then(x=>x.json()).catch(()=>({ok:false}));
-  if(r.ok){ta.value='';showToast(r.display+' 토론 시작 🗣',true);}
-  else showToast('시작할 수 없습니다 — '+(r.reason||''),false);
-  load();}
 function stopReview(e,id){e.stopPropagation();
   if(confirm('이 리뷰를 강제 중지할까요? (진행 중인 분석을 종료하고 목록에서 제외)'))act(e,'stop',id);}
 function reReview(e,id){e.stopPropagation();
@@ -1901,7 +893,7 @@ async function refresh(){
   try{
     const r=await fetch('/api/refresh',{method:'POST',
       headers:{'Content-Type':'application/json','X-Lookout-Action':'1'},
-      body:JSON.stringify({scope:isWorkView()?'work':'review'})});const j=await r.json();
+      body:'{}'});const j=await r.json();
     await load();
     b.textContent=j.added>0?`+${j.added}건 추가`:'최신 상태';
   }catch(e){b.textContent='실패';}
@@ -1926,9 +918,7 @@ class Handler(BaseHTTPRequestHandler):
         path = parsed.path
         params = parse_qs(parsed.query)
         if path == "/" or path.startswith("/index"):
-            html = (HTML.replace("__LANES__", json.dumps(LANES, ensure_ascii=False))
-                        .replace("__WORK_LANES__", json.dumps(WORK_LANES, ensure_ascii=False))
-                        .replace("__TOPIC_REPO__", json.dumps(TOPIC_REPO)))
+            html = HTML.replace("__LANES__", json.dumps(LANES, ensure_ascii=False))
             self._send(200, html, "text/html; charset=utf-8")
         elif path == "/api/board":
             self._send(200, json.dumps(build_board(), ensure_ascii=False))
@@ -1968,16 +958,11 @@ class Handler(BaseHTTPRequestHandler):
         n = int(self.headers.get("Content-Length", 0))
         data = json.loads(self.rfile.read(n) or "{}")
         if self.path == "/api/refresh":
-            self._send(200, json.dumps(refresh_poll(data.get("scope", "review"))))
-            return
-        if self.path == "/api/new-topic":
-            self._send(200, json.dumps(create_topic(data.get("text", ""),
-                                                    data.get("repo", ""))))
+            self._send(200, json.dumps(refresh_poll()))
             return
         if self.path == "/api/action":
             ok = do_action(data.get("action"), int(data.get("card_id", 0)),
-                           data.get("engine", "claude"), data.get("text"),
-                           data.get("repo"))
+                           data.get("engine", "claude"))
         elif self.path == "/api/finding-action":
             ok = do_finding_action(data.get("action"), int(data.get("finding_id", 0)))
         elif self.path == "/api/mention-action":

@@ -1,17 +1,16 @@
-# 👁 Lookout — 개인용 PR 리뷰 · 이슈 작업 자동화
+# 👁 Lookout — 개인용 PR 리뷰 자동화
 
-**개인용 macOS 도구.** 두 가지 일을 한다.
+**개인용 macOS 도구.** watch한 작성자의 PR을 Claude/Codex가 읽고 → **한국어 댓글 게시** → 사람이 최종 승인.
 
-1. **PR 리뷰** — watch한 작성자의 PR을 Claude/Codex가 읽고 → **한국어 댓글 게시** → 사람이 최종 승인
-2. **이슈 작업** — 나에게 할당된 GitHub 이슈를 두 엔진이 **설계 토론 → 구현 → 교차 검증** → 사람이 승인하면 **draft PR**
+댓글·승인은 전부 **본인 GitHub 계정**으로 나갑니다 (1인 1인스턴스, self-host).
+바깥으로 나가는 행동 중 approve 에는 **사람 게이트**가 있습니다.
 
-댓글·승인·PR은 전부 **본인 GitHub 계정**으로 나갑니다 (1인 1인스턴스, self-host).
-바깥으로 나가는 모든 행동(approve·PR)에는 **사람 게이트**가 있습니다.
+> 이슈 작업(설계 토론·주제 토론·구현·draft PR) 기능은 걷어냈습니다 — headless 엔진으로 열린 작업을 시키는 구조가 의도대로 돌지 않아 처음부터 다시 설계합니다.
 
 ## 사전 준비 (macOS)
 - `gh` 로그인 — `gh auth login`
 - `claude` 그리고/또는 `codex` CLI 로그인
-  (리뷰는 한쪽만 있어도 되지만, **설계 토론·교차 검증은 두 엔진이 다 있어야** 제 값을 합니다 — 반대편이 없으면 같은 엔진으로 내려가고 그 사실이 카드에 남습니다)
+  (한쪽만 있어도 됩니다)
 - `python3`, `git`, Xcode Command Line Tools (`xcode-select --install` — 앱 빌드용)
 
 ## 설치 (한 줄)
@@ -19,8 +18,7 @@
 git clone https://github.com/Jinwoong-Hwang/lookout ~/lookout && cd ~/lookout && ./setup.sh
 ```
 `setup.sh`가 **설정(리뷰할 repo·추적 작성자를 물어봄) → 앱 빌드 → launchd 등록**까지 한 번에 합니다.
-> 설정은 나중에 `config.json`에서 바꾼 뒤 `./install.sh`로 반영. 처음엔 `dry_run_comments` / `dry_run_approve` / `dry_run_pr` 를 `true`(미게시 미리보기)로 두고 확인 후 false 권장.
-> 이슈 작업(2번)은 `setup.sh`가 묻지 않습니다 — `config.example.json`의 `issue_repos`·`impl_repo_paths`·`impl_target_map`이 플레이스홀더(`your-org/…`)라, 본인 값으로 바꾸기 전까지는 폴러가 에러 로그만 남깁니다. 안 쓸 거면 `issue_repos`를 `[]`로 비우세요(아래 [설정](#설정-configjson)).
+> 설정은 나중에 `config.json`에서 바꾼 뒤 `./install.sh`로 반영. 처음엔 `dry_run_comments` / `dry_run_approve` 를 `true`(미게시 미리보기)로 두고 확인 후 false 권장.
 
 ## 화면
 **Lookout 앱**(메뉴바 👁) → 대시보드 창(`127.0.0.1:8788`). 왼쪽 사이드 메뉴로 뷰를 바꿉니다.
@@ -30,13 +28,8 @@ git clone https://github.com/Jinwoong-Hwang/lookout ~/lookout && cd ~/lookout &&
 | 🗂 **레인별** | PR 리뷰 카드를 단계(Triage→리뷰→검증→댓글→승인→완료)별로 |
 | 👤 **사람별** | 같은 카드를 작성자별로 |
 | 💬 **리뷰 피드백** | 게시한 댓글에 달린 반응(👍👎💬) 스냅샷 — 리뷰가 먹혔는지 확인 |
-| 🛠 **이슈 보드** | 작업 카드. 단계가 아니라 **⚠️ 내 차례 / 🔄 돌아가는 중 / 📥 대기 / 🏁 끝난 것** 네 묶음 |
-| 🎯 **에픽별** | 같은 작업 카드를 **에픽 소속**으로. 에픽이 머리글, 그 아래가 하위 태스크 |
 
-> 이슈 보드가 단계별 컬럼이 아닌 이유: 레인 이동은 워커가 시키고 사람이 하는 일은 **게이트에 선 카드에 응답하는 것** 하나뿐입니다. 그래서 "무슨 단계냐"가 아니라 "내가 뭘 해야 하냐"로 묶습니다.
-> **에픽별**은 같은 카드를 소속 축으로 봅니다 — 소속은 GitHub 네이티브 sub-issue 관계(`issueType`/`parent`)를 그대로 쓰고 제목 태그로 추정하지 않습니다. 에픽이 내게 할당되지 않아 카드가 없어도, 자식이 들고 온 부모 정보로 머리글을 세웁니다(`보드 밖` 표시). 여기서도 게이트에 선 에픽·행이 위로 옵니다.
-
-## 1. PR 리뷰
+## PR 리뷰
 1. 📥 **Triage**에 watch한 사람들의 새 PR이 5분마다 자동으로 쌓임
 2. 카드에서 **[리뷰 (Claude)] / [리뷰 (Codex)]** 클릭 → 몇 초 내 시작
 3. 봇이 PR을 읽고 — 문제 있으면 **한국어 댓글 게시**, 없으면 통과
@@ -57,52 +50,20 @@ git clone https://github.com/Jinwoong-Hwang/lookout ~/lookout && cd ~/lookout &&
 - 멱등 마커 + closure(해결·해명 수용·후속 이관·미해결) + 대화 인지
 - 작성자가 "의도적입니다 / 후속에서 처리"라고 답하면 그 회신을 근거로 추적하되, **운영자가 수용해야** LGTM으로 넘어감
 
-## 2. 이슈 작업 (토론 · 구현 · PR)
-할당된 이슈가 **📥 대기**에 쌓입니다. 카드에 추가 지시를 적고 둘 중 하나로 시작합니다.
-
-- **🛠 바로 구현** — 토론 없이 구현으로
-- **🗣 설계부터** — 두 엔진이 먼저 다툼(제안자 claude ↔ 반대신문 codex, 최대 6라운드). 브로커가 턴을 소유하므로 승인 프롬프트가 0
-
-이슈가 없어도 됩니다 — 이슈 보드 상단 입력칸에 **주제만 던지면** 두 엔진이 토론해서 결론만 돌려줍니다(읽을 저장소는 선택).
-
-흐름과 **사람이 응답해야 하는 세 게이트**:
-
-```
-📥 대기 → 🗣 설계 토론 → 🧑‍⚖️ 설계 승인 대기 → 🛠 구현 중 → 🧾 구현 검증 ─┬→ ⚖️ 검토 필요
-                                                                          └→ 🔒 PR 승인 대기 → 🚀 draft PR
-```
-
-| 게이트 | 무엇을 묻나 | 선택지 |
-|---|---|---|
-| 🧑‍⚖️ **설계 승인 대기** | 합의문을 그대로 구현할까 | ✅ 승인(입력칸 내용은 최우선 수정 지시로 얹힘) · 🔁 다시 토론(방향 지시 필수) · ↩︎ 반려 |
-| ⚖️ **검토 필요** | 엔진끼리 합의 못 함 — 남은 블로커를 직접 판단 | ↩︎ 수정 요청(구현자에게) · 🔁 다시 검증(검증자에게 "이 관점으로 보라") · ⚠️ 그래도 PR 로 |
-| 🔒 **PR 승인 대기** | 이 diff로 PR을 올릴까 | 🚀 PR 올리기 승인 · ↩︎ 수정 요청 |
-
-- 주제 토론(이슈 없이 시작한 카드)의 승인은 **🛠 이 결론으로 구현**(저장소를 골라 승격) 또는 **✅ 완료로 닫기** 입니다.
-- 구현은 `impl_repo_paths`의 **실제 체크아웃을 부모로 한 워크트리**에서 돕니다(캐시 클론은 `blob:none`이라 빌드·테스트가 안 됨). repo당 상주 1개.
-- 커밋은 **워커가** 합니다 — 엔진에는 git 쓰기 권한을 주지 않습니다.
-- 검증은 **반대편 엔진**이 읽기 전용으로. 되돌림(수정 요청)에도 라운드 상한이 있습니다(구현 총 2회 = 최초 + 되돌림 1회, 사람이 개입하면 +1).
-- PR은 **항상 draft**로 올라갑니다(코드오너 팀 전체에 리뷰가 자동 요청되는 것을 막기 위함). ready 전환은 사람이 합니다. 설계 단계 미합의 항목은 PR 본문에 체크박스로 남습니다.
-
 ## 구조 (요약)
 ```
-poller(5분) ─ PR ─────→ SQLite kanban → tick(flock, 5분) ─┬ reviewer(worktree, read-only)
-            └ issue ──→                                    ├ verifier(독립 검증)
-                                                           ├ commenter(한국어 묶음댓글)
-대시보드 :8788 ── 클릭(start/gate/stop) ───────────────────┤ approver(사람 unblock 시 approve)
-Lookout.app(메뉴바+창) ────────────────────────────────────┤ debate_worker(두 엔진 교대, 한 wave=한 라운드)
-                                                           ├ impl_worker(편집은 엔진, 커밋은 워커)
-                                                           ├ impl_verifier(반대편 엔진 교차 검증)
-                                                           └ pr_opener(사람 승인 후 push + draft PR)
+poller(5분) ─ PR ──→ SQLite kanban → tick(flock, 5분) ─┬ reviewer(worktree, read-only)
+                                                        ├ verifier(독립 검증)
+대시보드 :8788 ── 클릭(start/gate/stop) ────────────────┤ commenter(한국어 묶음댓글)
+Lookout.app(메뉴바+창) ─────────────────────────────────┘ approver(사람 unblock 시 approve)
 ```
 - 엔진: Claude `claude-opus-5`(effort 조절) / Codex(기본 `~/.codex/config.toml`, 현재 `gpt-6-astra`) — 카드별 선택
-- tick은 프로세스 flock 하나로 직렬화되고, 리뷰·구현은 `max_concurrent_reviews`까지 병렬
+- tick은 프로세스 flock 하나로 직렬화되고, 리뷰는 `max_concurrent_reviews`까지 병렬
 - 엔진 토큰이 소진되면 카드를 대기열로 되돌리고 macOS 알림을 띄웁니다(같은 엔진은 15분에 한 번만)
 
 ## 안전성
-- **리뷰·검증·토론은 read-only** — detached worktree에서 `Read/Grep/Glob`만 허용하고 `Write/Edit/Bash`·push는 차단.
-- **구현만 쓰기 경로** — 그것도 대상 repo의 전용 워크트리 안에서만. 편집·테스트 계열 명령(`yarn/npm/pytest/tsc/eslint…`)과 **읽기 전용 git**(`status/diff/log/show`)만 열려 있어 엔진이 커밋·푸시를 할 수 없습니다. 커밋은 워커가 합니다.
-- **자동 승인·자동 PR 없음** — 댓글은 자동 게시되지만 approve와 PR 생성은 항상 **사람이 게이트를 통과**시켜야 진행. 기본값은 `dry_run_pr=true`(본문만 카드에 남김).
+- **리뷰·검증은 read-only** — detached worktree에서 `Read/Grep/Glob`만 허용하고 `Write/Edit/Bash`·push는 차단.
+- **자동 승인 없음** — 댓글은 자동 게시되지만 approve는 항상 **사람이 게이트를 통과**시켜야 진행.
 - 시크릿·상태(`config.json`·`db/`·`worktrees/`·`repos/`·`workspaces/`·`logs/`)는 `.gitignore`라 repo에 안 올라감.
 - 디스크는 자동 정리 — 리뷰 워크트리는 리뷰 후 삭제, 캐시 repo gc·오래된 카드 purge는 하루 1회.
 
@@ -121,26 +82,14 @@ Lookout.app(메뉴바+창) ─────────────────�
 | `max_findings_per_review` / `min_confidence` | 지적 개수·최소 확신도 |
 | `max_diff_chars` | 프롬프트 diff 예산. 초과분은 파일 목록으로 알려 워크트리에서 직접 열게 함 |
 
-**이슈 작업** (`issue_repos`가 비면 이 기능 전체가 꺼집니다)
-
-| 키 | 설명 |
-|---|---|
-| `issue_repos` / `issue_assignee` | 이슈를 가져올 repo · `@me` 등 담당자 필터 |
-| `issue_title_prefixes` / `issue_display_prefix` | 제목 태그 필터 · 카드 별칭(`PH-1767`) |
-| `impl_repo_paths` | repo → **로컬 체크아웃 경로**. 여기 없는 repo는 구현 대상이 될 수 없음 |
-| `impl_target_map` | 이슈 제목 태그·라벨 → 대상 repo (못 맞히면 카드에서 사람이 고름) |
-| `impl_workspace_dir` / `impl_base_ref` / `impl_setup_cmd` | 워크트리 위치 · 브랜치 기준 · 최초 설치 명령 |
-| `impl_branch_template` | 브랜치 이름 (`{display}`, `{slug}`) — 대상 repo 관례를 따를 것 |
-| `debate_roles` | 토론 역할별 엔진 (기본 proposer=claude, critic=codex) |
-
 **공통**
 
 | 키 | 설명 |
 |---|---|
 | `claude_model` / `claude_effort` | Claude 모델·추론강도(low~max) |
 | `codex_model` | Codex 모델(null=codex 기본) |
-| `dry_run_comments` / `dry_run_approve` / `dry_run_pr` | 실게시·실승인·실PR 차단(검증용) |
-| `max_concurrent_reviews` | 동시 리뷰·구현 수 |
+| `dry_run_comments` / `dry_run_approve` | 실게시·실승인 차단(검증용) |
+| `max_concurrent_reviews` | 동시 리뷰 수 |
 | `dashboard_host` / `dashboard_port` | 대시보드 바인딩(기본 `127.0.0.1:8788`) |
 | `dashboard_write_networks` | 쓰기 API 허용 CIDR — 내부망에 열 때만 넓힘 |
 | `env_file` | launchd에서 `gh` 인증이 안 될 때 `GH_TOKEN`을 읽을 private 파일 |
@@ -185,10 +134,9 @@ done
 rm -rf /Applications/Lookout.app "$HOME/Applications/Lookout.app"
 rm -rf ~/lookout "$HOME/Library/Logs/Lookout"   # clone 디렉토리(상태·config 포함) + 로그
 ```
-> 구현 워크트리는 `~/lookout/workspaces/` 안에 있지만, **부모 체크아웃**(`impl_repo_paths`)에 worktree 등록이 남습니다. 신경 쓰이면 지우기 전에 각 repo에서 `git worktree prune`.
+> 예전 버전에서 이슈 작업을 썼다면 `~/lookout/workspaces/` 의 구현 워크트리가 **부모 체크아웃**(당시 `impl_repo_paths`)에 등록돼 있습니다. 지운 뒤 각 repo에서 `git worktree prune`.
 
 ## 한계
 - **macOS 전용** (launchd · WKWebView 앱)
-- 1인 1인스턴스 — 호스팅 공용 서비스 아님 (댓글·승인·PR은 본인 계정)
-- 구현은 `impl_repo_paths`에 로컬 체크아웃이 있는 repo만 가능
+- 1인 1인스턴스 — 호스팅 공용 서비스 아님 (댓글·승인은 본인 계정)
 - 토큰 비용은 본인 claude/codex 사용량으로 나감
