@@ -59,6 +59,11 @@ chose to postpone it. "The code still has this problem" is therefore never a
 reason to reopen it — that is what deferral means. Only a newer author reply
 withdrawing the deferral can change it; otherwise return `deferred`.
 
+If a NEWER author reply withdraws the earlier deferral or dismissal — the author
+now wants it fixed in this PR — return `unresolved` **with that reply's id in
+`reply_comment_id` and an exact quote in `reply_evidence`**. That pair is what
+reopens it; without it a deferral stays put.
+
 For a finding already `dismissed`, keep that status unless the latest head
 contains concrete new code evidence that refutes the author's answer. Do not reopen it merely because the code still looks the same. If you
 set such a finding to `unresolved`, `evidence` must cite the current-head code

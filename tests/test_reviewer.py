@@ -162,9 +162,13 @@ class ReviewerClosureTest(unittest.TestCase):
         card = self.c.execute("SELECT * FROM cards WHERE id=?", (self.new_id,)).fetchone()
         self.assertTrue(json.loads(card["payload"])["force_post"])
 
-    def _judged(self, head="old", reply="2"):
+    def _digest(self, body="일반 답변"):
+        """_run 이 물린 가짜 회신의 내용 지문 — 시각이 아니라 내용으로 비교한다."""
+        return ghclient.replies_digest([{"id": "issue:11", "body": body}])
+
+    def _judged(self, head="old", reply=None):
         self.c.execute("UPDATE findings SET last_judged_head=?, last_seen_reply=?",
-                       (head, reply))
+                       (head, self._digest() if reply is None else reply))
 
     def _skips(self):
         return [e["detail"] for e in self.c.execute(
@@ -191,7 +195,7 @@ class ReviewerClosureTest(unittest.TestCase):
         self.assertEqual(self._skips(), [])
 
     def test_closure_runs_when_a_new_author_reply_arrived(self):
-        self._judged(reply="1")   # 수집된 최신 회신은 "2"
+        self._judged(reply="stale")   # 수집된 회신의 지문과 다르다
         calls, _ = self._run("unresolved", [], changed={"src/other.ts"})
         self.assertEqual(calls, ["closure.md", "review.codex.md"])
 
@@ -209,7 +213,7 @@ class ReviewerClosureTest(unittest.TestCase):
         self._run("unresolved", [])
         finding = self.c.execute("SELECT * FROM findings WHERE fp=?", (self.fp,)).fetchone()
         self.assertEqual(finding["last_judged_head"], "new")
-        self.assertEqual(finding["last_seen_reply"], "2")
+        self.assertEqual(finding["last_seen_reply"], self._digest())
 
     def test_skipped_unresolved_finding_is_not_re_raised(self):
         """같은 말을 8번 반복한 원래 증상 — 달라진 게 없으면 다시 올리지 않는다."""
@@ -233,6 +237,36 @@ class ReviewerClosureTest(unittest.TestCase):
         self.assertTrue(json.loads(card["payload"])["force_post"])
         finding = self.c.execute("SELECT * FROM findings WHERE fp=?", (self.fp,)).fetchone()
         self.assertEqual(finding["card_id"], self.new_id)
+
+    def test_quiet_unresolved_finding_still_blocks_lgtm(self):
+        """말을 아끼는 것과 "문제 없다" 고 선언하는 것은 다르다(셀프 리뷰 지적).
+
+        쿨다운으로 재게시를 건너뛴 미해결 지적이 있는데 카드가 lgtm 으로 가면,
+        승인 게이트까지 열려 미해결 결함이 통과한다.
+        """
+        self.c.execute("UPDATE findings SET status='unresolved'")
+        self._judged()
+        self._run("unresolved", [], changed={"src/other.ts"})
+        card = self.c.execute("SELECT * FROM cards WHERE id=?", (self.new_id,)).fetchone()
+        self.assertEqual(card["status"], "commenting")      # lgtm 이 아니다
+        self.assertNotIn("force_post", json.loads(card["payload"]))  # 그래도 조용하다
+
+    def test_verified_withdrawal_reopens_a_deferral(self):
+        """보류는 코드로는 못 열지만 작성자가 뒤집으면 열려야 한다 — 안 그러면 일방통행."""
+        self.c.execute(
+            """UPDATE findings SET status='deferred',card_id=?,decision_head='old',
+               decision_comment_id='issue:11',decision_evidence='별도 후속'""",
+            (self.old_id,))
+        self._run("unresolved", [], reply_evidence="이번 PR 에서 고치겠습니다")
+        finding = self.c.execute("SELECT * FROM findings WHERE fp=?", (self.fp,)).fetchone()
+        self.assertEqual(finding["status"], "confirmed")
+        self.assertIsNone(finding["decision_comment_id"])
+
+    def test_edited_author_text_is_treated_as_a_new_reply(self):
+        """작성자가 PR 본문에 보류 표를 나중에 추가하면 created_at 은 그대로다."""
+        self._judged(reply=self._digest("고치기 전 회신"))
+        calls, _ = self._run("unresolved", [], changed={"src/other.ts"})
+        self.assertEqual(calls, ["closure.md", "review.codex.md"])
 
     def test_code_profile_picks_the_engine_specific_review_prompt(self):
         """Regression: the code profile once pointed at a single review.md that

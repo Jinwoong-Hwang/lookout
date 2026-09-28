@@ -484,18 +484,23 @@ def revalidate_finding(c, card_id, repo, pr, head, fp, title, body, file, line,
         except (json.JSONDecodeError, AttributeError):
             return raw or ""
 
+    # line 은 비교하지 않는다 — 지문에서 뺀 이유와 같다. 인용 구간은 실행마다
+    # 흔들리는데(89-94→87-94→91-94 실측) 그걸 '내용이 바뀌었다' 로 읽으면 작성자
+    # 결정이 통째로 지워진다. 위치는 표시용이라 아래에서 값만 갱신한다.
     same_payload = meaningful_body(row["body"]) == meaningful_body(body) and all(
         (row[key] or "") == (str(value) if value is not None else "")
         for key, value in {
-            "title": title, "file": file, "line": line,
+            "title": title, "file": file,
             "severity": severity, "confidence": confidence,
         }.items()
     )
-    if row["status"] in {"dismiss_pending", "defer_pending"} and same_payload:
-        return "sticky"
-    if (row["status"] in {"dismissed", "deferred"}
-            and (not row["decision_head"] or row["decision_head"] == head)
-            and same_payload):
+    sticky = (row["status"] in {"dismiss_pending", "defer_pending"} and same_payload) or (
+        row["status"] in {"dismissed", "deferred"}
+        and (not row["decision_head"] or row["decision_head"] == head)
+        and same_payload)
+    if sticky:
+        if (row["line"] or "") != (str(line) if line is not None else ""):
+            c.execute("UPDATE findings SET line=? WHERE id=?", (line, row["id"]))
         return "sticky"
     previous = row["status"]
     c.execute(

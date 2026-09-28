@@ -92,7 +92,7 @@ def _nothing_changed(card, pf, head, newest_reply, cache) -> bool:
     if not since or since == head:
         return False
     if (pf["last_seen_reply"] or "") != newest_reply:
-        return False  # 새 회신이 왔다
+        return False  # 새 회신이 왔거나 기존 글이 고쳐졌다
     if since not in cache:
         cache[since] = worktree.changed_files_between(card["repo"], since, head)
     changed = cache[since]
@@ -118,7 +118,8 @@ def _run_closure(c, card, priors, diff, engine, wt, policy,
     db.log_event(c, "closure_replies_collected", card["key"],
                  {"count": len(all_replies), "sources": sources,
                   "chars": sum(len(r["body"]) for r in all_replies)})
-    newest_reply = max((r["created_at"] for r in all_replies), default="")
+    # 시각이 아니라 내용 지문 — 본문·댓글 '수정' 도 새 답변으로 잡아야 한다
+    newest_reply = ghclient.replies_digest(all_replies)
     head = card["head_sha"]
     changed_cache = {}
     judged = set()
@@ -172,6 +173,11 @@ def _run_closure(c, card, priors, diff, engine, wt, policy,
                 (verdict.get("reply_evidence") or "").strip(),
                 follow_up,
             )
+        elif pf["status"] in DECIDED and status == "unresolved" and verified_reply:
+            # 작성자가 답을 뒤집었다 — 검증된 인용이 근거다. 보류 유지 분기보다
+            # 먼저 와야 한다. 안 그러면 철회 경로가 아예 막혀, 봇도 사람도 못 여는
+            # 일방통행이 된다(셀프 리뷰 지적).
+            db.clear_finding_decision(c, pf["id"], status)
         elif pf["status"] in DEFERRED and status != "resolved":
             # 보류는 "고장 난 걸 아는데 지금 안 고친다" 는 뜻이라, "아직 고장 나
             # 있다" 는 코드 근거로는 재개될 수 없다 — 동어반복이기 때문이다.
@@ -394,12 +400,15 @@ def process(c, card):
         db.log_event(c, "review_prior_unresolved", card["key"],
                      {"count": len(unresolved), "engine": engine})
 
+    # 리마인드 대상과 LGTM 차단 대상은 다르다. 쿨다운으로 말을 아끼는 것과 "문제가
+    # 없다" 고 선언하는 것은 별개인데, 한 변수로 둬서 조용히 넘어간 미해결 지적이
+    # 있어도 카드가 lgtm 으로 갔다(셀프 리뷰 지적).
     if to_verify:
         db.set_status(c, card["id"], "verifying")
         db.log_event(c, "review_findings", card["key"],
                      {"count": to_verify, "unresolved": len(unresolved),
                       "pending_decisions": len(pending), "engine": engine})
-    elif unresolved:
+    elif all_unresolved:
         db.set_status(c, card["id"], "commenting")
     elif pending:
         db.set_status(c, card["id"], "commented")

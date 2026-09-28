@@ -3,6 +3,7 @@
 Intake reads are deterministic (no LLM). Mutations (comment/approve) are guarded
 by dry-run flags in the workers, not here.
 """
+import hashlib
 import json
 import re
 import subprocess
@@ -438,6 +439,22 @@ def collect_author_replies(repo: str, pr: int, author: dict) -> list[dict]:
     take("review_comment", ["api", f"repos/{repo}/pulls/{pr}/comments", "--paginate",
                             "-q", f".[] | {q}"])
     return sorted(out, key=lambda r: (r["created_at"], r["id"]))
+
+
+def replies_digest(replies: list[dict]) -> str:
+    """작성자 글 전체의 지문. 생성 시각만 보면 '수정' 을 놓친다.
+
+    #10066 의 작성자는 보류 표를 PR 본문에 나중에 추가했다. 본문·댓글을 고치면
+    created_at 은 그대로이므로, 시각만 기준으로 삼으면 정작 우리가 기다리던 답변이
+    왔는데도 closure 를 건너뛴다(셀프 리뷰 지적).
+    """
+    h = hashlib.sha1()
+    for r in sorted(replies, key=lambda x: str(x.get("id"))):
+        h.update(str(r.get("id")).encode())
+        h.update(b"\x00")
+        h.update((r.get("body") or "").encode())
+        h.update(b"\x00")
+    return h.hexdigest()
 
 
 def trim_author_replies(replies: list[dict], pinned: str = "",
