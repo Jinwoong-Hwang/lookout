@@ -1,0 +1,19 @@
+CHANGELOG.md
+  h_03b13cada2edad 1-59
+macapp/build_app.sh
+  h_03b13cada2edad 37-46
+macapp/main.swift
+  h_03b13cada2edad 36-37,39-41
+update.sh
+  h_03b13cada2edad 21-24,26-27,31,34,103
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "1fb53f9d2596630ac063ac3386ceb2960f479056",
+  "prompts": {},
+  "humans": {
+    "h_03b13cada2edad": {
+      "author": "woong@zigbang.com"
+    }
+  }
+}
