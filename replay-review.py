@@ -125,7 +125,9 @@ def main():
     config.CFG["dry_run_comments"] = True
     config.CFG["dry_run_approve"] = True
 
-    from src import commenter, db, ghclient, reviewer, verifier, worktree  # noqa: E402
+    from src import commenter, db, ghclient, prompt_tpl, reviewer, verifier, worktree  # noqa: E402
+
+    saw = watch_prompts(prompt_tpl)
 
     # 라이브 DB 사본은 그 시점 스키마 그대로다 — 운영은 tick 이 db.init() 으로
     # 마이그레이션하므로, 재현도 같은 단계를 거쳐야 새 칼럼이 생긴다.
@@ -143,7 +145,7 @@ def main():
 
     try:
         posted = run_pass(db, ghclient, reviewer, verifier, commenter, worktree,
-                          args, head, label="1차")
+                          args, head, label="1차", seen=saw)
     except StageFailed as e:
         log(f"!! {e} — 중단한다")
         return 3
@@ -166,7 +168,7 @@ def main():
             f"{len(changed) if changed is not None else '모름'}개")
         try:
             posted += run_pass(db, ghclient, reviewer, verifier, commenter, worktree,
-                               args, head, label="2차")
+                               args, head, label="2차", seen=saw)
         except StageFailed as e:
             log(f"!! {e} — 중단한다")
             return 3
@@ -185,7 +187,38 @@ def main():
     return 0
 
 
-def run_pass(db, ghclient, reviewer, verifier, commenter, worktree, args, head, label):
+def watch_prompts(prompt_tpl):
+    """지적 하나를 판정하는 프롬프트에 **그 지적의 파일**이 실제로 들어갔는지 센다.
+
+    #10066 에서 검증자는 지적 3건을 그 3건의 파일이 전부 빠진 diff 로 판정했다.
+    예산에 밀려 빠진 것이라 이벤트로는 "71개 빠짐" 까지만 보이고, 빠진 것이 하필
+    판정 대상이었다는 사실은 안 남는다. 사후에 그걸 알아내려고 실제 diff 를 다시
+    패킹해 대조해야 했다 — 여기서 세 두면 다음부터는 실행 로그에 바로 뜬다.
+    """
+    seen, real = [], prompt_tpl.render
+
+    def render(name, **kw):
+        f, diff = kw.get("FILE"), kw.get("DIFF")
+        if f and diff is not None:
+            seen.append((name, f, f"b/{f}\n" in diff))
+        return real(name, **kw)
+
+    prompt_tpl.render = render
+    return seen
+
+
+def report_prompts(seen, label):
+    if not seen:
+        return
+    missing = [(n, f) for n, f, ok in seen if not ok]
+    log(f"[{label}] 판정 프롬프트 {len(seen)}건 중 대상 파일이 빠진 것 {len(missing)}건")
+    for name, f, ok in seen:
+        log(f"    {'O' if ok else 'X'} {name:<22} {f}")
+    del seen[:]
+
+
+def run_pass(db, ghclient, reviewer, verifier, commenter, worktree, args, head, label,
+             seen=()):
     repo, pr = args.repo, args.pr
     key = f"replay:{repo}#{pr}:{label}:{head}"
     with db.connect() as c:
@@ -217,11 +250,13 @@ def run_pass(db, ghclient, reviewer, verifier, commenter, worktree, args, head, 
                 fn(c, card)
             except Exception:
                 log(f"[{label}] {name} 실패\n{traceback.format_exc()}")
+                report_prompts(seen, label)
                 report(db, repo, pr, card_id, key, label)
                 # 단계가 깨진 뒤 2차를 이어가면 같은 실패를 한 번 더 반복할 뿐이다
                 raise StageFailed(f"{label} {name}")
             log(f"[{label}] {name} 완료 {time.time() - t0:.0f}s")
 
+    report_prompts(seen, label)
     return report(db, repo, pr, card_id, key, label)
 
 
