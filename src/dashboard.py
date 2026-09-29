@@ -255,12 +255,52 @@ def do_finding_action(action, finding_id):
     return True
 
 
-def refresh_poll():
-    """Run the poller now (bypass the interval)."""
+def build_issues():
+    """에픽별 뷰 — product-hub 이슈를 GitHub 네이티브 sub-issue 관계로 묶어 보여준다.
+
+    읽기 전용이다. 리뷰 보드(build_board)와 섞지 않는다 — 이슈에는 head·finding·
+    closure 가 없고, 섞으면 레인·사람별 뷰에 PR 이 아닌 카드가 뜬다. 상태 open 만
+    싣는다: 옛 작업 기능 시절 카드(spec_blocked 등)는 폴러가 목록에서 다시 보기
+    전까지 보이지 않는다."""
     with db.connect() as c:
-        before = len(db.cards_in(c, ["triage"], kind="review"))
-        poller.poll(c)
-        after = len(db.cards_in(c, ["triage"], kind="review"))
+        rows = c.execute(
+            "SELECT id, repo, pr_number, payload, updated_at FROM cards"
+            " WHERE kind='issue' AND status=? ORDER BY pr_number DESC",
+            (poller.ISSUE_OPEN,)).fetchall()
+    out = []
+    for r in rows:
+        meta = json.loads(r["payload"]) if r["payload"] else {}
+        out.append({
+            "id": r["id"], "repo": r["repo"], "pr": r["pr_number"],
+            "display": meta.get("display") or f"#{r['pr_number']}",
+            "title": meta.get("title", ""), "url": meta.get("url", ""),
+            "assignees": meta.get("assignees") or [],
+            "labels": meta.get("labels") or [],
+            # 폴러가 아직 안 돈 옛 카드는 비어 있다 — 빈 값이 곧 '소속 없음'이다
+            "issue_type": meta.get("issue_type", ""),
+            "parent": meta.get("parent") or None,
+            "sub": meta.get("sub") or {},
+            "ticket_status": meta.get("ticket_status", ""),
+            "ticket_board": meta.get("ticket_board", ""),
+            "updated_at": r["updated_at"],
+        })
+    return out
+
+
+def refresh_poll(scope: str = "review"):
+    """Run the poller now (bypass the interval).
+
+    보고 있는 뷰의 소스만 갱신한다 — 에픽별에서 누른 새로고침이 PR 폴링까지 돌면
+    리뷰 카드가 예고 없이 늘어난다."""
+    with db.connect() as c:
+        if scope == "issues":
+            before = len(db.cards_in(c, [poller.ISSUE_OPEN], kind="issue"))
+            poller.poll_issues(c)
+            after = len(db.cards_in(c, [poller.ISSUE_OPEN], kind="issue"))
+        else:
+            before = len(db.cards_in(c, ["triage"], kind="review"))
+            poller.poll(c)
+            after = len(db.cards_in(c, ["triage"], kind="review"))
     return {"added": max(0, after - before), "total": after}
 
 
@@ -563,6 +603,25 @@ background:transparent;border:none;padding:3px 5px;border-radius:6px;opacity:.4}
 .m a.open{text-decoration:none}
 .mempty{color:var(--muted);font-size:12px;padding:4px 0 12px}
 .unreaddot{width:8px;height:8px;border-radius:50%;background:var(--accent);flex:0 0 auto;margin-top:5px}
+/* 에픽별 — 읽기 전용 목록. 행을 누르면 GitHub 이슈가 열린다 */
+.esec{margin:0 0 18px}
+.ehead{display:flex;gap:9px;align-items:center;padding:0 2px 8px;border-bottom:1px solid var(--line);
+  font-size:13px;color:var(--ink);text-decoration:none}
+a.ehead:hover .etitle{color:var(--accent)}
+.ehead .enum{flex:0 0 auto;font-weight:700;font-variant-numeric:tabular-nums}
+.ehead .etitle{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:650}
+.ehead .ebits{flex:0 0 auto;display:flex;gap:5px;align-items:center}
+.ehead .n{background:var(--panel2);border-radius:20px;padding:1px 9px;color:var(--muted);font-size:11px}
+.erows{display:flex;flex-direction:column;margin:10px 0 0 15px;border:1px solid var(--line);
+  border-left:3px solid var(--line);border-radius:10px;background:var(--panel);overflow:hidden}
+.irow{display:flex;gap:10px;align-items:center;padding:9px 13px;border-top:1px solid var(--line);
+  color:var(--ink);text-decoration:none;font-size:12.5px}
+.irow:first-child{border-top:none}
+.irow:hover{background:var(--panel2)}
+.irow .inum{flex:0 0 auto;font-weight:700;font-variant-numeric:tabular-nums}
+.irow .ititle{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.irow .imeta{flex:0 0 auto;display:flex;gap:5px;align-items:center;color:var(--muted);font-size:11.5px}
+.esec .empty{margin:8px 0 0 15px;text-align:left}
 </style></head><body>
 <header><h1>👁 Lookout</h1>
 <button id="refreshBtn" onclick="refresh()">🔄 PR 가져오기</button>
@@ -576,6 +635,8 @@ background:transparent;border:none;padding:3px 5px;border-radius:6px;opacity:.4}
   <button id="tLane" class="active" onclick="setView('lane')"><span>🗂 레인별</span><span class="cnt" id="cLane">0</span></button>
   <button id="tAuthor" onclick="setView('author')"><span>👤 사람별</span><span class="cnt" id="cAuthor">0</span></button>
   <button id="tFeedback" onclick="setView('feedback')"><span>💬 리뷰 피드백</span><span class="cnt" id="cFeedback">0</span></button>
+  <div class="grp">이슈</div>
+  <button id="tEpic" onclick="setView('epic')"><span>🎯 에픽별</span><span class="cnt" id="cEpic">0</span></button>
 </nav>
 <div class="main">
 <div class="filterbar" id="filterbar"></div>
@@ -609,7 +670,7 @@ function pill(c){return isLight()
   : `background:${c}22;color:${c};border:1px solid ${c}55`;}
 function stripe(c){return isLight()?darken(c,.72):c;}  // 카드/finding 좌측 컬러 스트라이프
 applyTheme();
-let DATA=[];let FEEDBACK=[];let VIEW='lane';let REPO='all';
+let DATA=[];let FEEDBACK=[];let ISSUES=[];let VIEW='lane';let REPO='all';
 let LANE_SCROLL={};
 // 엔진 가용성 — 초기엔 낙관적(true)으로 두고 /api/engines 응답으로 갱신
 let ENGINES={claude:{installed:true,logged_in:true,ready:true},codex:{installed:true,logged_in:true,ready:true}};
@@ -632,9 +693,9 @@ function repoShort(r){return (r||'').split('/')[1]||r;}
 const REPO_COLORS=['#2dd4bf','#a78bfa','#fbbf24','#60a5fa','#4ade80','#fb7185'];
 function repoColor(r){let h=0;for(const ch of (r||''))h=(h*31+ch.charCodeAt(0))>>>0;return REPO_COLORS[h%REPO_COLORS.length];}
 function setRepo(r){REPO=r;renderFilter();render();}
-function viewData(){const src=DATA;return REPO==='all'?src:src.filter(c=>c.repo===REPO);}
+function viewData(){const src=VIEW==='epic'?ISSUES:DATA;return REPO==='all'?src:src.filter(c=>c.repo===REPO);}
 function viewFeedbackData(){return REPO==='all'?FEEDBACK:FEEDBACK.filter(f=>f.repo===REPO);}
-function filterSource(){return VIEW==='feedback'?FEEDBACK:DATA;}
+function filterSource(){return VIEW==='feedback'?FEEDBACK:VIEW==='epic'?ISSUES:DATA;}
 function normalizeRepo(){const src=filterSource();if(REPO!=='all'&&!src.some(x=>x.repo===REPO))REPO='all';}
 function renderFilter(){
   normalizeRepo();
@@ -648,24 +709,27 @@ function renderFilter(){
     h+=`<button class="chip ${on?'on':''}" style="${onStyle}" onclick="setRepo('${r}')"><span class="rdot" style="background:${col}"></span>${esc(repoShort(r))} <b>${n}</b></button>`;});
   bar.innerHTML=h;
 }
-const VIEW_TABS=[['tLane','lane'],['tAuthor','author'],['tFeedback','feedback']];
+const VIEW_TABS=[['tLane','lane'],['tAuthor','author'],['tFeedback','feedback'],['tEpic','epic']];
 function setView(v){VIEW=v;
   for(const [id,name] of VIEW_TABS)
     document.getElementById(id).classList.toggle('active',v===name);
+  document.getElementById('refreshBtn').textContent=v==='epic'?'🔄 이슈 가져오기':'🔄 PR 가져오기';
   renderFilter();render();}
 function renderSideCounts(){
   document.getElementById('cLane').textContent=DATA.length;
   document.getElementById('cAuthor').textContent=DATA.length;
   document.getElementById('cFeedback').textContent=FEEDBACK.length;
+  document.getElementById('cEpic').textContent=ISSUES.length;
 }
 function forceRender(){render_();}
 async function load(){
-  const [rb,re,rf]=await Promise.all([fetch('/api/board'),fetch('/api/engines'),fetch('/api/feedback')]);
+  const [rb,re,rf,ri]=await Promise.all([fetch('/api/board'),fetch('/api/engines'),fetch('/api/feedback'),fetch('/api/issues')]);
   DATA=await rb.json();
   try{FEEDBACK=await rf.json();}catch(e){FEEDBACK=[];}
+  try{ISSUES=await ri.json();}catch(e){ISSUES=[];}
   try{ENGINES=await re.json();}catch(e){}
   document.getElementById('sub').textContent=
-    DATA.length+'개 카드';
+    VIEW==='epic'?ISSUES.length+'개 이슈':DATA.length+'개 카드';
   renderEngStat();
   renderSideCounts();
   renderFilter();
@@ -727,7 +791,7 @@ function render(){
   return render_();
 }
 function render_(){VIEW==='feedback'?renderFeedback():VIEW==='author'?renderByAuthor()
-    :renderLanes(LANES);}
+    :VIEW==='epic'?renderEpics():renderLanes(LANES);}
 function renderFeedback(){
   const list=viewFeedbackData();
   const board=document.getElementById('board');board.className='board stack';board.innerHTML='';
@@ -749,6 +813,89 @@ function feedbackItem(f){
     <div class="acts">${open}</div>`;
   el.onclick=()=>openFeedbackModal(f);
   return el;
+}
+// 에픽별 — product-hub 이슈를 에픽 ▸ 태스크로 묶어 **보여주기만** 한다. 소속은 GitHub
+// 네이티브 sub-issue 관계(issue_type/parent)를 그대로 쓴다 — 제목 태그로 추정하지 않는다.
+// 에픽이 내게 할당되지 않아 카드가 없어도, 자식이 들고 온 parent 정보로 머리글을 세운다.
+// 티켓 진행상태 = GitHub Project 의 Status 필드(읽기 전용). 순서는 '지금 고를 것부터'다.
+const TICKET_ORDER=['Ready dev','Developing','Acceptance Test','Ready FV',
+  'Feature Verification','Ready RT','Regression Test','Ready Deploy','Done',
+  'In requirement','Backlog','NextPatch','Next Patch'];
+function trank(s){const i=TICKET_ORDER.indexOf(s);return i<0?99:i;}
+function tcolor(s){
+  if(s==='Ready dev')return '#4ade80';
+  if(s==='Backlog'||s==='In requirement')return '#6b7688';
+  if(s==='NextPatch'||s==='Next Patch')return '#a78bfa';
+  return s?'#60a5fa':'#6b7688';
+}
+function epicGroups(list){
+  const G=new Map();
+  const get=k=>{if(!G.has(k))G.set(k,{key:k,head:null,parent:null,rows:[]});return G.get(k);};
+  list.forEach(c=>{
+    if(c.issue_type==='Epic'){get('n'+c.pr).head=c;return;}   // 에픽은 머리글이지 행이 아니다
+    if(c.parent){const g=get('n'+c.parent.number);if(!g.parent)g.parent=c.parent;g.rows.push(c);return;}
+    get('none').rows.push(c);
+  });
+  const out=[...G.values()];
+  out.forEach(g=>{
+    g.num=g.head?g.head.pr:(g.parent?g.parent.number:0);
+    g.rows.sort((a,b)=>trank(a.ticket_status)-trank(b.ticket_status)||b.pr-a.pr);
+  });
+  // '소속 없음'은 항상 맨 아래, 나머지는 최신 에픽부터
+  out.sort((a,b)=>(a.key==='none')-(b.key==='none')||b.num-a.num);
+  return out;
+}
+function tpill(s){return s?`<span class="pill" style="${pill(tcolor(s))}">🎫 ${esc(s)}</span>`:'';}
+function epicHead(g){
+  if(g.key==='none')
+    return `<div class="ehead"><span>📄</span><span class="etitle">소속 없음</span>`
+      +`<span class="n">${g.rows.length}</span></div>`;
+  const e=g.head,p=g.parent;
+  const disp=e?e.display:p.display, title=(e?e.title:p.title)||'(제목없음)', url=(e?e.url:p.url)||'';
+  const sub=(e&&e.sub)||{};
+  const bits=[];
+  if(e)bits.push(tpill(e.ticket_status));
+  // GitHub 진행도와 보드 건수는 **다른 수**다(내게 할당 안 된 자식도 세므로) — 출처를 붙여 적는다
+  if(sub.total)bits.push(`<span class="pill" title="GitHub 기준 하위 이슈 진행 — 내게 할당되지 않은 것도 포함">GitHub ${sub.done||0}/${sub.total}</span>`);
+  if(!e)bits.push(`<span class="pill" title="에픽 자체는 내게 할당되지 않았습니다">보드 밖</span>`);
+  const inner=`<span>🎯</span><span class="enum">${esc(disp)}</span><span class="etitle">${esc(title)}</span>`
+    +`<span class="n" title="내게 할당된 하위 태스크">${g.rows.length}</span><span class="ebits">${bits.join('')}</span>`;
+  return url?`<a class="ehead" href="${esc(url)}" target="_blank">${inner}</a>`:`<div class="ehead">${inner}</div>`;
+}
+function issueRow(c){
+  const el=document.createElement(c.url?'a':'div');el.className='irow';
+  if(c.url){el.href=c.url;el.target='_blank';}
+  const who=(c.assignees||[]).join(', ');
+  el.innerHTML=`<span class="inum">${esc(c.display)}</span>`
+    +`<span class="ititle">${esc(c.title)||'(제목없음)'}</span>`
+    +`<span class="imeta">${tpill(c.ticket_status)}${c.issue_type&&c.issue_type!=='Task'?`<span class="pill">${esc(c.issue_type)}</span>`:''}`
+    +`${who?`<span>${esc(who)}</span>`:''}</span>`;
+  return el;
+}
+function renderEpics(){
+  const board=document.getElementById('board');
+  const top=board.scrollTop;
+  board.className='board stack';board.innerHTML='';
+  const groups=epicGroups(viewData());
+  if(!groups.length){
+    const sec=document.createElement('div');sec.className='sec';
+    sec.innerHTML='<div class="empty">가져온 이슈가 없습니다 — config 의 issue_repos 를 확인하세요</div>';
+    board.appendChild(sec);return;
+  }
+  for(const g of groups){
+    const sec=document.createElement('div');sec.className='esec';
+    sec.innerHTML=epicHead(g);
+    if(!g.rows.length){
+      const e=document.createElement('div');e.className='empty';e.textContent='내게 할당된 하위 태스크 없음';
+      sec.appendChild(e);
+    }else{
+      const cc=document.createElement('div');cc.className='erows';
+      g.rows.forEach(c=>cc.appendChild(issueRow(c)));
+      sec.appendChild(cc);
+    }
+    board.appendChild(sec);
+  }
+  board.scrollTop=top;
 }
 function renderLanes(lanes){
   lanes=lanes||LANES;
@@ -933,7 +1080,7 @@ async function refresh(){
   try{
     const r=await fetch('/api/refresh',{method:'POST',
       headers:{'Content-Type':'application/json','X-Lookout-Action':'1'},
-      body:'{}'});const j=await r.json();
+      body:JSON.stringify({scope:VIEW==='epic'?'issues':'review'})});const j=await r.json();
     await load();
     b.textContent=j.added>0?`+${j.added}건 추가`:'최신 상태';
   }catch(e){b.textContent='실패';}
@@ -962,6 +1109,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, html, "text/html; charset=utf-8")
         elif path == "/api/board":
             self._send(200, json.dumps(build_board(), ensure_ascii=False))
+        elif path == "/api/issues":
+            self._send(200, json.dumps(build_issues(), ensure_ascii=False))
         elif path == "/api/mentions":
             self._send(200, json.dumps(build_mentions(), ensure_ascii=False))
         elif path == "/api/feedback":
@@ -998,7 +1147,7 @@ class Handler(BaseHTTPRequestHandler):
         n = int(self.headers.get("Content-Length", 0))
         data = json.loads(self.rfile.read(n) or "{}")
         if self.path == "/api/refresh":
-            self._send(200, json.dumps(refresh_poll()))
+            self._send(200, json.dumps(refresh_poll(data.get("scope", "review"))))
             return
         if self.path == "/api/action":
             ok = do_action(data.get("action"), int(data.get("card_id", 0)),

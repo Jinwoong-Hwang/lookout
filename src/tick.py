@@ -38,6 +38,7 @@ def _maybe_poll():
         return
     with db.connect() as c:
         poller.poll(c)
+        poller.poll_issues(c)
         db.set_meta(c, "last_poll", str(time.time()))
 
 

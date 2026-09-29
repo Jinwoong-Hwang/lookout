@@ -56,6 +56,27 @@ def pr_list_open(repo: str) -> list:
     return json.loads(proc.stdout)
 
 
+def issue_list(repo: str, assignee: str = None, title_prefixes=None,
+               limit: int = 100) -> list:
+    """Open issues for the issue view (에픽별).
+
+    `gh issue list`는 PR을 섞어 주지 않으므로 여기서 얻는 번호는 이슈 번호다.
+    title_prefixes는 서버가 못 걸러주는 조건([FE] 같은 제목 태그)이라 클라이언트에서 건다."""
+    # issueType/parent/subIssuesSummary 는 GitHub 네이티브 sub-issue 관계다. 목록
+    # 한 번에 딸려 오므로 에픽 소속을 알아내는 데 추가 호출이 들지 않는다.
+    fields = ("number,title,url,labels,assignees,updatedAt,author,"
+              "issueType,parent,subIssuesSummary,projectItems")
+    args = ["issue", "list", "--repo", repo, "--state", "open",
+            "--limit", str(limit), "--json", fields]
+    if assignee:
+        args += ["--assignee", assignee]
+    rows = json.loads(_run(args).stdout)
+    if title_prefixes:
+        rows = [r for r in rows
+                if any((r.get("title") or "").startswith(p) for p in title_prefixes)]
+    return rows
+
+
 def pr_diff(repo: str, pr: int) -> str:
     """Unified diff via the API. Raises DiffTooLarge when the PR exceeds GitHub's
     20k-line diff cap — worktree.local_diff() computes it from the clone instead."""

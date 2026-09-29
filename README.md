@@ -5,7 +5,7 @@
 댓글·승인은 전부 **본인 GitHub 계정**으로 나갑니다 (1인 1인스턴스, self-host).
 바깥으로 나가는 행동 중 approve 에는 **사람 게이트**가 있습니다.
 
-> 이슈 작업(설계 토론·주제 토론·구현·draft PR) 기능은 걷어냈습니다 — headless 엔진으로 열린 작업을 시키는 구조가 의도대로 돌지 않아 처음부터 다시 설계합니다.
+> 이슈 작업(설계 토론·주제 토론·구현·draft PR) 기능은 걷어냈습니다 — headless 엔진으로 열린 작업을 시키는 구조가 의도대로 돌지 않아 처음부터 다시 설계합니다. 이슈는 **에픽별 뷰로 보기만** 합니다.
 
 ## 사전 준비 (macOS)
 - `gh` 로그인 — `gh auth login`
@@ -28,6 +28,9 @@ git clone https://github.com/Jinwoong-Hwang/lookout ~/lookout && cd ~/lookout &&
 | 🗂 **레인별** | PR 리뷰 카드를 단계(Triage→리뷰→검증→댓글→승인→완료)별로 |
 | 👤 **사람별** | 같은 카드를 작성자별로 |
 | 💬 **리뷰 피드백** | 게시한 댓글에 달린 반응(👍👎💬) 스냅샷 — 리뷰가 먹혔는지 확인 |
+| 🎯 **에픽별** | 나에게 할당된 product-hub 이슈를 **에픽 ▸ 태스크**로 묶어 보여줌 (읽기 전용 — 행을 누르면 GitHub 이슈) |
+
+> **에픽별** 소속은 GitHub 네이티브 sub-issue 관계(`issueType`/`parent`)를 그대로 쓰고 제목 태그로 추정하지 않습니다. 에픽이 내게 할당되지 않아도 자식이 들고 온 부모 정보로 머리글을 세웁니다(`보드 밖`). 행의 🎫 는 GitHub Project 의 Status 이고, Lookout 은 읽기만 합니다. `issue_repos` 가 비면 뷰가 비어 있습니다.
 
 ## PR 리뷰
 1. 📥 **Triage**에 watch한 사람들의 새 PR이 5분마다 자동으로 쌓임
@@ -81,6 +84,13 @@ Lookout.app(메뉴바+창) ─────────────────�
 | `repo_profiles` | repo별 리뷰 정책(문서 repo는 comment-only·dry-run 등) |
 | `max_findings_per_review` / `min_confidence` | 지적 개수·최소 확신도 |
 | `max_diff_chars` | 프롬프트 diff 예산. 초과분은 파일 목록으로 알려 워크트리에서 직접 열게 함 |
+
+**에픽별 뷰** (`issue_repos`가 비면 꺼짐)
+
+| 키 | 설명 |
+|---|---|
+| `issue_repos` / `issue_assignee` | 이슈를 가져올 repo · `@me` 등 담당자 필터 |
+| `issue_title_prefixes` / `issue_display_prefix` | 제목 태그 필터 · 표시 별칭(`PH-1767`) |
 
 **공통**
 
