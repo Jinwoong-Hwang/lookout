@@ -18,15 +18,20 @@ BRANCH=$(git rev-parse --abbrev-ref HEAD)
 UPSTREAM="origin/$BRANCH"
 UIDN=$(id -u)
 
+# 릴리스 이름 = 가장 가까운 태그. 태그 뒤 커밋이 있으면 v1.2.0-3-gabc1234 처럼 붙는다.
+# 태그를 아직 못 받았거나 하나도 없으면 짧은 SHA로 떨어진다(--always).
+ver() { git describe --tags --always "${1:-HEAD}" 2>/dev/null || git rev-parse --short "${1:-HEAD}"; }
+
 echo "▸ origin($BRANCH)에서 변경 확인…"
-git fetch --quiet origin "$BRANCH"
+# --tags 를 빼면 태그가 안 따라와 버전 비교가 SHA로 퇴화한다.
+git fetch --quiet --tags origin "$BRANCH"
 BEHIND=$(git rev-list --count "HEAD..$UPSTREAM" 2>/dev/null || echo 0)
 
 if [ "$BEHIND" = "0" ]; then
-  echo "✓ 이미 최신 ($(git rev-parse --short HEAD))"
+  echo "✓ 이미 최신 ($(ver))"
   exit 0
 fi
-echo "  origin이 ${BEHIND}개 커밋 앞섬:"
+echo "  $(ver) → $(ver "$UPSTREAM") (${BEHIND}개 커밋 앞섬):"
 git --no-pager log --oneline "HEAD..$UPSTREAM" | sed 's/^/    /'
 
 if [ "${1:-}" = "--check" ]; then
@@ -95,4 +100,4 @@ if echo "$CHANGED" | grep -qE '^macapp/'; then
   ./macapp/build_app.sh
 fi
 
-echo "✓ 업데이트 완료 → $(git rev-parse --short HEAD)"
+echo "✓ 업데이트 완료 → $(ver)"

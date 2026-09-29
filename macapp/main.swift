@@ -33,8 +33,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     var webView: WKWebView?
     var timer: Timer?
 
+    // 태그 뒤 커밋까지 붙은 LookoutBuild(v1.2.0-3-gabc1234)를 먼저 쓴다 — 메뉴에서
+    // "내가 최신인가"를 보려면 태그 이름만으로는 부족하다.
     var appVersion: String {
-        (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "?"
+        (Bundle.main.object(forInfoDictionaryKey: "LookoutBuild") as? String)
+            ?? (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String)
+            ?? "?"
     }
 
     func applicationDidFinishLaunching(_ note: Notification) {

@@ -26,8 +26,6 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleExecutable</key><string>Lookout</string>
   <key>CFBundleIconFile</key><string>Lookout</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleVersion</key><string>1.1</string>
-  <key>CFBundleShortVersionString</key><string>1.1</string>
   <key>NSPrincipalClass</key><string>NSApplication</string>
   <key>NSAppTransportSecurity</key><dict><key>NSAllowsLocalNetworking</key><true/></dict>
 </dict></plist>
@@ -35,6 +33,16 @@ PLIST
 
 # 앱이 update.sh를 찾을 수 있도록 repo 경로 기록
 /usr/libexec/PlistBuddy -c "Add :LookoutRepoDir string $REPO_DIR" "$APP/Contents/Info.plist"
+
+# 버전은 git 태그가 유일한 출처다. 플리스트에 손으로 적어 두면 코드와 따로 늙는다
+# (실제로 1.1 이 박힌 채 수십 커밋을 갔다). CFBundleShortVersionString 은 숫자여야
+# 하므로 태그만 쓰고, 태그 뒤 커밋까지 붙은 정확한 이름은 LookoutBuild 로 따로 둔다.
+TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo v0.0.0)
+BUILD=$(git describe --tags --always --dirty 2>/dev/null || git rev-parse --short HEAD)
+/usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string ${TAG#v}" "$APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Add :CFBundleVersion string ${TAG#v}" "$APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Add :LookoutBuild string $BUILD" "$APP/Contents/Info.plist"
+echo "  버전 $BUILD"
 
 echo "→ ad-hoc 코드서명…"
 codesign --force --deep --sign - "$APP" 2>/dev/null || echo "  (codesign 생략 — 실행엔 지장 없음)"
