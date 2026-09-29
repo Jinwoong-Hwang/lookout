@@ -135,10 +135,22 @@ def process(c, card):
         posted_bodies = [com["body"] for com in existing if com.get("body")]
         already = any("hermes:fp" in b for b in posted_bodies)
 
-    # force면 마커 중복 무시하고 전부 게시, 아니면 아직 안 올라간 것만
+    # force면 마커 중복 무시하고 전부 게시, 아니면 아직 안 올라간 것만.
+    #
+    # 다만 **남이 올려 우리가 받아만 둔 지적**(comment_id='exists')은 force 여도
+    # 제외한다. 리마인드는 "내가 올린 지적이 아직 안 고쳐졌다" 고 다시 말하는
+    # 장치인데, 남의 지적까지 태우면 내 이름으로 그 사람 지적을 전문 재게시하게
+    # 된다. 같은 PR 에 인스턴스가 여러 대 붙어 있어서(#10066 은 4대) 양쪽이 서로의
+    # 지적을 번갈아 재촉하는 모양이 된다.
+    #
+    # 이 조합은 2회차 리뷰에서만 나타난다 — 1회차엔 남의 지적을 그 자리에서
+    # exists 로 받고 끝나지만(force=false), 그다음 리뷰에서 closure 가 그걸
+    # unresolved 로 판정하면 force 가 켜지고 마커 검사를 통째로 건너뛴다.
     fresh = []
     for f in postable:
-        if not force and any(feedback.marker_matches(f["fp"], b) for b in posted_bodies):
+        adopted = f["comment_id"] == "exists"
+        if (adopted or not force) and any(
+                feedback.marker_matches(f["fp"], b) for b in posted_bodies):
             db.set_finding_status(c, f["id"], "posted", comment_id="exists")
         else:
             fresh.append(f)

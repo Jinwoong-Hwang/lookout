@@ -102,6 +102,36 @@ class CommenterReminderTest(unittest.TestCase):
         self.assertEqual(rows[other], "posted")
         self.assertEqual(len(_events(c, "comment_held_author_decision")), 1)
 
+    def test_reminder_skips_a_finding_another_instance_posted(self):
+        """남이 올린 지적(comment_id='exists')은 리마인드 대상이 아니다.
+
+        같은 PR 에 인스턴스가 여러 대 붙는다(#10066 은 4대). 남의 마커를 알아보게
+        된 뒤로 우리는 그 지적을 'exists' 로 받아만 두는데, 다음 리뷰에서 closure
+        가 그걸 '아직 안 고쳐짐' 으로 판정하면 force_post 가 켜지고, force 는
+        마커 검사를 통째로 건너뛰었다 — 남의 지적 3건을 내 이름으로 전문 재게시
+        하려 했다(#10066 재현에서 확인). 1회차에는 force 가 꺼져 있어 안 보인다.
+        """
+        mine = "owner/repo#1:src/mine.ts:30:my-rule"
+        c = _conn()
+        card_id = _card(c)                                # force_post=True (리마인드)
+        _finding(c, card_id, "unresolved")                # 남이 올린 것
+        c.execute("UPDATE findings SET comment_id='exists' WHERE fp=?", (FP,))
+        _finding(c, card_id, "unresolved", fp=mine)       # 내가 올린 것
+        ghclient.list_review_comments = lambda repo, pr: [
+            {"body": f"🤖 남의 인스턴스 묶음\n{MARKER}"},
+            {"body": "🤖 내 지난 묶음\n<!-- hermes:fp=owner/repo#1:src/mine.ts:30:my-rule -->"},
+        ]
+        reviewer.refresh_author_decisions = lambda *_: None
+
+        commenter.process(c, _row(c, card_id))
+
+        self.assertEqual(len(self.posted), 1)
+        self.assertIn(mine, self.posted[0], "내가 올린 것은 리마인드한다")
+        self.assertNotIn(FP, self.posted[0], "남이 올린 것은 다시 올리지 않는다")
+        rows = dict(c.execute(
+            "SELECT fp, comment_id FROM findings WHERE card_id=?", (card_id,)).fetchall())
+        self.assertEqual(rows[FP], "exists", "남의 것이라는 표시는 유지된다")
+
     def test_only_held_findings_means_nothing_is_posted(self):
         c = _conn()
         card_id = _card(c)
