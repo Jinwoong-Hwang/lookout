@@ -52,6 +52,36 @@ class PerformanceOptimizationTest(unittest.TestCase):
         self.assertEqual(rows[("owner/repo", 2)]["state"], "MERGED")
         self.assertEqual(rows[("other/project", 9)]["state"], "CLOSED")
 
+    def test_pr_states_keeps_successful_batches_when_a_later_batch_fails(self):
+        calls = []
+        old_run = ghclient._run
+
+        def fake_run(args, check=True):
+            calls.append(args)
+            if len(calls) == 2:
+                raise ghclient.GhError("temporary batch failure")
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps({
+                    "data": {"r0": {"p0": {
+                        "number": 1, "state": "OPEN", "headRefOid": "h1"
+                    }}}
+                }),
+            )
+
+        try:
+            ghclient._run = fake_run
+            rows = ghclient.pr_states(
+                [("owner/repo", 1), ("owner/repo", 2)], batch_size=1
+            )
+        finally:
+            ghclient._run = old_run
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(rows, {
+            ("owner/repo", 1): {"number": 1, "state": "OPEN", "headRefOid": "h1"}
+        })
+
     def test_monitor_github_state_batches_roots_and_triage_once(self):
         c = sqlite3.connect(":memory:")
         c.row_factory = sqlite3.Row

@@ -59,7 +59,7 @@ def pr_list_open(repo: str) -> list:
 def pr_states(refs: list[tuple[str, int]], batch_size: int = 75) -> dict:
     """Fetch state/head for tracked PRs with one GraphQL call per bounded batch."""
     unique = list(dict.fromkeys((repo, int(pr)) for repo, pr in refs))
-    out = {}
+    out, errors = {}, []
     for start in range(0, len(unique), batch_size):
         batch = unique[start:start + batch_size]
         grouped = {}
@@ -81,14 +81,22 @@ def pr_states(refs: list[tuple[str, int]], batch_size: int = 75) -> dict:
                 f"name: {json.dumps(name)}) {{ {' '.join(pr_fields)} }}"
             )
         query = "query { " + " ".join(fields) + " }"
-        payload = json.loads(_run(["api", "graphql", "-f", f"query={query}"]).stdout)
-        if payload.get("errors") and not payload.get("data"):
-            raise GhError(f"GitHub GraphQL failed: {payload['errors']}")
+        try:
+            payload = json.loads(
+                _run(["api", "graphql", "-f", f"query={query}"]).stdout
+            )
+            if payload.get("errors") and not payload.get("data"):
+                raise GhError(f"GitHub GraphQL failed: {payload['errors']}")
+        except (GhError, json.JSONDecodeError) as exc:
+            errors.append(exc)
+            continue
         data = payload.get("data") or {}
         for (repo_alias, pr_alias), ref in aliases.items():
             info = (data.get(repo_alias) or {}).get(pr_alias)
             if info is not None:
                 out[ref] = info
+    if errors and not out:
+        raise errors[0]
     return out
 
 
