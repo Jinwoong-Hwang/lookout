@@ -1,0 +1,25 @@
+src/commenter.py
+  fc52f3c6434c021b 149-154,157-158,178-181
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "a1ec84f5bd74b0a1ae80603246de8a58a3c8b8eb",
+  "prompts": {
+    "fc52f3c6434c021b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "b9eea97e-01fa-44a6-a3b5-227ac3c90464",
+        "model": "claude-opus-5-5"
+      },
+      "skills": [],
+      "tool_counts": {
+        "Bash": 113,
+        "Read": 6,
+        "Edit": 1
+      },
+      "total_additions": 20,
+      "total_deletions": 0,
+      "overriden_lines": 0
+    }
+  }
+}
