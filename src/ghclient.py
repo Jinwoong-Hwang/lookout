@@ -56,6 +56,42 @@ def pr_list_open(repo: str) -> list:
     return json.loads(proc.stdout)
 
 
+def pr_states(refs: list[tuple[str, int]], batch_size: int = 75) -> dict:
+    """Fetch state/head for tracked PRs with one GraphQL call per bounded batch."""
+    unique = list(dict.fromkeys((repo, int(pr)) for repo, pr in refs))
+    out = {}
+    for start in range(0, len(unique), batch_size):
+        batch = unique[start:start + batch_size]
+        grouped = {}
+        for repo, pr in batch:
+            grouped.setdefault(repo, []).append(pr)
+        fields, aliases = [], {}
+        for repo_idx, (repo, prs) in enumerate(grouped.items()):
+            owner, name = repo.split("/", 1)
+            pr_fields = []
+            for pr_idx, pr in enumerate(prs):
+                alias = f"p{pr_idx}"
+                aliases[(f"r{repo_idx}", alias)] = (repo, pr)
+                pr_fields.append(
+                    f"{alias}: pullRequest(number: {pr}) "
+                    "{ number state headRefOid }"
+                )
+            fields.append(
+                f"r{repo_idx}: repository(owner: {json.dumps(owner)}, "
+                f"name: {json.dumps(name)}) {{ {' '.join(pr_fields)} }}"
+            )
+        query = "query { " + " ".join(fields) + " }"
+        payload = json.loads(_run(["api", "graphql", "-f", f"query={query}"]).stdout)
+        if payload.get("errors") and not payload.get("data"):
+            raise GhError(f"GitHub GraphQL failed: {payload['errors']}")
+        data = payload.get("data") or {}
+        for (repo_alias, pr_alias), ref in aliases.items():
+            info = (data.get(repo_alias) or {}).get(pr_alias)
+            if info is not None:
+                out[ref] = info
+    return out
+
+
 def issue_list(repo: str, assignee: str = None, title_prefixes=None,
                limit: int = 100) -> list:
     """Open issues for the issue view (에픽별).
