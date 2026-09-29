@@ -31,6 +31,8 @@ class ReviewerClosureTest(unittest.TestCase):
             json.dumps({"problem": "still relevant"}), "src/example.ts", 10,
             "medium", "high", "posted",
         )
+        # 게시된 지적에는 댓글 URL 이 남는다 — 리마인드는 이걸로 '내가 올린 것' 을 가른다
+        self.c.execute("UPDATE findings SET comment_id='https://x/prev' WHERE fp=?", (self.fp,))
 
     def tearDown(self):
         self.c.close()

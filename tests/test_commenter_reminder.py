@@ -38,6 +38,11 @@ def _finding(c, card_id, status, fp=FP):
                       "src/app.ts", 10, "medium", "high", status)
 
 
+def _mine(c, fp=FP):
+    """내가 전에 올린 지적 — 실제로는 게시 때 댓글 URL 이 comment_id 에 남는다."""
+    c.execute("UPDATE findings SET comment_id='https://x/prev' WHERE fp=?", (fp,))
+
+
 def _row(c, card_id):
     return c.execute("SELECT * FROM cards WHERE id=?", (card_id,)).fetchone()
 
@@ -63,6 +68,7 @@ class CommenterReminderTest(unittest.TestCase):
         c = _conn()
         card_id = _card(c)
         _finding(c, card_id, "confirmed")
+        _mine(c)
 
         def downgrade(conn, card):  # 실제 closure가 '아직 미해결'로 판정한 상황
             conn.execute("UPDATE findings SET status='unresolved' WHERE card_id=?", (card_id,))
@@ -117,6 +123,7 @@ class CommenterReminderTest(unittest.TestCase):
         _finding(c, card_id, "unresolved")                # 남이 올린 것
         c.execute("UPDATE findings SET comment_id='exists' WHERE fp=?", (FP,))
         _finding(c, card_id, "unresolved", fp=mine)       # 내가 올린 것
+        c.execute("UPDATE findings SET comment_id='https://x/1' WHERE fp=?", (mine,))
         ghclient.list_review_comments = lambda repo, pr: [
             {"body": f"🤖 남의 인스턴스 묶음\n{MARKER}"},
             {"body": "🤖 내 지난 묶음\n<!-- hermes:fp=owner/repo#1:src/mine.ts:30:my-rule -->"},
@@ -131,6 +138,53 @@ class CommenterReminderTest(unittest.TestCase):
         rows = dict(c.execute(
             "SELECT fp, comment_id FROM findings WHERE card_id=?", (card_id,)).fetchall())
         self.assertEqual(rows[FP], "exists", "남의 것이라는 표시는 유지된다")
+
+    def test_new_finding_someone_else_already_posted_is_adopted_not_reminded(self):
+        """#10066: 남(breadceo)이 2분 전에 올린 지적을 우리 리뷰가 처음 찾았다. 리마인드
+        대상(남의 미해결 3건) 때문에 force 가 켜져 있었고, force 가 마커 검사를
+        건너뛰어 그 지적이 "지난 리뷰의 아래 지적" 문구로 내 이름으로 나갔다.
+        처음 나온 지적은 force 여도 마커를 봐야 한다."""
+        c = _conn()
+        card_id = _card(c)                                # force_post=True
+        _finding(c, card_id, "confirmed")                 # 이번에 처음 찾음 — comment_id 없음
+        ghclient.list_review_comments = lambda repo, pr: [
+            {"body": f"🤖 남의 인스턴스 묶음\n{MARKER}"}]
+        reviewer.refresh_author_decisions = lambda *_: None
+
+        commenter.process(c, _row(c, card_id))
+
+        self.assertEqual(self.posted, [], "남이 이미 올린 지적은 다시 올리지 않는다")
+        row = c.execute("SELECT status, comment_id FROM findings WHERE fp=?", (FP,)).fetchone()
+        self.assertEqual((row["status"], row["comment_id"]), ("posted", "exists"))
+
+    def test_first_time_finding_in_reminder_pass_does_not_claim_to_be_a_reminder(self):
+        """리마인드 패스에서 처음 올리는 지적은 게시하되 '지난 리뷰의' 문구를 붙이지 않는다."""
+        new = "owner/repo#1:src/new.ts:40:new-rule"
+        c = _conn()
+        card_id = _card(c)                                # force_post=True
+        _finding(c, card_id, "confirmed", fp=new)         # 처음 찾음, 마커 없음
+        reviewer.refresh_author_decisions = lambda *_: None
+
+        commenter.process(c, _row(c, card_id))
+
+        self.assertEqual(len(self.posted), 1)
+        self.assertIn(new, self.posted[0])
+        self.assertNotIn(INTRO, self.posted[0])
+
+    def test_pure_reminder_keeps_the_reminder_intro(self):
+        mine = "owner/repo#1:src/mine.ts:30:my-rule"
+        c = _conn()
+        card_id = _card(c)
+        _finding(c, card_id, "unresolved", fp=mine)
+        c.execute("UPDATE findings SET comment_id='https://x/1' WHERE fp=?", (mine,))
+        ghclient.list_review_comments = lambda repo, pr: [
+            {"body": f"🤖 내 지난 묶음\n<!-- hermes:fp={mine} -->"}]
+        reviewer.refresh_author_decisions = lambda *_: None
+
+        commenter.process(c, _row(c, card_id))
+
+        self.assertEqual(len(self.posted), 1)
+        self.assertIn(INTRO, self.posted[0])
 
     def test_only_held_findings_means_nothing_is_posted(self):
         c = _conn()
@@ -172,6 +226,7 @@ class CommenterReminderTest(unittest.TestCase):
         c = _conn()
         card_id = _card(c)
         _finding(c, card_id, "confirmed")
+        _mine(c)
         reviewer.refresh_author_decisions = lambda *_: None
 
         commenter.process(c, _row(c, card_id))

@@ -146,10 +146,16 @@ def process(c, card):
     # 이 조합은 2회차 리뷰에서만 나타난다 — 1회차엔 남의 지적을 그 자리에서
     # exists 로 받고 끝나지만(force=false), 그다음 리뷰에서 closure 가 그걸
     # unresolved 로 판정하면 force 가 켜지고 마커 검사를 통째로 건너뛴다.
+    #
+    # force 가 마커 검사를 건너뛰어도 되는 건 **내가 전에 올린** 지적뿐이다. 이번
+    # 리뷰에서 처음 나온 지적(comment_id 없음)은 force 여도 마커를 본다 — 남이 이미
+    # 올린 것이면 받아만 둔다. 안 그러면 리마인드 묶음에 실려 남의 지적이 "지난
+    # 리뷰의 아래 지적" 이라는 문구와 함께 내 이름으로 나간다(#10066: breadceo 가
+    # 2분 전에 올린 지적을 그대로 재게시했다).
     fresh = []
     for f in postable:
-        adopted = f["comment_id"] == "exists"
-        if (adopted or not force) and any(
+        reminding = force and f["comment_id"] not in (None, "", "exists")
+        if not reminding and any(
                 feedback.marker_matches(f["fp"], b) for b in posted_bodies):
             db.set_finding_status(c, f["id"], "posted", comment_id="exists")
         else:
@@ -169,6 +175,10 @@ def process(c, card):
         c.execute("UPDATE cards SET payload=? WHERE id=?",
                   (json.dumps(meta, ensure_ascii=False), card["id"]))
 
+    # "지난 리뷰의 아래 지적…" 은 묶음 전부가 내가 전에 올린 것일 때만 참이다.
+    # 처음 올리는 지적이 섞이면 기본 인트로로 낸다.
+    if force and any(f["comment_id"] in (None, "", "exists") for f in fresh):
+        intro = ""
     subject = _review_subject(policy)
     body = render_bundle(author, fresh, mention=force or not already, intro=intro,
                          subject=subject,
