@@ -1,0 +1,13 @@
+README.md
+  h_03b13cada2edad 53-56,89,113-118
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "ce49323eb575d7e24228910222bf130cb3f28d4c",
+  "prompts": {},
+  "humans": {
+    "h_03b13cada2edad": {
+      "author": "woong@zigbang.com"
+    }
+  }
+}
