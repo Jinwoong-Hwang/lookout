@@ -1,0 +1,15 @@
+src/verifier.py
+  h_03b13cada2edad 27,41-50
+tests/test_verifier_diff_budget.py
+  h_03b13cada2edad 1-96
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "60effb3739cd717c88ff64b941dd7a33c63cfd6f",
+  "prompts": {},
+  "humans": {
+    "h_03b13cada2edad": {
+      "author": "woong@zigbang.com"
+    }
+  }
+}
