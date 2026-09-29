@@ -130,6 +130,7 @@ CREATE INDEX IF NOT EXISTS idx_findings_card ON findings(card_id);
 CREATE INDEX IF NOT EXISTS idx_inbox_processed ON inbox(processed);
 CREATE INDEX IF NOT EXISTS idx_mentions_status ON mentions(status);
 CREATE INDEX IF NOT EXISTS idx_feedback_card ON review_feedback_snapshots(card_id);
+CREATE INDEX IF NOT EXISTS idx_events_key_type_id ON events(key,type,id);
 """
 
 
