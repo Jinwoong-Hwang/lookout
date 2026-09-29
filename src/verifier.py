@@ -24,7 +24,7 @@ def process(c, card):
         db.set_status(c, card["id"], terminal)
         return
 
-    diff, manifest = prdiff.collect(c, card, VERIFY_DIFF_CHARS)
+    raw_diff = prdiff.fetch(c, card)
     is_doc = policy.get("profile_type") == "doc"
     try:
         author = ghclient.pr_author_identity(repo, pr)
@@ -38,6 +38,16 @@ def process(c, card):
     try:
         wt = worktree.make_worktree(repo, pr, head)
         for f in pending:
+            # 판정할 지적의 파일은 예산과 무관하게 넣는다. 안 그러면 정작 그 파일이
+            # 빠진 채로 판정한다 — #10066 실측: diff 537KB/81파일에 예산 40,000 이라
+            # 10개만 들어갔고 검증한 3건의 파일이 **전부** 빠져 있었다. closure 는
+            # 이미 같은 방식을 쓴다(reviewer._run_closure).
+            diff, manifest, omitted = prdiff.pack(
+                raw_diff, VERIFY_DIFF_CHARS, prefer=[f["file"]])
+            if omitted:
+                db.log_event(c, "diff_truncated", card["key"],
+                             {"fp": f["fp"], "omitted_files": omitted,
+                              "total_chars": len(raw_diff), "budget": VERIFY_DIFF_CHARS})
             detail = json.loads(f["body"]) if f["body"] else {}
             prompt = prompt_tpl.render(
                 profiles.prompt_name(policy, "verify"), REPO=repo, PR=pr, HEAD=head,
