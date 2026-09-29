@@ -1,0 +1,13 @@
+CHANGELOG.md
+  h_03b13cada2edad 9-33
+---
+{
+  "schema_version": "zax-attestation/1.1.0",
+  "base_commit_sha": "21bb05b8ad432151ac77bf55bb39d8e53d67fd2d",
+  "prompts": {},
+  "humans": {
+    "h_03b13cada2edad": {
+      "author": "woong@zigbang.com"
+    }
+  }
+}
