@@ -136,6 +136,10 @@ def _run_closure(c, card, priors, diff, engine, wt, policy,
     판정기가 고른다 — 인용 검증과 운영자 게이트가 뒤를 받는다.
     """
     prompt_file = profiles.prompt_name(policy, "closure")
+    # diff 는 **자르지 않은 원본**이어야 한다. 리뷰 프롬프트용으로 이미 패킹한 것을
+    # 넘기면 아래 prefer 가 무력해진다 — 그 파일이 앞 단계에서 이미 빠졌으면
+    # 되살릴 수 없다. #10066 재현 실측: 리뷰 패킹이 57개 파일을 떨궜고 그 안에
+    # 판정 대상 2개가 들어 있어, prefer 를 넣고도 대상 파일 없이 판정했다.
     # 문자로 자르면 파일 중간에서 끊기므로 여기서도 파일 단위로 다시 담는다
     sources = {}
     for r in all_replies:
@@ -310,7 +314,7 @@ def process(c, card):
                 }
                 _save_payload(c, card["id"], meta)
                 db.log_event(c, "doc_summary_planned", card["key"], meta["doc_summary"])
-            judged = _run_closure(c, card, priors, diff, engine, wt, policy,
+            judged = _run_closure(c, card, priors, raw_diff, engine, wt, policy,
                                   author_identity, author_replies, plan)
             context = doc_planner.build_context(wt, diff, changed_files, plan)
             prompt = prompt_tpl.render(
@@ -323,7 +327,7 @@ def process(c, card):
                 DOC_CONTEXT=context,
             )
         else:
-            judged = _run_closure(c, card, priors, diff, engine, wt, policy,
+            judged = _run_closure(c, card, priors, raw_diff, engine, wt, policy,
                                   author_identity, author_replies)
             prompt = prompt_tpl.render(
                 profiles.prompt_name(policy, "review", engine),

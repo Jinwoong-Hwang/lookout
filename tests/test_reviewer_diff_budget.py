@@ -59,6 +59,25 @@ class ReviewerDiffBudgetTest(unittest.TestCase):
         self.assertEqual(seen["diff"], self.raw,
                          "planner got the packed diff — large-PR thresholds would under-count")
 
+    def test_closure_gets_the_raw_diff_so_prefer_can_still_reach_its_file(self):
+        """판정은 잘리지 않은 diff 위에서 다시 담아야 한다.
+
+        closure 는 `prefer=[그 지적의 파일]` 로 대상 파일을 예산과 무관하게 넣는데,
+        리뷰용으로 이미 잘라 둔 diff 를 넘기면 그 파일이 앞에서 빠진 뒤라 되살릴
+        수 없다. #10066 재현 실측 — 리뷰 패킹이 57개 파일을 떨궜고 그 안에 판정
+        대상 2개가 있어, prefer 를 넣고도 대상 파일 없이 판정했다.
+        """
+        seen = {}
+        real = reviewer._run_closure
+        reviewer._run_closure = lambda c, card, priors, diff, *a, **k: (
+            seen.update(diff=diff) or set())
+        prompt_tpl.render = lambda *_a, **_k: "p"
+        try:
+            reviewer.process(self.c, self._card("code"))
+        finally:
+            reviewer._run_closure = real
+        self.assertEqual(seen["diff"], self.raw)
+
     def test_prompts_get_the_packed_diff_and_the_manifest(self):
         tokens = {}
         prompt_tpl.render = lambda name, **kw: tokens.setdefault(name, kw) and "p" or "p"
