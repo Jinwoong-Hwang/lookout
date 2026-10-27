@@ -80,7 +80,13 @@ def issue_list(repo: str, assignee: str = None, title_prefixes=None,
 def pr_diff(repo: str, pr: int) -> str:
     """Unified diff via the API. Raises DiffTooLarge when the PR exceeds GitHub's
     20k-line diff cap — worktree.local_diff() computes it from the clone instead."""
-    proc = _run(["pr", "diff", str(pr), "--repo", repo], check=False)
+    args = ["pr", "diff", str(pr), "--repo", repo]
+    proc = _run(args, check=False)
+    if proc.returncode != 0 and "escape sequences" in proc.stderr:
+        # gh 2.100+ 는 diff 에 ESC 바이트가 있으면 파이프 출력을 거부한다(#10255 는
+        # 번들 JS 를 품은 patches/*.patch 를 지웠다). 받는 쪽은 터미널이 아니라
+        # 프롬프트라 원문 그대로가 맞다 — 플래그를 모르는 구버전 gh 를 위해 거부됐을 때만 붙인다.
+        proc = _run(args + ["--allow-escape-sequences"], check=False)
     if proc.returncode != 0:
         err = proc.stderr.strip()
         if "too_large" in err or "exceeded the maximum number of lines" in err:

@@ -220,3 +220,47 @@ class PurgeKeepsOpenFindingsTest(unittest.TestCase):
 
         self.assertEqual(out["findings"], 1)
         self.assertEqual(out["cards"], 1)
+
+
+class PrDiffEscapeSequencesTest(unittest.TestCase):
+    """gh 2.100+ 는 ESC 바이트가 든 diff 를 파이프로 내보내지 않는다. #10255 가 번들
+    JS(ANSI 색 코드 포함)를 품은 패치 파일을 지우자 리뷰가 diff 단계에서 계속 죽었다."""
+
+    REFUSED = ("the diff contains terminal escape sequences; "
+               "pass --allow-escape-sequences to output it anyway")
+
+    def _wire(self, respond):
+        saved = ghclient._run
+        self.addCleanup(setattr, ghclient, "_run", saved)
+        calls = []
+
+        class Proc:
+            def __init__(self, rc, out="", err=""):
+                self.returncode, self.stdout, self.stderr = rc, out, err
+
+        def fake_run(args, check=True):
+            calls.append(args)
+            return Proc(*respond(args))
+
+        ghclient._run = fake_run
+        return calls
+
+    def test_refused_diff_is_fetched_verbatim_on_retry(self):
+        diff = mkfile("patches/x.patch", 0, 1).replace("old0", "\x1b[33mold0")
+        calls = self._wire(lambda a: (0, diff) if "--allow-escape-sequences" in a
+                           else (1, "", self.REFUSED))
+        self.assertEqual(ghclient.pr_diff("o/r", 1), diff)
+        self.assertEqual(len(calls), 2)
+
+    def test_the_flag_is_not_sent_when_gh_does_not_ask_for_it(self):
+        """플래그를 모르는 구버전 gh 에 붙이면 모든 diff 가 unknown flag 로 실패한다."""
+        calls = self._wire(lambda a: (0, mkfile("a.py", 1)))
+        ghclient.pr_diff("o/r", 1)
+        self.assertEqual(len(calls), 1)
+        self.assertNotIn("--allow-escape-sequences", calls[0])
+
+    def test_other_failures_still_raise_without_a_retry(self):
+        calls = self._wire(lambda a: (1, "", "HTTP 502"))
+        with self.assertRaises(ghclient.GhError):
+            ghclient.pr_diff("o/r", 1)
+        self.assertEqual(len(calls), 1)
