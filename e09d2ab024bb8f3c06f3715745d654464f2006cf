@@ -1,0 +1,48 @@
+src/ghclient.py
+  c23dcdf7aba423c8 80-113
+  7ee2e5cc78dbe924 80-120,124-130
+---
+{
+  "schema_version": "zax-attestation/1.2.0",
+  "base_commit_sha": "e09d2ab024bb8f3c06f3715745d654464f2006cf",
+  "prompts": {
+    "7ee2e5cc78dbe924": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4f2beaba-adf8-4790-817b-ac9f716e84ab",
+        "model": "claude-opus-5-5"
+      },
+      "skills": [
+        {
+          "id": "clear",
+          "ts": "2026-10-27T06:07:21.350Z"
+        }
+      ],
+      "tool_counts": {
+        "Bash": 14
+      },
+      "total_additions": 48,
+      "total_deletions": 0,
+      "overriden_lines": 0
+    },
+    "c23dcdf7aba423c8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5393aed3-c08e-4cfc-84d9-ed199c290b9b",
+        "model": "claude-opus-5-5"
+      },
+      "skills": [
+        {
+          "id": "clear",
+          "ts": "2026-10-13T07:41:16.712Z"
+        }
+      ],
+      "tool_counts": {
+        "Bash": 18
+      },
+      "total_additions": 34,
+      "total_deletions": 0,
+      "overriden_lines": 0
+    }
+  }
+}
