@@ -130,6 +130,7 @@ CREATE INDEX IF NOT EXISTS idx_findings_card ON findings(card_id);
 CREATE INDEX IF NOT EXISTS idx_inbox_processed ON inbox(processed);
 CREATE INDEX IF NOT EXISTS idx_mentions_status ON mentions(status);
 CREATE INDEX IF NOT EXISTS idx_feedback_card ON review_feedback_snapshots(card_id);
+CREATE INDEX IF NOT EXISTS idx_events_key_type_ts ON events(key,type,ts);
 """
 
 
@@ -155,6 +156,8 @@ def connect():
 def init():
     with connect() as c:
         c.executescript(SCHEMA)
+        # migration: rowid-backed `id` added no selectivity; `ts` covers cooldown reads.
+        c.execute("DROP INDEX IF EXISTS idx_events_key_type_id")
         # migration: review engine per card (claude | codex)
         cols = [r["name"] for r in c.execute("PRAGMA table_info(cards)").fetchall()]
         if "engine" not in cols:

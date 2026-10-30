@@ -8,15 +8,17 @@ blocked are intentionally skipped.
 Run: python -m src.tick
 """
 import fcntl
+import logging
 import os
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 
-from . import (approver, commenter, config, db, engines, feedback, monitor, notify,
+from . import (approver, commenter, config, db, engines, feedback, ghclient, monitor, notify,
                poller, reviewer, router, verifier, worktree)
 
 CFG = config.CFG
+LOG = logging.getLogger(__name__)
 LOCK_PATH = config.path("logs/tick.lock")
 
 
@@ -100,10 +102,10 @@ def _requeue_quota(c, card, label, msg):
         )
 
 
-def _process_one(fn, card, label):
+def _process_one(fn, card, label, kwargs=None):
     try:
         with db.connect() as c:
-            fn(c, card)
+            fn(c, card, **(kwargs or {}))
     except Exception as exc:  # noqa: BLE001
         with db.connect() as c:
             # 쿼터 소진은 결함이 아니므로 stage_error로 세지 않는다 — 세면 3번 만에
@@ -164,16 +166,54 @@ def _drain(statuses, fn, label, max_waves=30, kind=None):
         _stage(statuses, fn, label, kind)
 
 
-def _monitor_roots():
+def _monitor_state_stage(states, statuses, fn, label, kind):
     with db.connect() as c:
-        roots = db.cards_in(c, ["monitoring"], kind="root")
-    for card in roots:
-        try:
-            with db.connect() as c:
-                monitor.process_root(c, card)
-        except Exception:  # noqa: BLE001
-            with db.connect() as c:
-                db.log_event(c, "stage_error", card["key"], {"stage": "monitor_root"})
+        cards = db.cards_in(c, statuses, kind=kind)
+    if not cards:
+        return
+
+    def process(card):
+        # Missing batch entries deliberately pass info=None so monitor.process_*
+        # uses its authoritative per-PR gh pr view fallback.
+        info = states.get((card["repo"], card["pr_number"]))
+        _process_one(fn, card, label, {"info": info})
+
+    if MAX_CONCURRENT <= 1 or len(cards) == 1:
+        for card in cards:
+            process(card)
+        return
+    with ThreadPoolExecutor(max_workers=MAX_CONCURRENT) as ex:
+        list(ex.map(process, cards))
+
+
+def _monitor_github_state():
+    """Resolve every monitored card's PR state in bounded GraphQL batches."""
+    stages = [
+        (["monitoring"], monitor.process_root, "monitor_root", "root"),
+        (["reviewing", "verifying", "commenting"], monitor.process_active_stale,
+         "monitor_active_stale", "review"),
+        (["commented"], monitor.process_commented, "monitor_commented", "review"),
+        (["triage", "failed"], monitor.process_triage, "monitor_triage", "review"),
+        (["approve_blocked"], monitor.process_approve_stale,
+         "monitor_approve_stale", "approve"),
+    ]
+    candidates = []
+    with db.connect() as c:
+        for statuses, _fn, _label, kind in stages:
+            candidates.extend(db.cards_in(c, statuses, kind=kind))
+    if not candidates:
+        return
+    try:
+        states = ghclient.pr_states([(card["repo"], card["pr_number"])
+                                     for card in candidates])
+    except Exception:  # noqa: BLE001
+        # Keep the batch failure visible in daemon logs, then fall back per card.
+        # Per-card failures are recorded below with a key and traceback by
+        # _process_one instead of accumulating invisible key=NULL DB rows.
+        LOG.exception("GitHub state batch failed; falling back to per-PR reads")
+        states = {}
+    for statuses, fn, label, kind in stages:
+        _monitor_state_stage(states, statuses, fn, label, kind)
 
 
 def _wave(statuses, fn, label, kind=None):
@@ -204,14 +244,8 @@ def run_once():
         router.drain(c)
     _maybe_poll()
 
-    # 1) 빠른 정리/진행 먼저 — 느린 리뷰에 막히지 않게 (머지·stale 즉시 archive)
-    _monitor_roots()                                                  # 머지/닫힘 PR archive
-    _stage(["reviewing", "verifying", "commenting"], monitor.process_active_stale,
-           "monitor_active_stale", kind="review")
-    _stage(["commented"], monitor.process_commented, "monitor_commented", kind="review")
-    _stage(["triage", "failed"], monitor.process_triage, "monitor_triage", kind="review")
-    _stage(["approve_blocked"], monitor.process_approve_stale,
-           "monitor_approve_stale", kind="approve")
+    # 1) 빠른 정리/진행 먼저 — 모든 PR 상태를 GraphQL batch로 조회한다.
+    _monitor_github_state()
     _fast_stages()
 
     # 2) 리뷰/검증을 wave 단위로 — 매 wave 뒤에 게이트/댓글을 끼워넣어, 리뷰가 lgtm을 만들면
