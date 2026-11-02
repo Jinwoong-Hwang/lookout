@@ -1,0 +1,20 @@
+src/dashboard.py
+  h_03b13cada2edad 285-286,627-631,647,704-705,707,721,725,732,742,804,910-988,1172
+src/ghclient.py
+  h_03b13cada2edad 80-120
+src/poller.py
+  h_03b13cada2edad 36,38,55,64-66,87-96,100
+tests/test_issue_source.py
+  h_03b13cada2edad 35-36,47,149-181
+---
+{
+  "schema_version": "zax-attestation/1.2.0",
+  "base_commit_sha": "67e031a336be82f6e3b8b0f0fd822b61aa0db8e5",
+  "prompts": {},
+  "humans": {
+    "h_03b13cada2edad": {
+      "author": "woong@zigbang.com"
+    }
+  },
+  "attribution_source": "human_fallback"
+}
