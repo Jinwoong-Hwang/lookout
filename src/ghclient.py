@@ -77,6 +77,47 @@ def issue_list(repo: str, assignee: str = None, title_prefixes=None,
     return rows
 
 
+def issue_dates(repo: str, numbers) -> dict:
+    """{번호: {"target": "YYYY-MM-DD"|"", "start": ...}} — 기한별 뷰용.
+
+    Target/Start date 는 Project 커스텀 필드가 아니라 org 단위 issue field 라
+    `gh issue list --json` 으로는 안 나온다(projectItems 에는 status 만 실린다).
+    GraphQL 별칭으로 한 번에 묻는다 — 부모 에픽 번호도 같이 넘겨 상속에 쓴다."""
+    numbers = sorted({int(n) for n in numbers})
+    if not numbers:
+        return {}
+    owner, name = repo.split("/", 1)
+    out = {}
+    for i in range(0, len(numbers), 50):   # 쿼리 복잡도 한도를 넘지 않게 잘라 묻는다
+        chunk = numbers[i:i + 50]
+        parts = "".join(
+            f"i{n}:issue(number:{n}){{number issueFieldValues(first:30){{nodes{{"
+            "... on IssueFieldDateValue{value field{... on IssueFieldDate{name}}}}}}"
+            for n in chunk)
+        query = f'query{{repository(owner:"{owner}",name:"{name}"){{{parts}}}}}'
+        # 없는 번호 하나가 NOT_FOUND 를 내도 gh 는 비정상 종료한다 — 부분 응답을 살린다
+        proc = _run(["api", "graphql", "-f", f"query={query}"], check=False)
+        try:
+            data = json.loads(proc.stdout or "{}")
+        except json.JSONDecodeError:
+            data = {}
+        if not data.get("data"):
+            raise GhError(f"gh api graphql (issue dates) failed: {proc.stderr.strip()}")
+        repo_node = (data.get("data") or {}).get("repository") or {}
+        for node in repo_node.values():
+            if not node:
+                continue   # 지워졌거나 권한 밖인 번호
+            dates = {"target": "", "start": ""}
+            for v in (node.get("issueFieldValues") or {}).get("nodes") or []:
+                fname = ((v or {}).get("field") or {}).get("name")
+                if fname == "Target date":
+                    dates["target"] = v.get("value") or ""
+                elif fname == "Start date":
+                    dates["start"] = v.get("value") or ""
+            out[node["number"]] = dates
+    return out
+
+
 def pr_diff(repo: str, pr: int) -> str:
     """Unified diff via the API. Raises DiffTooLarge when the PR exceeds GitHub's
     20k-line diff cap — worktree.local_diff() computes it from the clone instead."""

@@ -32,6 +32,8 @@ class IssueSourceTest(unittest.TestCase):
         self.c.executescript(db.SCHEMA)
         self.c.execute("ALTER TABLE cards ADD COLUMN engine TEXT")
         self.saved_list = ghclient.issue_list
+        self.saved_dates = ghclient.issue_dates
+        ghclient.issue_dates = lambda *_a, **_k: {}   # 테스트가 실제 gh 를 부르지 않게
         self.saved_cfg = {k: poller.CFG.get(k) for k in
                           ("issue_repos", "issue_assignee", "issue_title_prefixes",
                            "issue_display_prefix")}
@@ -42,6 +44,7 @@ class IssueSourceTest(unittest.TestCase):
 
     def tearDown(self):
         ghclient.issue_list = self.saved_list
+        ghclient.issue_dates = self.saved_dates
         for k, v in self.saved_cfg.items():
             if v is None:
                 poller.CFG.pop(k, None)
@@ -142,6 +145,39 @@ class IssueSourceTest(unittest.TestCase):
         ghclient.issue_list = lambda *_a, **_k: [_issue(1767)]
         poller.poll_issues(self.c)
         self.assertEqual(self._payload(keys.issue_key(REPO, 1767))["ticket_status"], "")
+
+    # ── 기한(Target date, 읽기 전용) ─────────────────────────────────
+    def test_poll_carries_own_and_parent_target_date(self):
+        """기한별 뷰는 태스크 기한이 없으면 에픽 기한을 물려받는다 — 부모 번호도
+        같이 물어야 에픽이 내게 할당되지 않았을 때도 날짜가 온다."""
+        asked = []
+
+        def dates(_repo, numbers):
+            asked.append(set(numbers))
+            return {3138: {"target": "2026-10-13", "start": "2026-10-12"},
+                    2372: {"target": "2026-11-11", "start": ""}}
+        ghclient.issue_dates = dates
+        ghclient.issue_list = lambda *_a, **_k: [_issue(3138, parent=1830),
+                                                 _issue(3205, parent=2372)]
+        poller.poll_issues(self.c)
+
+        self.assertEqual(asked, [{3138, 3205, 1830, 2372}])
+        own = self._payload(keys.issue_key(REPO, 3138))
+        self.assertEqual((own["target_date"], own["start_date"]), ("2026-10-13", "2026-10-12"))
+        self.assertEqual(own["parent"]["target_date"], "")
+        child = self._payload(keys.issue_key(REPO, 3205))
+        self.assertEqual(child["target_date"], "")
+        self.assertEqual(child["parent"]["target_date"], "2026-11-11")
+
+    def test_date_lookup_failure_keeps_the_epic_view_alive(self):
+        def boom(*_a, **_k):
+            raise ghclient.GhError("graphql failed")
+        ghclient.issue_dates = boom
+        ghclient.issue_list = lambda *_a, **_k: [_issue(1767)]
+        poller.poll_issues(self.c)
+        self.assertEqual(self._payload(keys.issue_key(REPO, 1767))["target_date"], "")
+        types = [r["type"] for r in self.c.execute("SELECT type FROM events").fetchall()]
+        self.assertIn("issue_dates_error", types)
 
     def test_issue_and_pr_keys_do_not_collide_on_same_number(self):
         self.assertNotEqual(keys.issue_key(REPO, 7), keys.root_key(REPO, 7))

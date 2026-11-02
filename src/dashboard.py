@@ -282,6 +282,8 @@ def build_issues():
             "sub": meta.get("sub") or {},
             "ticket_status": meta.get("ticket_status", ""),
             "ticket_board": meta.get("ticket_board", ""),
+            "target_date": meta.get("target_date", ""),
+            "start_date": meta.get("start_date", ""),
             "updated_at": r["updated_at"],
         })
     return out
@@ -622,6 +624,11 @@ a.ehead:hover .etitle{color:var(--accent)}
 .irow .ititle{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .irow .imeta{flex:0 0 auto;display:flex;gap:5px;align-items:center;color:var(--muted);font-size:11.5px}
 .esec .empty{margin:8px 0 0 15px;text-align:left}
+/* 기한별 — 에픽별과 같은 이슈를 Target date 로 묶는다 */
+.duebar{display:flex;gap:6px;flex-wrap:wrap;margin:0 0 16px}
+.ehead.late .enum{color:#fb7185}
+.irow .iepic{flex:0 1 auto;max-width:28%;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  color:var(--muted);font-size:11.5px}
 </style></head><body>
 <header><h1>👁 Lookout</h1>
 <button id="refreshBtn" onclick="refresh()">🔄 PR 가져오기</button>
@@ -637,6 +644,7 @@ a.ehead:hover .etitle{color:var(--accent)}
   <button id="tFeedback" onclick="setView('feedback')"><span>💬 리뷰 피드백</span><span class="cnt" id="cFeedback">0</span></button>
   <div class="grp">이슈</div>
   <button id="tEpic" onclick="setView('epic')"><span>🎯 에픽별</span><span class="cnt" id="cEpic">0</span></button>
+  <button id="tDue" onclick="setView('due')"><span>📅 기한별</span><span class="cnt" id="cDue">0</span></button>
 </nav>
 <div class="main">
 <div class="filterbar" id="filterbar"></div>
@@ -693,9 +701,10 @@ function repoShort(r){return (r||'').split('/')[1]||r;}
 const REPO_COLORS=['#2dd4bf','#a78bfa','#fbbf24','#60a5fa','#4ade80','#fb7185'];
 function repoColor(r){let h=0;for(const ch of (r||''))h=(h*31+ch.charCodeAt(0))>>>0;return REPO_COLORS[h%REPO_COLORS.length];}
 function setRepo(r){REPO=r;renderFilter();render();}
-function viewData(){const src=VIEW==='epic'?ISSUES:DATA;return REPO==='all'?src:src.filter(c=>c.repo===REPO);}
+function isIssueView(){return VIEW==='epic'||VIEW==='due';}
+function viewData(){const src=isIssueView()?ISSUES:DATA;return REPO==='all'?src:src.filter(c=>c.repo===REPO);}
 function viewFeedbackData(){return REPO==='all'?FEEDBACK:FEEDBACK.filter(f=>f.repo===REPO);}
-function filterSource(){return VIEW==='feedback'?FEEDBACK:VIEW==='epic'?ISSUES:DATA;}
+function filterSource(){return VIEW==='feedback'?FEEDBACK:isIssueView()?ISSUES:DATA;}
 function normalizeRepo(){const src=filterSource();if(REPO!=='all'&&!src.some(x=>x.repo===REPO))REPO='all';}
 function renderFilter(){
   normalizeRepo();
@@ -709,17 +718,18 @@ function renderFilter(){
     h+=`<button class="chip ${on?'on':''}" style="${onStyle}" onclick="setRepo('${r}')"><span class="rdot" style="background:${col}"></span>${esc(repoShort(r))} <b>${n}</b></button>`;});
   bar.innerHTML=h;
 }
-const VIEW_TABS=[['tLane','lane'],['tAuthor','author'],['tFeedback','feedback'],['tEpic','epic']];
+const VIEW_TABS=[['tLane','lane'],['tAuthor','author'],['tFeedback','feedback'],['tEpic','epic'],['tDue','due']];
 function setView(v){VIEW=v;
   for(const [id,name] of VIEW_TABS)
     document.getElementById(id).classList.toggle('active',v===name);
-  document.getElementById('refreshBtn').textContent=v==='epic'?'🔄 이슈 가져오기':'🔄 PR 가져오기';
+  document.getElementById('refreshBtn').textContent=isIssueView()?'🔄 이슈 가져오기':'🔄 PR 가져오기';
   renderFilter();render();}
 function renderSideCounts(){
   document.getElementById('cLane').textContent=DATA.length;
   document.getElementById('cAuthor').textContent=DATA.length;
   document.getElementById('cFeedback').textContent=FEEDBACK.length;
   document.getElementById('cEpic').textContent=ISSUES.length;
+  document.getElementById('cDue').textContent=ISSUES.filter(c=>dueOf(c).date).length;
 }
 function forceRender(){render_();}
 async function load(){
@@ -729,7 +739,7 @@ async function load(){
   try{ISSUES=await ri.json();}catch(e){ISSUES=[];}
   try{ENGINES=await re.json();}catch(e){}
   document.getElementById('sub').textContent=
-    VIEW==='epic'?ISSUES.length+'개 이슈':DATA.length+'개 카드';
+    isIssueView()?ISSUES.length+'개 이슈':DATA.length+'개 카드';
   renderEngStat();
   renderSideCounts();
   renderFilter();
@@ -791,7 +801,7 @@ function render(){
   return render_();
 }
 function render_(){VIEW==='feedback'?renderFeedback():VIEW==='author'?renderByAuthor()
-    :VIEW==='epic'?renderEpics():renderLanes(LANES);}
+    :VIEW==='epic'?renderEpics():VIEW==='due'?renderDue():renderLanes(LANES);}
 function renderFeedback(){
   const list=viewFeedbackData();
   const board=document.getElementById('board');board.className='board stack';board.innerHTML='';
@@ -894,6 +904,85 @@ function renderEpics(){
       sec.appendChild(cc);
     }
     board.appendChild(sec);
+  }
+  board.scrollTop=top;
+}
+// 기한별 — 에픽별과 같은 ISSUES 를 Target date(org issue field)로 묶는다. 읽기 전용.
+// 태스크에 기한이 없으면 부모 에픽의 기한을 물려받되 '에픽 기한' 표시로 출처를 밝힌다 —
+// 섞어 놓고 말하지 않으면 내가 정한 날짜인지 에픽 일정인지 구분이 안 된다.
+const DUE_KEY='lookout_due_range';
+let DUE_RANGE=(()=>{try{return localStorage.getItem(DUE_KEY)||'all';}catch(e){return 'all';}})();
+function ymd(d){return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');}
+function addDays(d,n){const x=new Date(d);x.setDate(x.getDate()+n);return x;}
+function dueOf(c){
+  if(c.target_date)return {date:c.target_date,inherited:false};
+  const p=c.parent&&c.parent.target_date;
+  return p?{date:p,inherited:true}:{date:'',inherited:false};
+}
+function dueRanges(){
+  const now=new Date();now.setHours(0,0,0,0);
+  const today=ymd(now);
+  const wkEnd=ymd(addDays(now,(7-now.getDay())%7));          // 이번 주 일요일까지
+  const nwkEnd=ymd(addDays(now,(7-now.getDay())%7+7));
+  const moEnd=ymd(new Date(now.getFullYear(),now.getMonth()+1,0));
+  return [
+    ['all','전체',d=>true],
+    ['late','지남',d=>d&&d<today],
+    ['week','이번 주',d=>d&&d>=today&&d<=wkEnd],
+    ['next','다음 주',d=>d&&d>wkEnd&&d<=nwkEnd],
+    ['month','이번 달',d=>d&&d>=today&&d<=moEnd],
+    ['later','그 뒤',d=>d&&d>nwkEnd],
+    ['none','미지정',d=>!d],
+  ];
+}
+function setDueRange(r){DUE_RANGE=r;try{localStorage.setItem(DUE_KEY,r);}catch(e){}render();}
+function dday(date){
+  const t=new Date();t.setHours(0,0,0,0);
+  const n=Math.round((new Date(date+'T00:00:00')-t)/86400000);
+  return n===0?'D-day':n>0?'D-'+n:'D+'+(-n);
+}
+function dueRow(c,d){
+  const el=issueRow(c);
+  const meta=el.querySelector('.imeta');
+  if(d.inherited)meta.insertAdjacentHTML('afterbegin',`<span class="pill" title="이 티켓엔 기한이 없어 부모 에픽의 Target date 를 썼습니다">에픽 기한</span>`);
+  if(c.parent)el.querySelector('.ititle').insertAdjacentHTML('afterend',
+    `<span class="iepic" title="${esc(c.parent.title)}">🎯 ${esc(c.parent.display)} ${esc(c.parent.title)}</span>`);
+  return el;
+}
+function renderDue(){
+  const board=document.getElementById('board');
+  const top=board.scrollTop;
+  board.className='board stack';board.innerHTML='';
+  const list=viewData().map(c=>({c,d:dueOf(c)}));
+  const ranges=dueRanges();
+  if(!ranges.some(r=>r[0]===DUE_RANGE))DUE_RANGE='all';
+  const bar=document.createElement('div');bar.className='duebar';
+  bar.innerHTML=ranges.map(([k,label,f])=>
+    `<button class="chip ${DUE_RANGE===k?'on':''}" onclick="setDueRange('${k}')">${label} <b>${list.filter(x=>f(x.d.date)).length}</b></button>`).join('');
+  board.appendChild(bar);
+  const keep=ranges.find(r=>r[0]===DUE_RANGE)[2];
+  const G=new Map();
+  list.filter(x=>keep(x.d.date)).forEach(x=>{const k=x.d.date||'';if(!G.has(k))G.set(k,[]);G.get(k).push(x);});
+  // 가까운 기한부터, 미지정은 맨 아래
+  const keys=[...G.keys()].sort((a,b)=>(!a)-(!b)||a.localeCompare(b));
+  if(!keys.length){
+    const e=document.createElement('div');e.className='empty';e.textContent='해당 기한의 이슈가 없습니다';
+    board.appendChild(e);board.scrollTop=top;return;
+  }
+  const today=ymd(new Date());
+  const WD='일월화수목금토';
+  for(const k of keys){
+    const rows=G.get(k);
+    rows.sort((a,b)=>(a.d.inherited-b.d.inherited)||trank(a.c.ticket_status)-trank(b.c.ticket_status)||b.c.pr-a.c.pr);
+    const sec=document.createElement('div');sec.className='esec';
+    const head=k
+      ?`<div class="ehead${k<today?' late':''}"><span>📅</span><span class="enum">${k} (${WD[new Date(k+'T00:00:00').getDay()]})</span>`
+        +`<span class="etitle"></span><span class="n">${rows.length}</span><span class="ebits"><span class="pill">${dday(k)}</span></span></div>`
+      :`<div class="ehead"><span>📄</span><span class="etitle">기한 미지정</span><span class="n">${rows.length}</span></div>`;
+    sec.innerHTML=head;
+    const cc=document.createElement('div');cc.className='erows';
+    rows.forEach(x=>cc.appendChild(dueRow(x.c,x.d)));
+    sec.appendChild(cc);board.appendChild(sec);
   }
   board.scrollTop=top;
 }
@@ -1080,7 +1169,7 @@ async function refresh(){
   try{
     const r=await fetch('/api/refresh',{method:'POST',
       headers:{'Content-Type':'application/json','X-Lookout-Action':'1'},
-      body:JSON.stringify({scope:VIEW==='epic'?'issues':'review'})});const j=await r.json();
+      body:JSON.stringify({scope:isIssueView()?'issues':'review'})});const j=await r.json();
     await load();
     b.textContent=j.added>0?`+${j.added}건 추가`:'최신 상태';
   }catch(e){b.textContent='실패';}

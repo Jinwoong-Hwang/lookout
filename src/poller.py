@@ -33,8 +33,9 @@ def _ticket_status(issue: dict) -> tuple[str, str]:
     return "", ""
 
 
-def _issue_payload(repo: str, issue: dict) -> dict:
+def _issue_payload(repo: str, issue: dict, dates: dict = None) -> dict:
     parent = issue.get("parent") or None
+    dates = dates or {}
     sub = issue.get("subIssuesSummary") or {}
     ticket_status, ticket_board = _ticket_status(issue)
     return {
@@ -51,6 +52,7 @@ def _issue_payload(repo: str, issue: dict) -> dict:
             "display": _display(repo, parent["number"]),
             "title": parent.get("title") or "",
             "url": parent.get("url") or "",
+            "target_date": (dates.get(parent["number"]) or {}).get("target", ""),
         } if parent else None,
         # GitHub 기준 자식 진행도(내게 할당되지 않은 자식까지 포함). 보드에 보이는
         # 건수와 다를 수 있어 화면에서도 출처를 갈라 적는다.
@@ -59,6 +61,9 @@ def _issue_payload(repo: str, issue: dict) -> dict:
         # (팀 공용 보드라 봇이 건드릴 일이 아니다). 빈 값 = 프로젝트에 없거나 미상.
         "ticket_status": ticket_status,
         "ticket_board": ticket_board,
+        # 기한별 뷰 — org issue field(Target/Start date). 빈 값 = 미지정 또는 조회 실패.
+        "target_date": (dates.get(issue["number"]) or {}).get("target", ""),
+        "start_date": (dates.get(issue["number"]) or {}).get("start", ""),
     }
 
 
@@ -79,10 +84,20 @@ def poll_issues(c):
             db.log_event(c, "issue_poller_error", detail={"repo": repo, "error": str(e)})
             continue
 
+        # 기한은 목록 조회에 안 실려 따로 묻는다. 실패해도 에픽별 뷰는 살아야 하니
+        # 날짜 없이 진행한다 — 빈 기한은 '미지정' 칸으로 간다.
+        wanted = {i["number"] for i in issues}
+        wanted |= {i["parent"]["number"] for i in issues if i.get("parent")}
+        try:
+            dates = ghclient.issue_dates(repo, wanted)
+        except ghclient.GhError as e:
+            db.log_event(c, "issue_dates_error", detail={"repo": repo, "error": str(e)})
+            dates = {}
+
         for issue in issues:
             key = keys.issue_key(repo, issue["number"])
             existing = db.get_card(c, key)
-            payload = _issue_payload(repo, issue)
+            payload = _issue_payload(repo, issue, dates)
             if existing is None:
                 db.upsert_card(c, key, "issue", repo, issue["number"],
                                status=ISSUE_OPEN, payload=payload)
