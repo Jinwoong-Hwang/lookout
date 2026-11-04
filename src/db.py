@@ -125,8 +125,8 @@ CREATE TABLE IF NOT EXISTS slack_names (
   updated_at REAL NOT NULL
 );
 
--- 작성자별 자동 리뷰 on/off — 대시보드에서 누른 값. config 의 auto_review_authors 보다
--- 우선한다. 행이 없으면 config 기본값을 따른다.
+-- 작성자별 자동 리뷰 on/off — 대시보드 사람별 뷰의 토글이 유일한 출처다. 행이 없으면 OFF.
+-- (옛 config 의 auto_review_authors 는 init 때 한 번만 여기로 옮기고 이후엔 읽지 않는다)
 CREATE TABLE IF NOT EXISTS author_prefs (
   login       TEXT PRIMARY KEY,
   auto_review INTEGER NOT NULL,                   -- 1 = 자동 리뷰, 0 = triage 대기
@@ -173,6 +173,53 @@ def init():
             if name not in finding_cols:
                 c.execute(f"ALTER TABLE findings ADD COLUMN {name} TEXT")
         _drop_line_from_fps(c)
+        _migrate_auto_review_from_config(c)
+
+
+AUTO_REVIEW_MIGRATED = "auto_review_authors_migrated"
+
+
+def _card_author(payload: str) -> str:
+    try:
+        meta = json.loads(payload) if payload else {}
+        if isinstance(meta, str):  # legacy double-encoded payloads
+            meta = json.loads(meta)
+    except ValueError:
+        return ""
+    author = meta.get("author", "") if isinstance(meta, dict) else ""
+    return author if isinstance(author, str) else ""
+
+
+def live_review_authors(c) -> set:
+    """지금 보드(archived 아닌 review 카드)에 카드가 있는 작성자."""
+    rows = c.execute("SELECT payload FROM cards WHERE kind='review'"
+                     " AND status!='archived'").fetchall()
+    return {a for a in (_card_author(r["payload"]) for r in rows) if a}
+
+
+def _migrate_auto_review_from_config(c):
+    """config 의 auto_review_authors 를 토글로 **한 번만** 옮긴다.
+
+    자동 리뷰는 이제 대시보드 토글만 본다. 그냥 config 를 안 읽으면, 거기 사람을 적어 둔
+    인스턴스는 업데이트하는 순간 조용히 자동 리뷰가 꺼진다. 옮긴 뒤엔 meta 에 표시해
+    다시 하지 않는다 — config 를 다시 고쳐도 토글이 바뀌지 않는다. 이미 누른 토글은
+    덮지 않는다(INSERT OR IGNORE). ["*"]/["all"] 은 사람 단위로 펼친다: watch_authors +
+    지금 보드에 카드가 있는 작성자."""
+    if get_meta(c, AUTO_REVIEW_MIGRATED):
+        return
+    listed = [a for a in (config.CFG.get("auto_review_authors") or []) if isinstance(a, str) and a]
+    wildcard = any(a in ("*", "all") for a in listed)
+    logins = {a for a in listed if a not in ("*", "all")}
+    if wildcard:
+        logins |= {a for a in (config.CFG.get("watch_authors") or []) if isinstance(a, str) and a}
+        logins |= live_review_authors(c)
+    for login in sorted(logins):
+        c.execute("INSERT OR IGNORE INTO author_prefs(login, auto_review, updated_at)"
+                  " VALUES (?,1,?)", (login, now()))
+    set_meta(c, AUTO_REVIEW_MIGRATED, "1")
+    if listed:
+        log_event(c, "auto_review_migrated",
+                  detail={"from_config": listed, "seeded_on": sorted(logins)})
 
 
 def _fp_without_line(fp: str):
@@ -231,19 +278,19 @@ def set_meta(c, k: str, v: str):
 
 
 # ---- author prefs -----------------------------------------------------------
-def auto_review_overrides(c) -> dict:
-    """{login: bool} — 대시보드에서 바꾼 작성자만 들어 있다."""
+def auto_review_settings(c) -> dict:
+    """{login: bool} — 토글을 한 번이라도 누른(또는 config 에서 옮겨 온) 작성자."""
     return {r["login"]: bool(r["auto_review"])
             for r in c.execute("SELECT login, auto_review FROM author_prefs")}
 
 
-def get_auto_review_override(c, login: str):
-    """True/False = 대시보드에서 정한 값, None = 정한 적 없음(config 를 따른다)."""
+def get_auto_review(c, login: str) -> bool:
+    """토글 값. 누른 적 없으면 OFF."""
     row = c.execute("SELECT auto_review FROM author_prefs WHERE login=?", (login,)).fetchone()
-    return None if row is None else bool(row["auto_review"])
+    return bool(row and row["auto_review"])
 
 
-def set_auto_review_override(c, login: str, enabled: bool):
+def set_auto_review(c, login: str, enabled: bool):
     c.execute(
         "INSERT INTO author_prefs(login, auto_review, updated_at) VALUES (?,?,?)"
         " ON CONFLICT(login) DO UPDATE SET auto_review=excluded.auto_review,"

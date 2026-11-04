@@ -258,41 +258,23 @@ def do_finding_action(action, finding_id):
 AUTHOR_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-\[\]/]{0,63}$")
 
 
-def _card_author(payload: str) -> str:
-    try:
-        meta = json.loads(payload) if payload else {}
-        if isinstance(meta, str):  # legacy double-encoded payloads
-            meta = json.loads(meta)
-    except ValueError:
-        return ""
-    return meta.get("author", "") if isinstance(meta, dict) else ""
-
-
 def build_authors():
-    """사람별 뷰의 자동 리뷰 토글 — 추적 중인 작성자 + 지금 보드에 카드가 있는 작성자.
+    """사람별 뷰의 자동 리뷰 토글 — 추적 중인 작성자 + 지금 보드에 카드가 있는 작성자
+    + 토글이 켜진 작성자(카드가 없어도 끌 수 있어야 한다).
 
-    config 는 매번 다시 읽는다. 대시보드는 오래 떠 있는 프로세스라 import 때 읽은
-    auto_review_authors 는 낡을 수 있고, 카드를 만드는 tick 은 매번 새로 읽는다."""
+    자동 리뷰 값은 DB 토글만 본다(config 는 읽지 않는다). watch_authors 는 여전히 config
+    라서 매번 다시 읽는다 — 대시보드는 오래 떠 있는 프로세스다."""
     try:
         cfg = config.load()
     except (OSError, ValueError):
         cfg = CFG
-    defaults = cfg.get("auto_review_authors") or []
     with db.connect() as c:
-        overrides = db.auto_review_overrides(c)
-        rows = c.execute("SELECT payload FROM cards WHERE kind='review'"
-                         " AND status!='archived'").fetchall()
-    on_board = {a for a in (_card_author(r["payload"]) for r in rows) if a}
-    out = []
-    for login in sorted(set(cfg.get("watch_authors") or []) | on_board, key=str.lower):
-        override = overrides.get(login)
-        out.append({
-            "login": login,
-            "auto_review": (router.config_auto_review(login, defaults)
-                            if override is None else override),
-            "source": "config" if override is None else "dashboard",
-        })
-    return out
+        settings = db.auto_review_settings(c)
+        on_board = db.live_review_authors(c)
+    watched = {a for a in (cfg.get("watch_authors") or []) if isinstance(a, str) and a}
+    turned_on = {login for login, on in settings.items() if on}
+    return [{"login": login, "auto_review": settings.get(login, False)}
+            for login in sorted(watched | on_board | turned_on, key=str.lower)]
 
 
 def do_author_setting(login, enabled):
@@ -302,7 +284,7 @@ def do_author_setting(login, enabled):
     if not isinstance(login, str) or not AUTHOR_RE.match(login) or not isinstance(enabled, bool):
         return False
     with db.connect() as c:
-        db.set_auto_review_override(c, login, enabled)
+        db.set_auto_review(c, login, enabled)
         db.log_event(c, "operator_auto_review", None, {"login": login, "auto_review": enabled})
     return True
 
@@ -1091,8 +1073,7 @@ function escA(s){return esc(s).replace(/"/g,'&quot;');}
 function autoToggle(login){
   const a=AUTHORS.find(x=>x.login===login);if(!a)return '';
   const tip=(a.auto_review?'자동 리뷰 켜짐 — 새 PR·새 커밋을 Triage 없이 바로 리뷰합니다':'자동 리뷰 꺼짐 — 새 PR 은 Triage 에서 기다립니다')
-    +(a.source==='dashboard'?' (대시보드에서 설정)':' (config 기본값)')
-    +'. repo 정책이 막은 곳(예: product-hub)은 켜도 Triage 로 갑니다.';
+    +'. repo 정책이 막은 곳(예: product-hub)은 켜도 Triage 로 갑니다. 설정은 DB 에 저장돼 재시작·업데이트 후에도 유지됩니다.';
   return `<button class="artog ${a.auto_review?'on':''}" data-login="${escA(a.login)}" data-on="${a.auto_review?1:0}" title="${escA(tip)}" onclick="toggleAutoReview(event,this)">🤖 자동 리뷰 ${a.auto_review?'ON':'OFF'}</button>`;
 }
 async function toggleAutoReview(e,btn){e.stopPropagation();

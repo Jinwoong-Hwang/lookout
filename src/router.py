@@ -12,8 +12,6 @@ from . import config, db, engines, ghclient, keys, profiles, slack_names
 CFG = config.CFG
 ALLOWLIST = set(CFG["allowlist"])
 WATCH_AUTHORS = set(CFG.get("watch_authors") or [])
-AUTO_REVIEW_AUTHORS = set(CFG.get("auto_review_authors") or [])
-AUTO_REVIEW_ALL = bool(AUTO_REVIEW_AUTHORS & {"*", "all"})
 MY_SLACK = CFG.get("slack_user_id", "")
 MAX_INBOX_RETRIES = 5  # 같은 inbox 항목이 이만큼 실패하면 포기(무한 재시도 방지)
 SLACK_WORKSPACE = CFG.get("slack_workspace", "")
@@ -28,30 +26,13 @@ def _author_ok(login: str) -> bool:
     return not WATCH_AUTHORS or login in WATCH_AUTHORS
 
 
-def config_auto_review(login: str, authors=None) -> bool:
-    """config.json 기본값. `authors` 를 주면 그 목록으로 판단한다 — 대시보드는 오래
-    떠 있는 프로세스라 import 시점 값이 아니라 방금 읽은 config 를 넘긴다."""
-    if authors is None:
-        return AUTO_REVIEW_ALL or login in AUTO_REVIEW_AUTHORS
-    authors = set(authors)
-    return bool(authors & {"*", "all"}) or login in authors
+def _initial_status(repo: str, auto: bool) -> str:
+    """자동 리뷰가 켜진 작성자는 triage 를 건너뛴다 — `auto` 는 대시보드 토글 값.
 
-
-def auto_review_for(c, login: str) -> bool:
-    """대시보드에서 정한 값이 있으면 그것, 없으면 config 기본값."""
-    override = db.get_auto_review_override(c, login)
-    return config_auto_review(login) if override is None else override
-
-
-def _initial_status(repo: str, login: str, auto: bool = None) -> str:
-    """Auto-review authors skip triage unless the repo policy opts out.
-
-    repo 정책(`auto_review: false`, 예: product-hub)이 사람별 설정보다 우선한다."""
+    repo 정책(`auto_review: false`, 예: product-hub)이 사람별 토글보다 우선한다."""
     policy = profiles.policy_for_repo(repo)
     if policy.get("auto_review") is False:
         return "triage"
-    if auto is None:
-        auto = config_auto_review(login)
     return "intake" if auto else "triage"
 
 
@@ -77,7 +58,7 @@ def ensure_pr_cards(c, repo: str, pr: int, source: str = "webhook"):
     # review card (per head). New head -> new key -> fresh review.
     vkey = keys.review_key(repo, pr, head)
     if db.get_card(c, vkey) is None:
-        status = _initial_status(repo, author, auto_review_for(c, author))
+        status = _initial_status(repo, db.get_auto_review(c, author))
         engine = engines.default_engine()
         review_id = db.upsert_card(
             c, vkey, "review", repo, pr, status=status, head_sha=head,
