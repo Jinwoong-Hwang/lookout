@@ -1,0 +1,33 @@
+src/db.py
+  b93cde57da3c4f87 128-135,233-253
+src/router.py
+  b93cde57da3c4f87 31-49,53-55,80
+src/dashboard.py
+  b93cde57da3c4f87 17-18,258-309,561-566,733,739,788,792,794,798,1068,1073-1105,1255-1257,1282-1283,1288-1289,1302-1304,1329-1330,1335-1336
+tests/test_author_auto_review.py
+  b93cde57da3c4f87 1-124
+README.md
+  b93cde57da3c4f87 29,84
+---
+{
+  "schema_version": "zax-attestation/1.2.0",
+  "base_commit_sha": "ddb2d8bc7600ed1c0f90b2c5adfdf68d28becec0",
+  "prompts": {
+    "b93cde57da3c4f87": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4ce156d8-0ea3-48f4-8209-c54aa279314c",
+        "model": "claude-opus-5-5"
+      },
+      "skills": [],
+      "tool_counts": {
+        "Bash": 30,
+        "Read": 3,
+        "Edit": 15
+      },
+      "total_additions": 681,
+      "total_deletions": 0,
+      "overriden_lines": 0
+    }
+  }
+}
