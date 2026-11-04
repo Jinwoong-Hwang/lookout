@@ -26,7 +26,7 @@ git clone https://github.com/Jinwoong-Hwang/lookout ~/lookout && cd ~/lookout &&
 | 뷰 | 내용 |
 |---|---|
 | 🗂 **레인별** | PR 리뷰 카드를 단계(Triage→리뷰→검증→댓글→승인→완료)별로 |
-| 👤 **사람별** | 같은 카드를 작성자별로 |
+| 👤 **사람별** | 같은 카드를 작성자별로 — 머리글의 **🤖 자동 리뷰 ON/OFF** 로 사람마다 자동 리뷰를 켜고 끔 |
 | 💬 **리뷰 피드백** | 게시한 댓글에 달린 반응(👍👎💬) 스냅샷 — 리뷰가 먹혔는지 확인 |
 | 🎯 **에픽별** | 나에게 할당된 product-hub 이슈를 **에픽 ▸ 태스크**로 묶어 보여줌 (읽기 전용 — 행을 누르면 GitHub 이슈) |
 
@@ -81,7 +81,7 @@ Lookout.app(메뉴바+창) ─────────────────�
 |---|---|
 | `allowlist` | 리뷰 대상 `owner/repo` |
 | `watch_authors` | 추적할 PR 작성자(비우면 전체) |
-| `auto_review_authors` | triage 없이 자동 리뷰할 작성자 (`["*"]` 또는 `["all"]` = 전체) |
+| `auto_review_authors` | triage 없이 자동 리뷰할 작성자 (`["*"]` 또는 `["all"]` = 전체). **기본값**이고, 사람별 뷰에서 누른 ON/OFF 가 우선 — 새 PR·새 커밋부터 적용, 이미 Triage 에 있는 카드는 그대로. repo 정책 `auto_review: false` 는 사람 설정보다 우선 |
 | `default_review_engine` | 자동 생성 카드의 기본 엔진 |
 | `repo_profiles` | repo별 리뷰 정책(문서 repo는 comment-only·dry-run 등) |
 | `max_findings_per_review` / `min_confidence` | 지적 개수·최소 확신도 |

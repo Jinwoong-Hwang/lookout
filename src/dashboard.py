@@ -14,8 +14,8 @@ import ipaddress
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from . import (commenter, db, engines, feedback, ghclient, poller, profiles, router,
-               worktree)
+from . import (commenter, config, db, engines, feedback, ghclient, poller, profiles,
+               router, worktree)
 from .config import CFG
 
 
@@ -252,6 +252,58 @@ def do_finding_action(action, finding_id):
                 kick = True
     if kick:
         kick_tick()
+    return True
+
+
+AUTHOR_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-\[\]/]{0,63}$")
+
+
+def _card_author(payload: str) -> str:
+    try:
+        meta = json.loads(payload) if payload else {}
+        if isinstance(meta, str):  # legacy double-encoded payloads
+            meta = json.loads(meta)
+    except ValueError:
+        return ""
+    return meta.get("author", "") if isinstance(meta, dict) else ""
+
+
+def build_authors():
+    """사람별 뷰의 자동 리뷰 토글 — 추적 중인 작성자 + 지금 보드에 카드가 있는 작성자.
+
+    config 는 매번 다시 읽는다. 대시보드는 오래 떠 있는 프로세스라 import 때 읽은
+    auto_review_authors 는 낡을 수 있고, 카드를 만드는 tick 은 매번 새로 읽는다."""
+    try:
+        cfg = config.load()
+    except (OSError, ValueError):
+        cfg = CFG
+    defaults = cfg.get("auto_review_authors") or []
+    with db.connect() as c:
+        overrides = db.auto_review_overrides(c)
+        rows = c.execute("SELECT payload FROM cards WHERE kind='review'"
+                         " AND status!='archived'").fetchall()
+    on_board = {a for a in (_card_author(r["payload"]) for r in rows) if a}
+    out = []
+    for login in sorted(set(cfg.get("watch_authors") or []) | on_board, key=str.lower):
+        override = overrides.get(login)
+        out.append({
+            "login": login,
+            "auto_review": (router.config_auto_review(login, defaults)
+                            if override is None else override),
+            "source": "config" if override is None else "dashboard",
+        })
+    return out
+
+
+def do_author_setting(login, enabled):
+    """사람별 자동 리뷰 on/off. 새로 만들어지는 카드(새 PR·새 커밋)부터 적용된다 —
+    지금 Triage 에 있는 카드는 건드리지 않는다. 켜는 순간 쌓여 있던 리뷰가 한꺼번에
+    돌고 댓글이 내 이름으로 나가면 안 되기 때문이다. 대기 카드는 카드에서 직접 시작."""
+    if not isinstance(login, str) or not AUTHOR_RE.match(login) or not isinstance(enabled, bool):
+        return False
+    with db.connect() as c:
+        db.set_auto_review_override(c, login, enabled)
+        db.log_event(c, "operator_auto_review", None, {"login": login, "auto_review": enabled})
     return True
 
 
@@ -506,6 +558,12 @@ h1{font-size:17px;margin:0;font-weight:750;letter-spacing:-.01em}
 .sec h2{font-size:14px;margin:0 0 10px;padding-bottom:7px;border-bottom:1px solid var(--line);display:flex;gap:8px;align-items:center}
 .sec .cards{display:flex;flex-direction:row;flex-wrap:wrap;gap:10px;padding:0}
 .sec .card{width:262px}
+.sec h2 .h2r{margin-left:auto}
+button.artog{font-size:11.5px;padding:3px 10px;color:var(--muted)}
+button.artog.on{background:var(--btn-accent-bg);border-color:var(--btn-accent-bd);color:var(--btn-accent-fg)}
+.idle{display:flex;flex-wrap:wrap;gap:8px}
+.idlep{display:inline-flex;gap:6px;align-items:center;font-size:12.5px;color:var(--muted);
+  padding:3px 3px 3px 10px;border:1px solid var(--line);border-radius:20px;background:var(--panel)}
 .statuspill{font-size:11px;font-weight:650;padding:2px 9px;border-radius:20px;white-space:nowrap}
 .col{background:var(--panel);border:1px solid var(--line);border-radius:14px;min-width:272px;max-width:300px;flex:0 0 auto;display:flex;flex-direction:column;max-height:100%}
 .col h2{flex:0 0 auto;font-size:12.5px;font-weight:700;margin:0;padding:13px 15px;border-bottom:1px solid var(--line);color:var(--ink);display:flex;justify-content:space-between;align-items:center;gap:8px}
@@ -678,7 +736,7 @@ function pill(c){return isLight()
   : `background:${c}22;color:${c};border:1px solid ${c}55`;}
 function stripe(c){return isLight()?darken(c,.72):c;}  // 카드/finding 좌측 컬러 스트라이프
 applyTheme();
-let DATA=[];let FEEDBACK=[];let ISSUES=[];let VIEW='lane';let REPO='all';
+let DATA=[];let FEEDBACK=[];let ISSUES=[];let AUTHORS=[];let VIEW='lane';let REPO='all';
 let LANE_SCROLL={};
 // 엔진 가용성 — 초기엔 낙관적(true)으로 두고 /api/engines 응답으로 갱신
 let ENGINES={claude:{installed:true,logged_in:true,ready:true},codex:{installed:true,logged_in:true,ready:true}};
@@ -733,10 +791,11 @@ function renderSideCounts(){
 }
 function forceRender(){render_();}
 async function load(){
-  const [rb,re,rf,ri]=await Promise.all([fetch('/api/board'),fetch('/api/engines'),fetch('/api/feedback'),fetch('/api/issues')]);
+  const [rb,re,rf,ri,ra]=await Promise.all([fetch('/api/board'),fetch('/api/engines'),fetch('/api/feedback'),fetch('/api/issues'),fetch('/api/authors')]);
   DATA=await rb.json();
   try{FEEDBACK=await rf.json();}catch(e){FEEDBACK=[];}
   try{ISSUES=await ri.json();}catch(e){ISSUES=[];}
+  try{AUTHORS=await ra.json();}catch(e){AUTHORS=[];}
   try{ENGINES=await re.json();}catch(e){}
   document.getElementById('sub').textContent=
     isIssueView()?ISSUES.length+'개 이슈':DATA.length+'개 카드';
@@ -1012,12 +1071,38 @@ function renderByAuthor(){
   Object.keys(byA).sort((a,b)=>byA[b].length-byA[a].length).forEach(author=>{
     const list=byA[author];
     const sec=document.createElement('div');sec.className='sec';
-    sec.innerHTML=`<h2>👤 ${esc(author)} <span class="n">${list.length}</span></h2>`;
+    sec.innerHTML=`<h2>👤 ${esc(author)} <span class="n">${list.length}</span><span class="h2r">${autoToggle(author)}</span></h2>`;
     const cc=document.createElement('div');cc.className='cards';
     list.forEach(c=>cc.appendChild(tile(c)));
     sec.appendChild(cc);board.appendChild(sec);
   });
+  // 다음 PR 부터 먹는 설정이라, 지금 카드가 없는 사람도 켜고 끌 수 있어야 한다
+  if(REPO==='all'){
+    const idle=AUTHORS.filter(a=>!byA[a.login]);
+    if(idle.length){
+      const sec=document.createElement('div');sec.className='sec';
+      sec.innerHTML=`<h2>👥 지금 카드 없음 <span class="n">${idle.length}</span></h2><div class="idle">${
+        idle.map(a=>`<span class="idlep">@${esc(a.login)} ${autoToggle(a.login)}</span>`).join('')}</div>`;
+      board.appendChild(sec);
+    }
+  }
 }
+function escA(s){return esc(s).replace(/"/g,'&quot;');}
+function autoToggle(login){
+  const a=AUTHORS.find(x=>x.login===login);if(!a)return '';
+  const tip=(a.auto_review?'자동 리뷰 켜짐 — 새 PR·새 커밋을 Triage 없이 바로 리뷰합니다':'자동 리뷰 꺼짐 — 새 PR 은 Triage 에서 기다립니다')
+    +(a.source==='dashboard'?' (대시보드에서 설정)':' (config 기본값)')
+    +'. repo 정책이 막은 곳(예: product-hub)은 켜도 Triage 로 갑니다.';
+  return `<button class="artog ${a.auto_review?'on':''}" data-login="${escA(a.login)}" data-on="${a.auto_review?1:0}" title="${escA(tip)}" onclick="toggleAutoReview(event,this)">🤖 자동 리뷰 ${a.auto_review?'ON':'OFF'}</button>`;
+}
+async function toggleAutoReview(e,btn){e.stopPropagation();
+  const login=btn.dataset.login, next=btn.dataset.on!=='1';
+  if(next&&!confirm(`@${login} 의 새 PR·새 커밋을 Triage 없이 바로 리뷰할까요?\n리뷰가 끝나면 댓글이 자동으로 나갑니다(dry_run_comments 설정을 따름).\n지금 Triage 에 있는 카드는 그대로입니다 — 필요하면 카드에서 직접 시작하세요.`))return;
+  btn.disabled=true;
+  let j={};
+  try{const r=await fetch('/api/author-setting',{method:'POST',headers:{'Content-Type':'application/json','X-Lookout-Action':'1'},body:JSON.stringify({login,auto_review:next})});j=await r.json();}catch(err){}
+  showToast(j.ok?(next?`@${login} 자동 리뷰 켬 — 다음 PR·커밋부터`:`@${login} 자동 리뷰 끔 — 다음 PR 부터 Triage 대기`):'바꿀 수 없습니다',false);
+  load();}
 function tile(c){
   const el=document.createElement('div');el.className='card';
   const dots=c.findings.map(f=>`<span class="dot ${f.severity||'low'}"></span>`).join('');
@@ -1200,6 +1285,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, json.dumps(build_board(), ensure_ascii=False))
         elif path == "/api/issues":
             self._send(200, json.dumps(build_issues(), ensure_ascii=False))
+        elif path == "/api/authors":
+            self._send(200, json.dumps(build_authors(), ensure_ascii=False))
         elif path == "/api/mentions":
             self._send(200, json.dumps(build_mentions(), ensure_ascii=False))
         elif path == "/api/feedback":
@@ -1245,6 +1332,8 @@ class Handler(BaseHTTPRequestHandler):
             ok = do_finding_action(data.get("action"), int(data.get("finding_id", 0)))
         elif self.path == "/api/mention-action":
             ok = do_mention_action(data.get("action"), int(data.get("mention_id", 0)))
+        elif self.path == "/api/author-setting":
+            ok = do_author_setting(data.get("login"), data.get("auto_review"))
         else:
             self._send(404, "{}")
             return

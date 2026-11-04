@@ -125,6 +125,14 @@ CREATE TABLE IF NOT EXISTS slack_names (
   updated_at REAL NOT NULL
 );
 
+-- 작성자별 자동 리뷰 on/off — 대시보드에서 누른 값. config 의 auto_review_authors 보다
+-- 우선한다. 행이 없으면 config 기본값을 따른다.
+CREATE TABLE IF NOT EXISTS author_prefs (
+  login       TEXT PRIMARY KEY,
+  auto_review INTEGER NOT NULL,                   -- 1 = 자동 리뷰, 0 = triage 대기
+  updated_at  REAL NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_cards_status ON cards(status);
 CREATE INDEX IF NOT EXISTS idx_findings_card ON findings(card_id);
 CREATE INDEX IF NOT EXISTS idx_inbox_processed ON inbox(processed);
@@ -220,6 +228,27 @@ def get_meta(c, k: str, default=None):
 
 def set_meta(c, k: str, v: str):
     c.execute("INSERT INTO meta(k,v) VALUES (?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v", (k, v))
+
+
+# ---- author prefs -----------------------------------------------------------
+def auto_review_overrides(c) -> dict:
+    """{login: bool} — 대시보드에서 바꾼 작성자만 들어 있다."""
+    return {r["login"]: bool(r["auto_review"])
+            for r in c.execute("SELECT login, auto_review FROM author_prefs")}
+
+
+def get_auto_review_override(c, login: str):
+    """True/False = 대시보드에서 정한 값, None = 정한 적 없음(config 를 따른다)."""
+    row = c.execute("SELECT auto_review FROM author_prefs WHERE login=?", (login,)).fetchone()
+    return None if row is None else bool(row["auto_review"])
+
+
+def set_auto_review_override(c, login: str, enabled: bool):
+    c.execute(
+        "INSERT INTO author_prefs(login, auto_review, updated_at) VALUES (?,?,?)"
+        " ON CONFLICT(login) DO UPDATE SET auto_review=excluded.auto_review,"
+        " updated_at=excluded.updated_at",
+        (login, 1 if enabled else 0, now()))
 
 
 def log_event(c, type_: str, key: str = None, detail=None):
