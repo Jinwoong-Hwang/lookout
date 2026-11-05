@@ -16,8 +16,10 @@ def _q(s: str) -> str:
     return '"' + (s or "").replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def send(title: str, message: str, subtitle: str = "", group: str = "lookout") -> bool:
-    """알림 1건. 성공하면 True. 어떤 예외도 밖으로 내보내지 않는다."""
+def send(title: str, message: str, subtitle: str = "", group: str = "lookout",
+         open_url: str = "") -> bool:
+    """알림 1건. 성공하면 True. 어떤 예외도 밖으로 내보내지 않는다.
+    open_url 은 terminal-notifier 일 때만 붙는다(클릭하면 그 주소를 연다)."""
     if not CFG.get("notify_enabled", True):
         return False
     env = config.subprocess_env()
@@ -27,6 +29,8 @@ def send(title: str, message: str, subtitle: str = "", group: str = "lookout") -
             args = [tn, "-title", title, "-message", message, "-group", group]
             if subtitle:
                 args += ["-subtitle", subtitle]
+            if open_url:
+                args += ["-open", open_url]
             return subprocess.run(args, capture_output=True, timeout=10,
                                   env=env).returncode == 0
         script = f"display notification {_q(message)} with title {_q(title)}"

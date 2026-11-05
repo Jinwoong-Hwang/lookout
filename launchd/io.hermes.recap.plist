@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>io.hermes.recap</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__PYTHON__</string>
+    <string>-m</string>
+    <string>src.recap</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>__HERMES_HOME__</string>
+  <!-- 1분마다 깨어 '지금 슬롯 차례인가'만 보고 끝난다. tick 과 따로 도는 이유는
+       tick 이 리뷰를 동기로 돌려 30분씩 붙잡혀 있을 수 있어서다. -->
+  <key>StartInterval</key>
+  <integer>60</integer>
+  <key>StandardOutPath</key>
+  <string>__LOG_DIR__/recap.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>__LOG_DIR__/recap.err.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>__USER_HOME__/.superset/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+</dict>
+</plist>

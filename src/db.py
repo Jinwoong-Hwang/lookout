@@ -133,6 +133,23 @@ CREATE TABLE IF NOT EXISTS author_prefs (
   updated_at  REAL NOT NULL
 );
 
+-- 세션 요약 — 하루(로컬 날짜)마다 내 에이전트 세션을 일 단위로 묶어 요약한 것 한 벌.
+-- 그날은 슬롯마다 그때까지로 다시 만들고, 다음 날 아침 첫 슬롯에 하루 전체로 확정한다.
+CREATE TABLE IF NOT EXISTS session_recaps (
+  day          TEXT PRIMARY KEY,                  -- YYYY-MM-DD (로컬)
+  slot         TEXT,                              -- 마지막으로 만든 차례: HH:MM | final | manual
+  window_end   REAL NOT NULL,                     -- 이 시각까지의 세션을 봤다(다음 날 00:00 이상이면 확정)
+  status       TEXT NOT NULL,                     -- running | ready | empty | failed
+  groups       TEXT,                              -- JSON: [{title, state, refs, summary}]
+  sessions     TEXT,                              -- JSON: 세션별 사실(repo·branch·PR·커밋) + 한 줄 요약
+  fingerprint  TEXT,                              -- 세션 목록이 그대로면 엔진을 다시 부르지 않는다
+  model        TEXT,
+  error        TEXT,
+  attempts     INTEGER NOT NULL DEFAULT 0,
+  created_at   REAL NOT NULL,
+  updated_at   REAL NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_cards_status ON cards(status);
 CREATE INDEX IF NOT EXISTS idx_findings_card ON findings(card_id);
 CREATE INDEX IF NOT EXISTS idx_inbox_processed ON inbox(processed);

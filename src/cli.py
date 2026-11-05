@@ -11,6 +11,8 @@
   python -m src.cli feedback-snapshot <card>  capture feedback for one card
   python -m src.cli feedback-weekly   capture weekly open-PR feedback samples
   python -m src.cli tick              run one maintenance tick now
+  python -m src.cli recap [YYYY-MM-DD]       (re)make that day's session recap now (default today)
+  python -m src.cli recap show [YYYY-MM-DD]  print a day's recap (default today and yesterday)
 """
 import json
 import sys
@@ -154,6 +156,28 @@ def cmd_feedback_weekly():
     print(f"captured {n} weekly feedback snapshot(s)")
 
 
+def cmd_recap(rest):
+    import datetime
+    from . import recap
+    if rest[:1] == ["show"]:
+        db.init()
+        today = datetime.date.today()
+        days = rest[1:2] or [(today - datetime.timedelta(days=1)).isoformat(), today.isoformat()]
+        with db.connect() as c:
+            for day in days:
+                row = recap.get(c, day)
+                if not row:
+                    print(f"== {day}: no recap\n")
+                    continue
+                print(f"== [{row['status']}] {row['model'] or ''}")
+                print(recap.recap_text(recap.view(row)) + (f"\n{row['error']}" if row["error"] else ""))
+                print()
+    elif len(rest) <= 1:
+        print(f"recap: {recap.run_now(rest[0] if rest else None)}")
+    else:
+        print(__doc__)
+
+
 def main(argv):
     if not argv:
         print(__doc__)
@@ -181,6 +205,8 @@ def main(argv):
         cmd_feedback_snapshot(rest[0])
     elif cmd == "feedback-weekly":
         cmd_feedback_weekly()
+    elif cmd == "recap":
+        cmd_recap(rest)
     elif cmd == "tick":
         tick.main()
     else:

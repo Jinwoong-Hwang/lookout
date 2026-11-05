@@ -29,6 +29,7 @@ git clone https://github.com/Jinwoong-Hwang/lookout ~/lookout && cd ~/lookout &&
 | 👤 **사람별** | 같은 카드를 작성자별로 — 머리글의 **🤖 자동 리뷰 ON/OFF** 로 사람마다 자동 리뷰를 켜고 끔 (아래 참고) |
 | 💬 **리뷰 피드백** | 게시한 댓글에 달린 반응(👍👎💬) 스냅샷 — 리뷰가 먹혔는지 확인 |
 | 🎯 **에픽별** | 나에게 할당된 product-hub 이슈를 **에픽 ▸ 태스크**로 묶어 보여줌 (읽기 전용 — 행을 누르면 GitHub 이슈) |
+| 🗂 **세션 요약** | 내 Claude Code·Codex 세션이 하루 동안 한 일을 **일 단위로 묶어** 요약 — 세션마다 한 줄 (아래 참고) |
 
 > **자동 리뷰 토글**이 자동 리뷰의 유일한 설정입니다(config 에는 없음). 켜면 그 사람의 **새 PR·새 커밋**부터 Triage 없이 바로 리뷰하고, 이미 Triage 에 있는 카드는 그대로 둡니다. 누른 적 없는 사람은 OFF 이고, repo 정책 `auto_review: false`(예: product-hub)는 토글보다 우선합니다. 값은 `db/` 에 저장돼 앱·데몬을 껐다 켜거나 `./update.sh` 를 해도 유지됩니다. 예전 config 의 `auto_review_authors` 는 처음 한 번만 토글로 옮겨지고 이후엔 읽지 않습니다.
 
@@ -57,6 +58,27 @@ git clone https://github.com/Jinwoong-Hwang/lookout ~/lookout && cd ~/lookout &&
 - 작성자 회신은 **PR 본문 · 이슈 코멘트 · 리뷰 본문 · 리뷰 인라인** 네 곳에서 모읍니다
 - 작성자가 "의도적입니다 / 후속에서 처리"라고 답하면 그 회신을 근거로 추적하되, **운영자가 수용해야** LGTM으로 넘어감. 새 커밋이 와도 풀리지 않고, 되돌리려면 작성자의 **새 답변**이 있어야 합니다
 
+## 세션 요약
+이 맥에서 내가 Claude Code·Codex 와 한 세션이 하루 동안 무슨 일을 했는지 날마다 한 장으로 정리합니다. 팀 스레드에 올릴 글이나 다음 날 이어받을 일을 떠올릴 때 봅니다.
+
+1. 그날 00:00 부터의 **대화형** Claude Code 세션(`~/.claude/projects`)과 Codex 세션(`~/.codex/sessions`)을 압축 — 세션 제목·요청·연결된 PR·커밋·스킬·마지막 응답 (LLM 없음)
+2. **codex**(모델 목록 1순위, effort `high`)가 세션마다 한 줄 요약을 쓰고, 같은 일(티켓·PR·브랜치·주제)을 다룬 세션끼리 시간순으로 묶어 한 일과 멈춘 지점을 1~2문장으로 씀. 완료·진행 같은 판정은 하지 않고, 기록에 있는 사실(PR·생성·머지·커밋 수)만 붙인다 — 세션 기록만으로는 세션 밖에서 머지된 PR 을 알 수 없다
+   ```
+   PH-1234 짧은 제목 — repo#123
+     원인을 찾아 고치고 리뷰 반영 후 머지
+     - 10:05 원인 분석, 수정 커밋
+     - 13:40 리뷰 반영 후 머지
+
+   잡무
+     - 09:12 워크트리 정리
+   ```
+3. 🗂 **세션 요약** 뷰에서 읽고, 필요하면 **📋 복사**
+
+- **언제:** 슬롯(기본 09:40 · 14:05 · 18:10) 5분 전에 오늘 것을 그때까지로 다시 만들고, 다음 날 첫 슬롯에 지난 날(월요일이면 금·토·일)을 **하루 전체로 확정**합니다. 세션 목록이 지난번과 같으면 엔진을 다시 부르지 않습니다.
+- **입력은 그날의 세션 기록뿐**입니다 — 전에 올린 글이나 전날 요약을 넘기지 않습니다.
+- 빼는 세션: Lookout 자신의 리뷰 세션, 다른 도구가 띄운 headless 하위 세션(red-team 리뷰어 등 — `entrypoint: sdk-*`, `codex exec`). 질문·조회처럼 산출물 없는 짧은 세션은 묶지 않고 **잡무**로 따로 보입니다.
+- 켜기: `config.json` 에 `"recap_enabled": true`. 꺼져 있어도 뷰에서 날마다 **↻ 다시 만들기**(오늘 것이 아직 없으면 **✨ 지금 만들기**), `./hermes recap [YYYY-MM-DD]` 로 수동 생성은 됩니다.
+
 ## 구조 (요약)
 ```
 poller(5분) ─ PR ──→ SQLite kanban → tick(flock, 5분) ─┬ reviewer(worktree, read-only)
@@ -67,6 +89,7 @@ Lookout.app(메뉴바+창) ─────────────────�
 - 엔진: Claude `claude-opus-5`(effort 조절) / Codex(기본 `~/.codex/config.toml`, 현재 `gpt-6-astra`) — 카드별 선택
 - tick은 프로세스 flock 하나로 직렬화되고, 리뷰는 `max_concurrent_reviews`까지 병렬
 - 엔진 토큰이 소진되면 카드를 대기열로 되돌리고 macOS 알림을 띄웁니다(같은 엔진은 15분에 한 번만)
+- 세션 요약은 tick 과 따로 도는 launchd 잡(`io.hermes.recap`, 1분 주기)이 슬롯 차례일 때만 codex 를 부릅니다 — tick 은 리뷰로 30분씩 붙잡혀 있을 수 있어서
 
 ## 안전성
 - **리뷰·검증은 read-only** — detached worktree에서 `Read/Grep/Glob`만 허용하고 `Write/Edit/Bash`·push는 차단.
@@ -95,6 +118,16 @@ Lookout.app(메뉴바+창) ─────────────────�
 |---|---|
 | `issue_repos` / `issue_assignee` | 이슈를 가져올 repo · `@me` 등 담당자 필터 |
 | `issue_title_prefixes` / `issue_display_prefix` | 제목 태그 필터 · 표시 별칭(`PH-1767`) |
+
+**세션 요약** (`recap_enabled` 가 false 면 자동 생성 꺼짐)
+
+| 키 | 설명 |
+|---|---|
+| `recap_enabled` | 슬롯마다 자동 생성 + 알림 |
+| `recap_slots` / `recap_lead_minutes` | 오늘 요약을 갱신할 시각(`HH:MM`) · 몇 분 전에 만들지. 첫 슬롯에 지난 날을 확정 |
+| `recap_weekdays_only` | 주말엔 만들지 않음(주말 세션은 월요일 아침에 확정) |
+| `recap_model` / `recap_effort` | 비우면 codex 모델 목록 1순위 · `high` |
+| `recap_timeout` | codex 1회 상한(초) |
 
 **공통**
 
@@ -138,6 +171,7 @@ Lookout.app(메뉴바+창) ─────────────────�
 ./hermes unblock <id> | publish-dryrun <id>                  # 승인 게이트 · dry-run 댓글 실게시
 ./hermes tick                                                # 파이프라인 1회 수동 실행
 ./hermes feedback-snapshot <id> | feedback-weekly            # 리뷰 피드백 수집
+./hermes recap [YYYY-MM-DD] | recap show [YYYY-MM-DD]       # 세션 요약 지금 (다시) 만들기 · 보기
 launchctl list | grep -E "hermes|lookout"   # 데몬 상태
 tail -f ~/Library/Logs/Lookout/*.log         # 데몬 로그
 ./install.sh                                 # 코드 수정 후 재적용
@@ -147,7 +181,7 @@ python3 run-demo.py [포트]                   # 라이브(:8788) 안 건드리�
 
 ## 제거
 ```bash
-for l in io.hermes.receiver io.hermes.dashboard io.hermes.tick io.lookout.app io.lookout.hookdeck; do
+for l in io.hermes.receiver io.hermes.dashboard io.hermes.tick io.hermes.recap io.lookout.app io.lookout.hookdeck; do
   launchctl unload "$HOME/Library/LaunchAgents/$l.plist" 2>/dev/null
   rm -f "$HOME/Library/LaunchAgents/$l.plist"
 done

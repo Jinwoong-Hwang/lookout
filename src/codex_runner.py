@@ -53,7 +53,10 @@ def _clean_stderr(text: str, limit: int = 500) -> str:
     return (" | ".join(out) or (text or "").strip())[-limit:]
 
 
-def run(prompt: str, cwd: str = None, add_dir: str = None, timeout: int = None) -> str:
+def run(prompt: str, cwd: str = None, add_dir: str = None, timeout: int = None,
+        model: str = None, effort: str = None) -> str:
+    """model/effort 를 안 주면 config(codex_model) → ~/.codex/config.toml 순으로 따른다.
+    리뷰는 그 기본을 쓰고, 세션 요약처럼 따로 정한 잡만 넘긴다."""
     out_fd, out_path = tempfile.mkstemp(suffix=".txt", prefix="codex_")
     os.close(out_fd)
     args = [
@@ -66,8 +69,10 @@ def run(prompt: str, cwd: str = None, add_dir: str = None, timeout: int = None) 
     ]
     if cwd:
         args += ["-C", cwd]
-    if MODEL:
-        args += ["-m", MODEL]
+    if model or MODEL:
+        args += ["-m", model or MODEL]
+    if effort:
+        args += ["-c", f'model_reasoning_effort="{effort}"']
     args.append(STDIN_MARKER)
     try:
         proc = subprocess.run(args, cwd=cwd, input=prompt, capture_output=True, text=True,

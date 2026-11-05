@@ -9,13 +9,14 @@ import os
 import re
 import subprocess
 import csv
+import datetime
 import io
 import ipaddress
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from . import (commenter, config, db, engines, feedback, ghclient, poller, profiles,
-               router, worktree)
+               recap, router, worktree)
 from .config import CFG
 
 
@@ -475,6 +476,35 @@ def _csv_cell(value):
     return value
 
 
+def build_recap():
+    """🗂 세션 요약 뷰 — 최근 7일. 날마다 묶음 · 잡무 · 복사용 텍스트."""
+    with db.connect() as c:
+        rows = recap.recent(c, days=7)
+    days = []
+    for r in rows:
+        v = recap.view(r)
+        v["text"] = recap.recap_text(v)
+        days.append(v)
+    return {"enabled": recap.enabled(), "slots": recap.slots(), "lead": recap.lead_minutes(),
+            "engine": recap.engine_label(), "today": datetime.date.today().isoformat(), "days": days}
+
+
+def do_recap(data):
+    if data.get("action") != "generate":
+        return False
+    day = str(data.get("day") or datetime.date.today().isoformat())
+    if not recap.DAY_RE.fullmatch(day) or day > datetime.date.today().isoformat():
+        return False
+    # 별도 프로세스로 — codex 가 수십 초 걸린다. 이미 돌고 있으면 그쪽 lock 에 막혀 바로 끝난다.
+    try:
+        subprocess.Popen([os.sys.executable, "-m", "src.recap", "--now", day],
+                         cwd=config.HERMES_HOME, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError:
+        return False
+    return True
+
+
 def do_mention_action(action, mention_id):
     if action not in ("read", "archive"):
         return False
@@ -669,6 +699,48 @@ a.ehead:hover .etitle{color:var(--accent)}
 .ehead.late .enum{color:#fb7185}
 .irow .iepic{flex:0 1 auto;max-width:28%;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
   color:var(--muted);font-size:11.5px}
+/* 세션 요약 — 하루씩 본다. 같은 일을 다룬 세션 묶음을 시간순으로, 묶음 밖 세션은 잡무 */
+.rc{max-width:900px;margin:0 auto 48px}
+.rcnav{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:0 0 26px}
+.rcday{display:flex;flex-direction:column;align-items:flex-start;padding:6px 12px;border-radius:10px;
+  background:var(--panel);color:var(--muted);font-weight:500;line-height:1.35}
+.rcday b{font-size:13px;color:var(--ink);font-weight:650;font-variant-numeric:tabular-nums}
+.rcday b i{font-style:normal;color:var(--accent);font-size:11px;margin-left:4px}
+.rcday span{font-size:11px}
+.rcday.on{background:var(--panel2);border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
+.rcnav .grow{flex:1 1 auto}
+.rcinfo{font-size:11.5px;color:var(--dim);text-align:right;line-height:1.55}
+.rcoff{color:var(--warn);cursor:help;border-bottom:1px dotted var(--warn)}
+.rchead{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.rchead h2{font-size:21px;margin:0;font-weight:750;letter-spacing:-.02em}
+.rchead .acts{margin-left:auto;display:flex;gap:6px}
+.rcsub{display:flex;gap:6px 16px;align-items:center;flex-wrap:wrap;color:var(--muted);font-size:12.5px;margin:8px 0 26px}
+.rcsub .model{color:var(--dim)}
+.rcsec{margin:0 0 26px}
+.rcsec h3{display:flex;gap:7px;align-items:center;font-size:12.5px;font-weight:700;color:var(--muted);margin:0 0 9px}
+.rcsec h3 .n{color:var(--dim);font-weight:600}
+.rgroup{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:13px 16px 11px;margin:0 0 8px}
+:root[data-theme="light"] .rgroup{box-shadow:0 1px 2px var(--shadow)}
+.rtitle{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.rtitle .t{font-size:15px;font-weight:700;letter-spacing:-.01em}
+.rkey{font-size:11.5px;font-weight:700;color:var(--muted);background:var(--panel);border:1px solid var(--line);
+  border-radius:6px;padding:1px 6px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.rfacts{margin-left:auto;display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:12px;color:var(--muted)}
+.rfacts a{color:var(--accent);text-decoration:none;font-weight:600}
+.rfacts a:hover{text-decoration:underline}
+.rmark{font-size:11px;font-weight:650;color:var(--muted);border:1px solid var(--line);border-radius:20px;padding:0 7px}
+.rsum{font-size:13.5px;line-height:1.7;margin:7px 0 0}
+.slist{margin:10px 0 0;padding:7px 0 0;border-top:1px solid var(--line)}
+.srow{display:grid;grid-template-columns:92px minmax(0,1fr) auto;gap:12px;align-items:baseline;padding:3px 0;
+  font-size:12.5px;line-height:1.55}
+.srow .stime{font-variant-numeric:tabular-nums;color:var(--dim);white-space:nowrap}
+.srow .ssum{color:var(--muted)}
+.srow .srepo{font-size:11.5px;color:var(--dim);white-space:nowrap;cursor:default}
+.rgroup.rcchore{background:transparent;box-shadow:none;border:1px dashed var(--line);padding:8px 16px}
+.rcnote{padding:12px 16px;border:1px dashed var(--line);border-radius:10px;color:var(--muted);font-size:13px;margin:0 0 18px}
+.serr{color:var(--bad);font-size:12.5px;white-space:pre-wrap;word-break:break-word;margin:0 0 18px;padding:10px 14px;
+  border:1px solid var(--bad);border-radius:10px}
+@media (max-width:700px){.srow{grid-template-columns:78px minmax(0,1fr)}.srow .srepo{display:none}.rcinfo{text-align:left}}
 </style></head><body>
 <header><h1>👁 Lookout</h1>
 <button id="refreshBtn" onclick="refresh()">🔄 PR 가져오기</button>
@@ -685,6 +757,8 @@ a.ehead:hover .etitle{color:var(--accent)}
   <div class="grp">이슈</div>
   <button id="tEpic" onclick="setView('epic')"><span>🎯 에픽별</span><span class="cnt" id="cEpic">0</span></button>
   <button id="tDue" onclick="setView('due')"><span>📅 기한별</span><span class="cnt" id="cDue">0</span></button>
+  <div class="grp">기록</div>
+  <button id="tRecap" onclick="setView('recap')"><span>🗂 세션 요약</span><span class="cnt" id="cRecap">0</span></button>
 </nav>
 <div class="main">
 <div class="filterbar" id="filterbar"></div>
@@ -758,11 +832,12 @@ function renderFilter(){
     h+=`<button class="chip ${on?'on':''}" style="${onStyle}" onclick="setRepo('${r}')"><span class="rdot" style="background:${col}"></span>${esc(repoShort(r))} <b>${n}</b></button>`;});
   bar.innerHTML=h;
 }
-const VIEW_TABS=[['tLane','lane'],['tAuthor','author'],['tFeedback','feedback'],['tEpic','epic'],['tDue','due']];
+const VIEW_TABS=[['tLane','lane'],['tAuthor','author'],['tFeedback','feedback'],['tEpic','epic'],['tDue','due'],['tRecap','recap']];
 function setView(v){VIEW=v;
   for(const [id,name] of VIEW_TABS)
     document.getElementById(id).classList.toggle('active',v===name);
   document.getElementById('refreshBtn').textContent=isIssueView()?'🔄 이슈 가져오기':'🔄 PR 가져오기';
+  document.getElementById('filterbar').style.display=v==='recap'?'none':'';
   renderFilter();render();}
 function renderSideCounts(){
   document.getElementById('cLane').textContent=DATA.length;
@@ -770,14 +845,17 @@ function renderSideCounts(){
   document.getElementById('cFeedback').textContent=FEEDBACK.length;
   document.getElementById('cEpic').textContent=ISSUES.length;
   document.getElementById('cDue').textContent=ISSUES.filter(c=>dueOf(c).date).length;
+  document.getElementById('cRecap').textContent=
+    ((RECAP.days||[]).find(d=>d.day===ymd(new Date()))||{}).count||0;
 }
 function forceRender(){render_();}
 async function load(){
-  const [rb,re,rf,ri,ra]=await Promise.all([fetch('/api/board'),fetch('/api/engines'),fetch('/api/feedback'),fetch('/api/issues'),fetch('/api/authors')]);
+  const [rb,re,rf,ri,ra,rs]=await Promise.all([fetch('/api/board'),fetch('/api/engines'),fetch('/api/feedback'),fetch('/api/issues'),fetch('/api/authors'),fetch('/api/recap')]);
   DATA=await rb.json();
   try{FEEDBACK=await rf.json();}catch(e){FEEDBACK=[];}
   try{ISSUES=await ri.json();}catch(e){ISSUES=[];}
   try{AUTHORS=await ra.json();}catch(e){AUTHORS=[];}
+  try{RECAP=await rs.json();}catch(e){RECAP={days:[]};}
   try{ENGINES=await re.json();}catch(e){}
   document.getElementById('sub').textContent=
     isIssueView()?ISSUES.length+'개 이슈':DATA.length+'개 카드';
@@ -842,7 +920,113 @@ function render(){
   return render_();
 }
 function render_(){VIEW==='feedback'?renderFeedback():VIEW==='author'?renderByAuthor()
-    :VIEW==='epic'?renderEpics():VIEW==='due'?renderDue():renderLanes(LANES);}
+    :VIEW==='epic'?renderEpics():VIEW==='due'?renderDue():VIEW==='recap'?renderRecap():renderLanes(LANES);}
+// ── 세션 요약 — 날마다 같은 일을 다룬 세션끼리 묶고, 세션마다 한 줄. 묶음 밖 세션은 잡무 ──
+let RECAP={days:[]};
+const RC_WD='일월화수목금토';
+let RC_DAY='';  // 보고 있는 날 — 5초 새로고침에도 유지, 페이지를 새로 열면 오늘부터
+let RC_WANT='';  // #recap/YYYY-MM-DD 로 열렸을 때 — 데이터가 오면 그날로 간다
+function rcHm(ts){if(!ts)return '?';const d=new Date(ts*1000);return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0');}
+function rcDate(day){const [y,m,d]=day.split('-').map(Number);return {m,d,w:RC_WD[new Date(y,m-1,d).getDay()]};}
+function rcPr(u){const m=u.match(/\\/([^/]+)\\/pull\\/(\\d+)/);return `<a href="${escA(u)}" target="_blank" title="${escA(u)}">${esc(m?m[1]+'#'+m[2]:u)}</a>`;}
+function rcTitle(t){
+  const m=(t||'').match(/^([A-Z][A-Z0-9]+-\\d+)\\s+(.+)$/);
+  return m?`<span class="rkey">${esc(m[1])}</span><span class="t">${esc(m[2])}</span>`:`<span class="t">${esc(t)}</span>`;
+}
+function rcSpan(list){
+  const s=list.map(x=>x.start).filter(Boolean),e=list.map(x=>x.end).filter(Boolean);
+  return s.length&&e.length?rcHm(Math.min(...s))+'–'+rcHm(Math.max(...e)):'';
+}
+function rcSession(s){
+  const repo=s.repo||'';const tip=[repo,s.branch,s.title].filter(Boolean).join(' · ');
+  const a=rcHm(s.start),b=rcHm(s.end);
+  return `<div class="srow"><span class="stime">${a===b?a:a+'–'+b}</span>`
+    +`<span class="ssum">${esc(s.summary||s.title||'(요약 없음)')}</span>`
+    +(repo?`<span class="srepo" title="${escA(tip)}">${esc(repo)}</span>`:'<span></span>')
+    +`</div>`;
+}
+function rcStatus(d){
+  if(d.status==='none')return ['아직 없음','#9fabbe'];
+  if(d.status==='running')return ['만드는 중','#fbbf24'];
+  if(d.status==='failed')return ['실패','#fb7185'];
+  if(d.status==='empty')return ['세션 없음','#9fabbe'];
+  return d.final?['하루 전체','#4ade80']:[rcHm(d.window_end)+'까지','#60a5fa'];
+}
+function rcChip(d,today){
+  const t=rcDate(d.day);
+  const sub=d.status==='none'?'아직 없음':d.status==='running'?'만드는 중':d.status==='failed'?'실패':d.status==='empty'?'세션 없음'
+    :`세션 ${d.count}`+(d.final?'':` · ${rcHm(d.window_end)}까지`);
+  return `<button class="rcday${d.day===RC_DAY?' on':''}" onclick="rcPick('${escA(d.day)}')">`
+    +`<b>${String(t.m).padStart(2,'0')}-${String(t.d).padStart(2,'0')} (${t.w})${d.day===today?'<i>오늘</i>':''}</b><span>${esc(sub)}</span></button>`;
+}
+function rcPick(day){RC_DAY=day;renderRecap();document.getElementById('board').scrollTop=0;}
+function rcGroup(g){
+  // 완료 · 진행 같은 판정 대신 세션 기록에 있는 사실만 — PR · 생성/머지 · 커밋
+  const facts=[...(g.prs||[]).map(rcPr),...(g.marks||[]).map(m=>`<span class="rmark">${esc(m)}</span>`),
+    g.commits?`<span>커밋 ${g.commits}</span>`:''].filter(Boolean).join('');
+  return `<div class="rgroup"><div class="rtitle">${rcTitle(g.title)}`
+    +(facts?`<span class="rfacts">${facts}</span>`:'')+`</div>`
+    +(g.summary?`<div class="rsum">${esc(g.summary)}</div>`:'')
+    +((g.sessions||[]).length?`<div class="slist">${g.sessions.map(rcSession).join('')}</div>`:'')+`</div>`;
+}
+function rcDayBody(d,today){
+  const t=rcDate(d.day);const [sl,sc]=rcStatus(d);
+  const groups=d.groups||[],chores=d.chores||[];
+  const span=rcSpan([...groups.flatMap(g=>g.sessions||[]),...chores]);
+  let h=`<div class="rchead"><h2>${t.m}월 ${t.d}일 ${t.w}요일</h2>`
+    +`<span class="statuspill" style="${pill(sc)}">${d.status==='running'?'<span class="spin"></span> ':''}${esc(sl)}</span>`
+    +`<span class="acts"><button onclick="recapGenerate('${escA(d.day)}')" title="세션이 그대로여도 엔진으로 다시 만든다">`
+    +`${d.status==='none'?'✨ 지금 만들기':'↻ 다시 만들기'}</button>`
+    +(d.count?`<button onclick="recapCopy('${escA(d.day)}')" title="텍스트로 클립보드에 복사">📋 복사</button>`:'')+`</span></div>`;
+  const sub=[];
+  if(d.count)sub.push(`<span>세션 ${d.count}개${span?' · '+span:''}</span>`);
+  if(groups.length)sub.push(`<span>묶음 ${groups.length}</span>`);
+  if(chores.length)sub.push(`<span>잡무 ${chores.length}</span>`);
+  if(d.model)sub.push(`<span class="model">${esc(d.model)}</span>`);
+  h+=`<div class="rcsub">${sub.join('')}</div>`;
+  if(d.status==='failed')h+=`<div class="serr">${esc(d.error||'')} (시도 ${d.attempts}회)${d.count?' — 아래는 지난번 요약입니다':''}</div>`;
+  if(d.status==='none')h+=`<div class="rcnote">${d.day===today?'오늘':'이날'} 요약이 아직 없습니다. ✨ 지금 만들기를 누르면 지금까지의 세션으로 만듭니다.</div>`;
+  else if(d.status==='empty')h+=`<div class="rcnote">이날은 에이전트 세션이 없습니다.</div>`;
+  if(groups.length)h+=`<section class="rcsec">${groups.map(rcGroup).join('')}</section>`;
+  if(chores.length)h+=`<section class="rcsec"><h3>잡무<span class="n">${chores.length}</span></h3>`
+    +`<div class="rgroup rcchore">${chores.map(rcSession).join('')}</div></section>`;
+  return h;
+}
+function renderRecap(){
+  const board=document.getElementById('board');const top=board.scrollTop;
+  board.className='board stack';
+  const R=RECAP||{days:[]};
+  const days=[...(R.days||[])];
+  if(R.today&&!days.some(d=>d.day===R.today))days.unshift({day:R.today,status:'none',count:0,groups:[],chores:[]});
+  if(R.today&&RC_WANT){if(days.some(d=>d.day===RC_WANT))RC_DAY=RC_WANT;RC_WANT='';}
+  if(!days.some(d=>d.day===RC_DAY))RC_DAY=(days[0]||{}).day||'';
+  const d=days.find(x=>x.day===RC_DAY);
+  const off=R.enabled?'':`<br><span class="rcoff" title="config.json 의 recap_enabled 를 true 로 두면 슬롯마다 만들어 알림을 띄웁니다. 버튼은 꺼져 있어도 동작합니다.">자동 생성 꺼짐</span>`;
+  let h=`<div class="rc"><div class="rcnav">${days.map(x=>rcChip(x,R.today)).join('')}<span class="grow"></span>`
+    +`<span class="rcinfo" title="슬롯 ${R.lead||0}분 전에 오늘 것을 갱신하고, 다음 날 첫 슬롯에 지난 날을 하루 전체로 확정한다">${esc((R.slots||[]).join(' · '))} 갱신 · ${esc(R.engine||'')}${off}</span></div>`;
+  if(d)h+=rcDayBody(d,R.today);
+  board.innerHTML=h+`</div>`;board.scrollTop=top;
+}
+async function recapGenerate(day){
+  const d=(RECAP.days||[]).find(x=>x.day===day);
+  if(d&&d.status==='running'){showToast('이미 만드는 중입니다',false);return;}
+  try{
+    const r=await fetch('/api/recap',{method:'POST',headers:{'Content-Type':'application/json','X-Lookout-Action':'1'},body:JSON.stringify({action:'generate',day})});
+    if(!(await r.json()).ok){showToast('시작하지 못했습니다',false);return;}
+  }catch(e){showToast('시작하지 못했습니다',false);return;}
+  showToast(`${day.slice(5)} 요약을 만드는 중 — 30초~1분`,true);
+  setTimeout(load,1500);
+}
+async function recapCopy(day){
+  const text=((RECAP.days||[]).find(x=>x.day===day)||{}).text||'';let ok=false;
+  try{await navigator.clipboard.writeText(text);ok=true;}catch(e){}
+  if(!ok){
+    const ta=document.createElement('textarea');ta.value=text;document.body.appendChild(ta);ta.select();
+    try{ok=document.execCommand('copy');}catch(e){}
+    ta.remove();
+  }
+  showToast(ok?'복사됨':'복사 실패',false);
+}
 function renderFeedback(){
   const list=viewFeedbackData();
   const board=document.getElementById('board');board.className='board stack';board.innerHTML='';
@@ -1241,6 +1425,8 @@ async function refresh(){
   }catch(e){b.textContent='실패';}
   setTimeout(()=>{b.textContent=old;b.disabled=false;},1800);
 }
+// 알림을 누르면 #recap(/YYYY-MM-DD) 으로 열린다 — 날짜가 있으면 그날을 연다
+{const m=location.hash.match(/^#recap(?:\/(\d{4}-\d{2}-\d{2}))?$/);if(m){if(m[1])RC_WANT=m[1];setView('recap');}}
 load();setInterval(load,5000);
 </script></body></html>"""
 
@@ -1292,6 +1478,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200 if item else 404, json.dumps(item or {}, ensure_ascii=False))
         elif path == "/api/engines":
             self._send(200, json.dumps(engines.availability(), ensure_ascii=False))
+        elif path == "/api/recap":
+            self._send(200, json.dumps(build_recap(), ensure_ascii=False))
         else:
             self._send(404, "{}")
 
@@ -1315,6 +1503,8 @@ class Handler(BaseHTTPRequestHandler):
             ok = do_mention_action(data.get("action"), int(data.get("mention_id", 0)))
         elif self.path == "/api/author-setting":
             ok = do_author_setting(data.get("login"), data.get("auto_review"))
+        elif self.path == "/api/recap":
+            ok = do_recap(data)
         else:
             self._send(404, "{}")
             return

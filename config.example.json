@@ -98,6 +98,17 @@
   "_notify": "엔진 토큰/쿼터 소진 등으로 리뷰가 멈추면 macOS 알림. terminal-notifier가 있으면 그걸, 없으면 osascript 사용.",
   "notify_enabled": true,
 
+  "_recap": "(선택) 세션 요약 — 이 맥의 Claude Code·Codex 세션이 하루 동안 무슨 일을 했는지 codex 로 요약해, 같은 일을 다룬 세션끼리 묶어 대시보드 🗂 세션 요약에 둔다. 슬롯마다 오늘 것을 그때까지로 갱신하고, 다음 날 첫 슬롯에 하루 전체로 확정한다.",
+  "recap_enabled": false,
+  "_recap_slots": "요약을 갱신할 시각(HH:MM) — 팀 정기 스레드가 열리는 시각에 맞춘다. 첫 슬롯에 지난 날을 확정한다.",
+  "recap_slots": ["09:40", "14:05", "18:10"],
+  "recap_lead_minutes": 5,
+  "recap_weekdays_only": true,
+  "_recap_model": "비우면 codex 모델 목록 1순위(~/.codex/models_cache.json). effort 는 비우면 high.",
+  "recap_model": "",
+  "recap_effort": "",
+  "recap_timeout": 900,
+
   "max_findings_per_review": 8,
   "min_confidence": "medium",
   "max_concurrent_reviews": 3,

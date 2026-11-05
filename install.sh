@@ -26,7 +26,7 @@ if [ -n "$HOOKDECK" ]; then
 fi
 sleep 1
 
-labels=(io.hermes.receiver io.hermes.dashboard io.hermes.tick io.lookout.app)
+labels=(io.hermes.receiver io.hermes.dashboard io.hermes.tick io.hermes.recap io.lookout.app)
 if [ -n "$HOOKDECK" ]; then
   labels+=(io.lookout.hookdeck)
 else
@@ -50,4 +50,4 @@ done
 echo
 echo "Receiver:  launchctl list | grep -E 'hermes|lookout'"
 echo "Logs:      tail -f $LOG_DIR/*.log"
-echo "Stop:      launchctl unload $AGENTS/io.hermes.{receiver,tick}.plist $AGENTS/io.lookout.hookdeck.plist"
+echo "Stop:      launchctl unload $AGENTS/io.hermes.{receiver,tick,recap}.plist $AGENTS/io.lookout.hookdeck.plist"
