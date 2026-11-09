@@ -7,8 +7,8 @@ import hashlib
 import json as _json
 import re
 
-from . import (db, doc_planner, engines, ghclient, keys, ledger, prdiff, profiles,
-               prompt_tpl, worktree)
+from . import (db, doc_planner, engines, ghclient, keys, ledger, pathway_auditor,
+               prdiff, profiles, prompt_tpl, worktree)
 from .config import CFG
 
 ACTIONABLE_SEVERITY_DOC = {"blocking", "should-fix"}
@@ -337,12 +337,36 @@ def process(c, card):
                 AUTHOR_NOTES=author_notes, MAX_FINDINGS=policy["max_findings"],
             )
         result = engines.run_json(prompt, engine=engine, cwd=wt, add_dir=wt)
+        audit_result = {"findings": []}
+        if (not is_doc and CFG.get("pathway_audit_enabled", True)
+                and pathway_auditor.should_run(raw_diff)):
+            audit_prompt = prompt_tpl.render(
+                "pathway_review.md",
+                REPO=repo, PR=pr, TITLE=meta.get("title", ""),
+                AUTHOR=meta.get("author", ""), HEAD=head, DIFF=diff, FILES=manifest,
+                PRIOR_FINDINGS=prior_findings, AUTHOR_NOTES=author_notes,
+                MAX_FINDINGS=min(3, int(policy["max_findings"])),
+            )
+            db.log_event(c, "pathway_audit_started", card["key"], {"engine": engine})
+            audit_result = pathway_auditor.validate_result(
+                engines.run_json(audit_prompt, engine=engine, cwd=wt, add_dir=wt)
+            )
+            db.log_event(c, "pathway_audit_completed", card["key"], {
+                "engine": engine,
+                "coverage": len(audit_result.get("coverage") or []),
+                "findings": len(audit_result.get("findings") or []),
+            })
     finally:
         if wt:
             worktree.remove_worktree(repo, wt)
 
     findings = [f for f in (result.get("findings") or [])
                 if (f.get("confidence") in _actionable_conf(policy))]
+    if not is_doc:
+        audit_findings = [f for f in (audit_result.get("findings") or [])
+                          if (f.get("confidence") in _actionable_conf(policy))]
+        findings = pathway_auditor.merge_findings(
+            findings, audit_findings, int(policy["max_findings"]))
     if is_doc:
         findings = [f for f in findings if f.get("severity") in ACTIONABLE_SEVERITY_DOC]
     findings = findings[: int(policy["max_findings"])]

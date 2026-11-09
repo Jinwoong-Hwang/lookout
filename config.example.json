@@ -82,6 +82,8 @@
   "codex_model": null,
   "_codex_model_note": "null 이면 ~/.codex/config.toml 의 기본 모델을 따른다(현재 gpt-6-astra). 특정 모델로 고정할 때만 값을 넣는다.",
   "default_review_engine": "codex",
+  "_pathway_audit": "코드 diff가 UI 동작·재시도·오류 콜백을 바꾸면 독립 경로 리뷰를 한 번 더 실행. 비용을 줄이려면 false.",
+  "pathway_audit_enabled": true,
 
   "worktree_dir": "worktrees",
   "repo_cache_dir": "repos",
