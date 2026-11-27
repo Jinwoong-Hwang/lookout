@@ -1,8 +1,9 @@
+from contextlib import nullcontext
 import sqlite3
 import unittest
 from unittest import mock
 
-from src import db, ghclient, ledger, pathway_auditor, prdiff, prompt_tpl, reviewer, verifier, worktree
+from src import db, ghclient, ledger, pathway_auditor, prdiff, prompt_tpl, reviewer, tick, verifier, worktree
 
 
 class PathwayAuditorTriggerTest(unittest.TestCase):
@@ -351,6 +352,30 @@ class PathwayAuditorIntegrationTest(unittest.TestCase):
         self.assertEqual(self.c.execute("SELECT status FROM cards").fetchone()[0], "commented")
         self.assertIsNotNone(self.c.execute(
             "SELECT 1 FROM events WHERE type='pathway_audit_invalid'").fetchone())
+
+    def test_quota_error_propagates_after_primary_findings_are_saved(self):
+        primary = {"findings": [{
+            "file": "src/app.ts", "line": "1", "rule": "bug",
+            "severity": "high", "confidence": "high", "title": "primary bug",
+        }]}
+        with self.assertRaisesRegex(RuntimeError, "quota"):
+            self._run_failed_audit(primary, RuntimeError("quota exhausted"))
+        finding = self.c.execute("SELECT * FROM findings").fetchone()
+        self.assertEqual(finding["title"], "primary bug")
+        self.assertEqual(finding["status"], "pending_verify")
+
+    def test_audit_quota_uses_existing_notification_and_triage_path(self):
+        card = self.c.execute("SELECT * FROM cards WHERE id=?", (self.card_id,)).fetchone()
+        with mock.patch.object(db, "connect", side_effect=lambda: nullcontext(self.c)), \
+                mock.patch.object(tick.notify, "send") as notify:
+            tick._process_one(
+                lambda c, card: self._run_failed_audit(
+                    {"findings": []}, RuntimeError("quota exhausted")), card, "reviewer")
+        self.assertEqual(self.c.execute("SELECT status FROM cards").fetchone()[0], "triage")
+        notify.assert_called_once()
+        self.assertIsNotNone(self.c.execute(
+            "SELECT 1 FROM events WHERE type='review_quota_paused'").fetchone())
+        self.assertIsNone(self.c.execute("SELECT 1 FROM events WHERE type='stage_error'").fetchone())
 
     def test_engine_failure_without_primary_findings_blocks_lgtm(self):
         card = self._run_failed_audit({"findings": []}, RuntimeError("audit failed"))

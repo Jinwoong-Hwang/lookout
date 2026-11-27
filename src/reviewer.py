@@ -338,6 +338,7 @@ def process(c, card):
             )
         result = engines.run_json(prompt, engine=engine, cwd=wt, add_dir=wt)
         audit_result = {"findings": []}
+        audit_quota_error = None
         meta.pop("pathway_audit_invalid", None)
         if (not is_doc and CFG.get("pathway_audit_enabled", True)
                 and pathway_auditor.should_run(raw_diff)):
@@ -355,6 +356,8 @@ def process(c, card):
                     engines.run_json(audit_prompt, engine=engine, cwd=wt, add_dir=wt)
                 )
             except Exception as e:  # Audit failure must preserve the primary review and block LGTM.
+                if engines.is_quota_error(str(e)):
+                    audit_quota_error = e
                 meta["pathway_audit_invalid"] = True
                 db.log_event(c, "pathway_audit_invalid", card["key"], {"error": str(e)})
             else:
@@ -439,6 +442,10 @@ def process(c, card):
                 repeat_finding = repeat_finding or previous in {
                     "posted", "confirmed", "unresolved",
                 }
+
+    # Findings are persisted before tick handles quota notification and requeue.
+    if audit_quota_error is not None:
+        raise audit_quota_error
 
     # UNIQUE(repo, pr, fp) keeps a repeated finding on its original row. Closure
     # marks it unresolved; attach that row to this attempt so it is not lost.
