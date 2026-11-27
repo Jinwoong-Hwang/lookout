@@ -7,8 +7,8 @@ import hashlib
 import json as _json
 import re
 
-from . import (db, doc_planner, engines, ghclient, keys, ledger, prdiff, profiles,
-               prompt_tpl, worktree)
+from . import (db, doc_planner, engines, ghclient, keys, ledger, pathway_auditor,
+               prdiff, profiles, prompt_tpl, worktree)
 from .config import CFG
 
 ACTIONABLE_SEVERITY_DOC = {"blocking", "should-fix"}
@@ -337,12 +337,46 @@ def process(c, card):
                 AUTHOR_NOTES=author_notes, MAX_FINDINGS=policy["max_findings"],
             )
         result = engines.run_json(prompt, engine=engine, cwd=wt, add_dir=wt)
+        audit_result = {"findings": []}
+        meta.pop("pathway_audit_invalid", None)
+        if (not is_doc and CFG.get("pathway_audit_enabled", True)
+                and pathway_auditor.should_run(raw_diff)):
+            audit_prompt = prompt_tpl.render(
+                "pathway_review.md",
+                REPO=repo, PR=pr, TITLE=meta.get("title", ""),
+                AUTHOR=meta.get("author", ""), HEAD=head, DIFF=diff, FILES=manifest,
+                PRIOR_FINDINGS=prior_findings, AUTHOR_NOTES=author_notes,
+                CURRENT_FINDINGS=_json.dumps(result.get("findings") or [], ensure_ascii=False),
+                MAX_FINDINGS=min(3, int(policy["max_findings"])),
+            )
+            db.log_event(c, "pathway_audit_started", card["key"], {"engine": engine})
+            try:
+                audit_result = pathway_auditor.validate_result(
+                    engines.run_json(audit_prompt, engine=engine, cwd=wt, add_dir=wt)
+                )
+            except Exception as e:  # Audit failure must preserve the primary review and block LGTM.
+                if engines.is_quota_error(str(e)):
+                    raise
+                meta["pathway_audit_invalid"] = True
+                db.log_event(c, "pathway_audit_invalid", card["key"], {"error": str(e)})
+            else:
+                db.log_event(c, "pathway_audit_completed", card["key"], {
+                    "engine": engine,
+                    "coverage": len(audit_result.get("coverage") or []),
+                    "findings": len(audit_result.get("findings") or []),
+                })
+        _save_payload(c, card["id"], meta)
     finally:
         if wt:
             worktree.remove_worktree(repo, wt)
 
     findings = [f for f in (result.get("findings") or [])
                 if (f.get("confidence") in _actionable_conf(policy))]
+    if not is_doc:
+        audit_findings = [f for f in (audit_result.get("findings") or [])
+                          if (f.get("confidence") in _actionable_conf(policy))]
+        findings = pathway_auditor.merge_findings(
+            findings, audit_findings, int(policy["max_findings"]))
     if is_doc:
         findings = [f for f in findings if f.get("severity") in ACTIONABLE_SEVERITY_DOC]
     findings = findings[: int(policy["max_findings"])]
@@ -375,7 +409,6 @@ def process(c, card):
         db.set_status(c, card["id"], policy["no_finding_terminal"])
         return
 
-    to_verify = 0
     repeat_finding = False
     for f in findings:
         rule = _stable_rule(f)
@@ -387,26 +420,28 @@ def process(c, card):
                             "impact": f.get("impact", ""),
                             "required_decision": f.get("required_decision", "")},
                            ensure_ascii=False)
-        if db.upsert_finding(
+        if not db.upsert_finding(
             c, card["id"], repo, pr, head, fp,
             title=f.get("title", ""), body=body,
             file=f.get("file"), line=f.get("line"),
             severity=f.get("severity"), confidence=f.get("confidence"),
             status="pending_verify",
         ):
-            to_verify += 1
-        else:
             previous = db.revalidate_finding(
                 c, card["id"], repo, pr, head, fp,
                 title=f.get("title", ""), body=body,
                 file=f.get("file"), line=f.get("line"),
                 severity=f.get("severity"), confidence=f.get("confidence"),
             )
-            if previous not in {"missing", "sticky"}:
-                to_verify += 1
-                repeat_finding = repeat_finding or previous in {
-                    "posted", "confirmed", "unresolved",
-                }
+            repeat_finding = repeat_finding or previous in {
+                "posted", "confirmed", "unresolved",
+            }
+
+    # Interrupted attempts can leave unverified findings on an obsolete card.
+    # Always verify them against this head rather than silently blocking LGTM.
+    for pf in db.recoverable_pending_findings(c, card):
+        db.reattach_finding(c, pf["id"], card["id"], "pending_verify")
+    to_verify = len(db.findings_for_card(c, card["id"], status="pending_verify"))
 
     # UNIQUE(repo, pr, fp) keeps a repeated finding on its original row. Closure
     # marks it unresolved; attach that row to this attempt so it is not lost.
@@ -448,6 +483,8 @@ def process(c, card):
         db.set_status(c, card["id"], "commented")
         db.log_event(c, "review_open_findings_block_lgtm", card["key"],
                      {"count": db.open_findings_count(c, repo, pr)})
+    elif meta.get("pathway_audit_invalid"):
+        db.set_status(c, card["id"], "commented")
     elif pending:
         db.set_status(c, card["id"], "commented")
         db.log_event(c, "review_author_decision_pending", card["key"],

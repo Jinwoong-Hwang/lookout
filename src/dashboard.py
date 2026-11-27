@@ -129,7 +129,14 @@ def build_board():
                     at = d.get("retry_at")
                     err = (f"⏸ {d.get('engine', '')} 토큰 소진으로 대기열 복귀"
                            + (f" · {at} 이후 재시도" if at else ""))
+            if meta.get("pathway_audit_invalid") and card["status"] != "triage":
+                audit = c.execute(
+                    "SELECT detail FROM events WHERE key=? AND type='pathway_audit_invalid'"
+                    " ORDER BY id DESC LIMIT 1", (card["key"],)).fetchone()
+                detail = json.loads(audit["detail"]) if audit and audit["detail"] else {}
+                err = "경로 감사 실패 · 승인 차단: " + str(detail.get("error") or "감사 결과를 확인할 수 없습니다")[:300]
             out.append({
+                "pathway_audit_invalid": bool(meta.get("pathway_audit_invalid")),
                 "id": card["id"], "kind": card["kind"], "status": card["status"],
                 "engine": card["engine"] or "claude",
                 "repo": card["repo"], "pr": card["pr_number"],
@@ -245,7 +252,8 @@ def do_finding_action(action, finding_id):
                               'dismiss_pending','defer_pending')""",
             (finding["repo"], finding["pr_number"]),
         ).fetchone()["n"]
-        if not blockers:
+        meta = json.loads(card["payload"] or "{}")
+        if not blockers and not meta.get("pathway_audit_invalid"):
             info = ghclient.pr_view(finding["repo"], finding["pr_number"])
             if (info.get("state") == "OPEN" and not info.get("isDraft")
                     and info.get("headRefOid") == card["head_sha"]):
@@ -1289,7 +1297,7 @@ function tile(c){
     btns+=`<div class="btns"><button class="go" onclick="publishDryRun(event,${c.id})">💬 dry-run 댓글 게시</button></div>`;
   const sm=smeta(c.status);
   el.style.borderLeftColor=stripe(sm.c);
-  const statusPill=`<span class="statuspill" style="${pill(sm.c)}">${sm.ko}</span>`;
+  const statusPill=`<span class="statuspill" style="${pill(sm.c)}">${c.pathway_audit_invalid&&c.status==='commented'?'⚠️ 경로 감사 실패 · 승인 차단':sm.ko}</span>`;
   const enginePill=(c.status!=='triage')?`<span class="pill">${c.engine}</span>`:'';
   const clo=c.closure&&(c.closure.resolved||c.closure.dismissed||c.closure.deferred||c.closure.unresolved||c.closure.pending)?`<span class="pill">✅${c.closure.resolved} ↪️${c.closure.deferred||0} ⚠️${c.closure.unresolved} 🧑‍⚖️${c.closure.pending||0}</span>`:'';
   const fb=c.feedback&&(c.feedback.up||c.feedback.down||c.feedback.confused||c.feedback.replies)

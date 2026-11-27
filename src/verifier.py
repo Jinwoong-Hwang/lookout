@@ -13,10 +13,11 @@ VERIFY_DIFF_CHARS = 40000
 def process(c, card):
     repo, pr, head = card["repo"], card["pr_number"], card["head_sha"]
     policy = profiles.policy_from_card(card)
+    audit_invalid = (json.loads(card["payload"] or "{}")).get("pathway_audit_invalid")
     pending = db.findings_for_card(c, card["id"], status="pending_verify")
     if not pending:
         decision_pending = db.pending_decision_findings(c, repo, pr)
-        if decision_pending or db.open_findings_count(c, repo, pr):
+        if audit_invalid or decision_pending or db.open_findings_count(c, repo, pr):
             terminal = "commented"
         else:
             terminal = (policy["no_confirmed_terminal"]
@@ -76,7 +77,7 @@ def process(c, card):
     decision_pending = db.pending_decision_findings(c, repo, pr)
     if confirmed:
         terminal = "commenting"
-    elif decision_pending or db.open_findings_count(c, repo, pr):
+    elif audit_invalid or decision_pending or db.open_findings_count(c, repo, pr):
         # 신규 지적이 전부 기각돼도, 재판정을 건너뛴 기존 지적이 남아 있으면
         # LGTM 이 아니다 — reviewer 쪽만 막아 두고 이 경로를 비워 뒀다(셀프 3회차)
         terminal = "commented"

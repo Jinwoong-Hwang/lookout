@@ -115,6 +115,17 @@ class CardSurfacesOperatorGateTest(unittest.TestCase):
     def _board(self):
         return {x["id"]: x for x in dashboard.build_board()}
 
+    def test_audit_failure_is_visible_even_when_the_card_is_commented(self):
+        with db.connect() as c:
+            card = self._card(c)
+            c.execute("UPDATE cards SET payload=? WHERE id=?",
+                      ('{"pathway_audit_invalid": true}', card))
+            db.log_event(c, "pathway_audit_invalid", "review:h", {"error": "coverage missing"})
+        got = self._board()[card]
+        self.assertTrue(got["pathway_audit_invalid"])
+        self.assertIn("경로 감사 실패 · 승인 차단", got["error"])
+        self.assertIn("coverage missing", got["error"])
+
     def test_pending_decisions_and_quiet_reason_reach_the_card(self):
         with db.connect() as c:
             card = self._card(c)
