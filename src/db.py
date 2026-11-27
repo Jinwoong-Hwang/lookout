@@ -487,6 +487,16 @@ def findings_for_card(c, card_id, status=None):
     return c.execute("SELECT * FROM findings WHERE card_id=?", (card_id,)).fetchall()
 
 
+def recoverable_pending_findings(c, card):
+    """Unverified findings must follow the PR to its next verification attempt."""
+    return c.execute(
+        """SELECT f.* FROM findings f JOIN cards source ON source.id=f.card_id
+           WHERE f.repo=? AND f.pr_number=? AND f.status='pending_verify'
+             AND (f.card_id=? OR source.status NOT IN ('intake','reviewing','verifying','commenting'))""",
+        (card["repo"], card["pr_number"], card["id"]),
+    ).fetchall()
+
+
 def postable_findings_for_card(c, card_id):
     """Findings on this card the author still needs to see.
 

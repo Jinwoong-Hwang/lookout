@@ -338,7 +338,6 @@ def process(c, card):
             )
         result = engines.run_json(prompt, engine=engine, cwd=wt, add_dir=wt)
         audit_result = {"findings": []}
-        audit_quota_error = None
         meta.pop("pathway_audit_invalid", None)
         if (not is_doc and CFG.get("pathway_audit_enabled", True)
                 and pathway_auditor.should_run(raw_diff)):
@@ -357,7 +356,7 @@ def process(c, card):
                 )
             except Exception as e:  # Audit failure must preserve the primary review and block LGTM.
                 if engines.is_quota_error(str(e)):
-                    audit_quota_error = e
+                    raise
                 meta["pathway_audit_invalid"] = True
                 db.log_event(c, "pathway_audit_invalid", card["key"], {"error": str(e)})
             else:
@@ -410,7 +409,6 @@ def process(c, card):
         db.set_status(c, card["id"], policy["no_finding_terminal"])
         return
 
-    to_verify = 0
     repeat_finding = False
     for f in findings:
         rule = _stable_rule(f)
@@ -422,30 +420,28 @@ def process(c, card):
                             "impact": f.get("impact", ""),
                             "required_decision": f.get("required_decision", "")},
                            ensure_ascii=False)
-        if db.upsert_finding(
+        if not db.upsert_finding(
             c, card["id"], repo, pr, head, fp,
             title=f.get("title", ""), body=body,
             file=f.get("file"), line=f.get("line"),
             severity=f.get("severity"), confidence=f.get("confidence"),
             status="pending_verify",
         ):
-            to_verify += 1
-        else:
             previous = db.revalidate_finding(
                 c, card["id"], repo, pr, head, fp,
                 title=f.get("title", ""), body=body,
                 file=f.get("file"), line=f.get("line"),
                 severity=f.get("severity"), confidence=f.get("confidence"),
             )
-            if previous not in {"missing", "sticky"}:
-                to_verify += 1
-                repeat_finding = repeat_finding or previous in {
-                    "posted", "confirmed", "unresolved",
-                }
+            repeat_finding = repeat_finding or previous in {
+                "posted", "confirmed", "unresolved",
+            }
 
-    # Findings are persisted before tick handles quota notification and requeue.
-    if audit_quota_error is not None:
-        raise audit_quota_error
+    # Interrupted attempts can leave unverified findings on an obsolete card.
+    # Always verify them against this head rather than silently blocking LGTM.
+    for pf in db.recoverable_pending_findings(c, card):
+        db.reattach_finding(c, pf["id"], card["id"], "pending_verify")
+    to_verify = len(db.findings_for_card(c, card["id"], status="pending_verify"))
 
     # UNIQUE(repo, pr, fp) keeps a repeated finding on its original row. Closure
     # marks it unresolved; attach that row to this attempt so it is not lost.

@@ -323,7 +323,7 @@ class PathwayAuditorIntegrationTest(unittest.TestCase):
 
     def _run_failed_audit(self, primary, audit):
         card = self.c.execute("SELECT * FROM cards WHERE id=?", (self.card_id,)).fetchone()
-        with mock.patch.object(ghclient, "pr_view", return_value={"state": "OPEN", "headRefOid": "head"}), \
+        with mock.patch.object(ghclient, "pr_view", return_value={"state": "OPEN", "headRefOid": card["head_sha"]}), \
                 mock.patch.object(ghclient, "pr_author_identity", return_value={"login": "author"}), \
                 mock.patch.object(ghclient, "collect_author_replies", return_value=[]), \
                 mock.patch.object(ledger, "build", return_value=("", "")), \
@@ -353,7 +353,7 @@ class PathwayAuditorIntegrationTest(unittest.TestCase):
         self.assertIsNotNone(self.c.execute(
             "SELECT 1 FROM events WHERE type='pathway_audit_invalid'").fetchone())
 
-    def test_quota_error_propagates_after_primary_findings_are_saved(self):
+    def test_quota_error_propagates_before_primary_findings_are_saved(self):
         primary = {"findings": [{
             "file": "src/app.ts", "line": "1", "rule": "bug",
             "severity": "high", "confidence": "high", "title": "primary bug",
@@ -361,8 +361,7 @@ class PathwayAuditorIntegrationTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "quota"):
             self._run_failed_audit(primary, RuntimeError("quota exhausted"))
         finding = self.c.execute("SELECT * FROM findings").fetchone()
-        self.assertEqual(finding["title"], "primary bug")
-        self.assertEqual(finding["status"], "pending_verify")
+        self.assertIsNone(finding)
 
     def test_audit_quota_uses_existing_notification_and_triage_path(self):
         card = self.c.execute("SELECT * FROM cards WHERE id=?", (self.card_id,)).fetchone()
@@ -376,6 +375,82 @@ class PathwayAuditorIntegrationTest(unittest.TestCase):
         self.assertIsNotNone(self.c.execute(
             "SELECT 1 FROM events WHERE type='review_quota_paused'").fetchone())
         self.assertIsNone(self.c.execute("SELECT 1 FROM events WHERE type='stage_error'").fetchone())
+
+    def _clean_audit(self):
+        return {"coverage": [{
+            "outcome": "send", "entry_point": "src/app.ts:onClick", "trigger": "click",
+            "handler_chain": ["send"], "success_sink": "sent", "failure_sink": "error",
+            "covered_by_change": True, "evidence": ["src/app.ts:1 send"],
+        }], "findings": []}
+
+    def _verify_recovered(self, confirmed):
+        card = self.c.execute("SELECT * FROM cards WHERE id=?", (self.card_id,)).fetchone()
+        with mock.patch.object(prdiff, "fetch", return_value="diff"), \
+                mock.patch.object(ghclient, "pr_author_identity", return_value={}), \
+                mock.patch.object(ghclient, "collect_author_replies", return_value=[]), \
+                mock.patch.object(ledger, "build", return_value=("", "")), \
+                mock.patch.object(worktree, "make_worktree", return_value="/tmp/wt"), \
+                mock.patch.object(worktree, "remove_worktree"), \
+                mock.patch.object(verifier.engines, "run_json", return_value={"confirmed": confirmed}):
+            verifier.process(self.c, card)
+
+    def test_existing_orphans_and_same_card_retries_reach_current_head_verification(self):
+        for source_status in ("triage", "archived", "same-card"):
+            for confirmed in (True, False):
+                with self.subTest(source=source_status, confirmed=confirmed):
+                    self.c.execute("DELETE FROM findings")
+                    source = self.card_id if source_status == "same-card" else db.upsert_card(
+                        self.c, "old:" + source_status, "review", "owner/repo", 7,
+                        source_status, "old-head")
+                    db.upsert_finding(self.c, source, "owner/repo", 7, "old-head", "orphan",
+                                      "old unverified bug", "{}", "src/app.ts", "1",
+                                      "high", "high", "pending_verify")
+                    card = self._run_failed_audit({"findings": []}, self._clean_audit())
+                    self.assertEqual(card["status"], "verifying")
+                    finding = self.c.execute("SELECT * FROM findings").fetchone()
+                    self.assertEqual(finding["card_id"], self.card_id)
+                    self.assertEqual(finding["status"], "pending_verify")
+                    self._verify_recovered(confirmed)
+                    finding = self.c.execute("SELECT * FROM findings").fetchone()
+                    self.assertEqual(finding["status"], "confirmed" if confirmed else "rejected")
+                    status = self.c.execute("SELECT status FROM cards WHERE id=?", (self.card_id,)).fetchone()[0]
+                    self.assertEqual(status, "commenting" if confirmed else "lgtm")
+
+    def test_active_attempts_and_other_pr_findings_are_not_taken(self):
+        source = db.upsert_card(self.c, "active", "review", "owner/repo", 7, "verifying", "head")
+        for repo, pr, fp in (("owner/repo", 7, "active"), ("other/repo", 7, "other-repo"),
+                             ("owner/repo", 8, "other-pr")):
+            db.upsert_finding(self.c, source, repo, pr, "head", fp, fp, "{}",
+                              "src/app.ts", "1", "high", "high", "pending_verify")
+        other_head = db.upsert_card(self.c, "other-head-active", "review", "owner/repo", 7,
+                                    "verifying", "other-head")
+        db.upsert_finding(self.c, other_head, "owner/repo", 7, "other-head", "other-head",
+                          "bug", "{}", "src/app.ts", "1", "high", "high", "pending_verify")
+        self._run_failed_audit({"findings": []}, self._clean_audit())
+        self.assertEqual(len(db.findings_for_card(self.c, other_head, "pending_verify")), 1)
+        self.assertEqual(len(db.findings_for_card(self.c, source, "pending_verify")), 3)
+        self.assertEqual(db.findings_for_card(self.c, self.card_id), [])
+
+    def test_quota_then_new_clean_head_can_reach_lgtm(self):
+        old_card = self.c.execute("SELECT * FROM cards WHERE id=?", (self.card_id,)).fetchone()
+        with mock.patch.object(db, "connect", side_effect=lambda: nullcontext(self.c)), \
+                mock.patch.object(tick.notify, "send"):
+            tick._process_one(lambda c, card: self._run_failed_audit({"findings": [{
+                "file": "src/app.ts", "line": "1", "rule": "bug", "severity": "high",
+                "confidence": "high", "title": "bug",
+            }]}, RuntimeError("quota exhausted")), old_card, "reviewer")
+        self.assertEqual(self.c.execute("SELECT status FROM cards WHERE id=?",
+                                       (old_card["id"],)).fetchone()[0], "triage")
+        with mock.patch.object(ghclient, "pr_view", return_value={
+                "state": "OPEN", "headRefOid": "new-head"}):
+            reviewer.process(self.c, old_card)
+        self.assertEqual(self.c.execute("SELECT status FROM cards WHERE id=?",
+                                       (old_card["id"],)).fetchone()[0], "archived")
+        self.card_id = db.upsert_card(self.c, "review:new-head", "review", "owner/repo", 7,
+                                     "intake", "new-head")
+        card = self._run_failed_audit({"findings": []}, self._clean_audit())
+        self.assertEqual(card["status"], "lgtm")
+        self.assertEqual(db.open_findings_count(self.c, "owner/repo", 7), 0)
 
     def test_engine_failure_without_primary_findings_blocks_lgtm(self):
         card = self._run_failed_audit({"findings": []}, RuntimeError("audit failed"))

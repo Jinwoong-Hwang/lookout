@@ -1,7 +1,8 @@
 import json
 import sqlite3
 import unittest
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
+from unittest import mock
 
 from src import dashboard, db, ghclient, router
 
@@ -191,6 +192,22 @@ class RereviewTest(unittest.TestCase):
             self.c.execute("SELECT status FROM cards WHERE id=?", (self.source_id,)).fetchone()["status"],
             "lgtm",
         )
+
+    def test_operator_decisions_cannot_bypass_failed_audit(self):
+        for action, status in (("operator_dismiss", "posted"),
+                               ("accept_author_decision", "defer_pending")):
+            with self.subTest(action=action):
+                self.c.execute("DELETE FROM findings")
+                db.merge_payload(self.c, self.source_id, {"pathway_audit_invalid": True})
+                db.upsert_finding(self.c, self.source_id, "owner/repo", 1, "head", "bug",
+                                  "bug", "{}", "src/a.ts", "1", "high", "high", status)
+                finding_id = self.c.execute("SELECT id FROM findings").fetchone()[0]
+                with mock.patch.object(db, "connect", side_effect=lambda: nullcontext(self.c)), \
+                        mock.patch.object(dashboard, "kick_tick") as kick:
+                    self.assertTrue(dashboard.do_finding_action(action, finding_id))
+                kick.assert_not_called()
+                self.assertEqual(self.c.execute("SELECT status FROM cards WHERE id=?",
+                                               (self.source_id,)).fetchone()[0], "commented")
 
     def test_operator_dismiss_clears_deferred_follow_up(self):
         db.upsert_finding(

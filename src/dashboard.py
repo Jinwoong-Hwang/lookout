@@ -252,7 +252,8 @@ def do_finding_action(action, finding_id):
                               'dismiss_pending','defer_pending')""",
             (finding["repo"], finding["pr_number"]),
         ).fetchone()["n"]
-        if not blockers:
+        meta = json.loads(card["payload"] or "{}")
+        if not blockers and not meta.get("pathway_audit_invalid"):
             info = ghclient.pr_view(finding["repo"], finding["pr_number"])
             if (info.get("state") == "OPEN" and not info.get("isDraft")
                     and info.get("headRefOid") == card["head_sha"]):
