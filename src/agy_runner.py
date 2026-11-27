@@ -1,9 +1,12 @@
 """Headless `agy` (Google Antigravity CLI) invocations for LLM review stages.
 
-Read-only by construction: session-only `--settings` restricts permissions to
-`read_file(*)` and denies write/command/MCP/network actions, `--disable-slash-commands`
-prevents PR diff text from triggering slash-command or skill expansion, and
-the target worktree is detached and never pushed (ADR-001, ADR-009).
+Read-only by construction: `--mode plan` disables auto-approval of arbitrary
+shell commands in headless mode (non-allowlisted commands are auto-denied),
+while session-only `--settings` allows `read_file(*)` plus read-only search
+commands (`rg`/`grep`/`ls`/`git ...`) and explicitly denies `write_file(*)`,
+MCP, and network URL tools. `--disable-slash-commands` prevents PR diff text
+from triggering slash-command or skill expansion, and the target worktree is
+detached and never pushed (ADR-001, ADR-009).
 
 Prompts are sent over stdin as NDJSON (`--input-format stream-json`) so large
 120KB+ PR diffs never hit OS `ARG_MAX` limits or non-TTY stdin hangs.
@@ -19,11 +22,23 @@ MODEL = CFG.get("agy_model")    # None -> agy default
 EFFORT = CFG.get("agy_effort")  # low|medium|high|xhigh|max, None -> agy default
 RUN_TIMEOUT = int(CFG.get("agy_timeout", 1800))
 
-READONLY_ALLOW = ("read_file(*)",)
+# agy는 모델에 별도 Grep/Glob 도구 대신 read_file + run_command를 노출하고,
+# command(...) 규칙은 토큰 프리픽스 매칭을 사용한다. --mode plan과 함께
+# 읽기 전용 검색 명령만 allow하면 검색은 통과하고 쓰기·복합 명령은 즉시 차단된다.
+READONLY_ALLOW = (
+    "read_file(*)",
+    "command(rg)",
+    "command(grep)",
+    "command(ls)",
+    "command(git status)",
+    "command(git diff)",
+    "command(git log)",
+    "command(git show)",
+    "command(git ls-files)",
+    "command(git grep)",
+)
 READONLY_DENY = (
     "write_file(*)",
-    "command(*)",
-    "unsandboxed(*)",
     "mcp(*)",
     "read_url(*)",
     "execute_url(*)",
@@ -43,6 +58,7 @@ class AgyError(RuntimeError):
 _NOISE_PREFIXES = (
     "I0", "I1", "I2", "I3", "I4", "I5", "I6", "I7", "I8", "I9",
     "-- stack trace:", "| ", "\t", "runtime.", "google3/", "Wraps:", "Error types:",
+    "warning: --mode plan has no effect",
 )
 
 
@@ -57,8 +73,15 @@ def _clean_stderr(text: str, limit: int = 500) -> str:
     return (" | ".join(out) or (text or "").strip())[-limit:]
 
 
-def _extract_result(stdout: str) -> str:
-    """Parse `stream-json` NDJSON (or single JSON) output and return the final text."""
+def _extract_result(stdout: str, stderr: str = "") -> str:
+    """Parse `stream-json` NDJSON (or single JSON) output and return the final text.
+
+    Fail closed when stream-json events were seen but no non-empty response or
+    agent_response delta was emitted — returning raw NDJSON would let parse_obj
+    pick up the first metadata event (e.g. `{"event": "init", ...}`) as a review
+    reply with zero findings (false LGTM).
+    """
+    saw_event = False
     result_obj = None
     deltas = []
     for raw in (stdout or "").splitlines():
@@ -72,6 +95,8 @@ def _extract_result(stdout: str) -> str:
         if not isinstance(obj, dict):
             continue
         event = obj.get("event")
+        if event is not None:
+            saw_event = True
         if event == "result" and isinstance(obj.get("result"), dict):
             result_obj = obj["result"]
         elif event == "step_update" and isinstance(obj.get("step_update"), dict):
@@ -82,6 +107,7 @@ def _extract_result(stdout: str) -> str:
             err = obj.get("error") or obj.get("message") or line
             raise AgyError(f"agy stream error: {str(err)[:500]}")
         elif "response" in obj and result_obj is None:
+            saw_event = True
             result_obj = obj
 
     if result_obj is not None:
@@ -98,6 +124,10 @@ def _extract_result(stdout: str) -> str:
         joined = "".join(deltas)
         if joined.strip():
             return joined
+    if saw_event or not (stdout or "").strip():
+        detail = _clean_stderr(stderr)
+        suffix = f": {detail}" if detail else ""
+        raise AgyError(f"agy returned no response{suffix}")
     return stdout
 
 
@@ -106,6 +136,7 @@ def run(prompt: str, cwd: str = None, add_dir: str = None, timeout: int = None,
     """Run agy headless in read-only mode, returning the assistant's final text."""
     args = [
         AGY,
+        "--mode", "plan",
         "--input-format", "stream-json",
         "--output-format", "stream-json",
         "--disable-slash-commands",
@@ -139,4 +170,4 @@ def run(prompt: str, cwd: str = None, add_dir: str = None, timeout: int = None,
     if proc.returncode != 0:
         detail = _clean_stderr(proc.stderr) or _clean_stderr(proc.stdout)
         raise AgyError(f"agy failed (rc={proc.returncode}): {detail}")
-    return _extract_result(proc.stdout)
+    return _extract_result(proc.stdout, proc.stderr)

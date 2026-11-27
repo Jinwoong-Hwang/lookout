@@ -65,15 +65,44 @@ class AgyRunnerTest(unittest.TestCase):
         sent = json.loads(kw["input"])
         self.assertEqual(sent, {"event": "user", "message": {"content": BIG}})
 
-    def test_readonly_settings_allow_read_and_deny_mutations(self):
+    def test_readonly_settings_allow_read_and_search_and_deny_mutations(self):
         agy_runner.run("review this", cwd="/tmp/wt")
         args, _ = self.calls[-1]
+        self.assertIn("--mode", args)
+        self.assertEqual(args[args.index("--mode") + 1], "plan")
         self.assertIn("--settings", args)
         settings = json.loads(args[args.index("--settings") + 1])
         perms = settings["permissions"]
-        self.assertEqual(perms["allow"], ["read_file(*)"])
-        for denied in ("write_file(*)", "command(*)", "unsandboxed(*)", "mcp(*)"):
+        for allowed in ("read_file(*)", "command(rg)", "command(grep)", "command(ls)", "command(git diff)"):
+            self.assertIn(allowed, perms["allow"])
+        for denied in ("write_file(*)", "mcp(*)", "read_url(*)", "execute_url(*)", "download_url(*)"):
             self.assertIn(denied, perms["deny"])
+
+    def test_empty_response_after_stream_events_fails_closed(self):
+        """Regression: empty response must not fall back to raw NDJSON and turn
+        the first init/step_update event into a zero-finding LGTM reply."""
+        self.stdout = (
+            json.dumps({"event": "init", "session_id": "s1"}) + "\n"
+            + json.dumps({"event": "result", "result": {"status": "SUCCESS", "response": ""}}) + "\n"
+        )
+        self.stderr = "jetski: no output produced — tool permission auto-denied\n"
+        with self.assertRaises(agy_runner.AgyError) as cm:
+            agy_runner.run("hi", cwd="/tmp/wt")
+        self.assertIn("agy returned no response", str(cm.exception))
+        self.assertIn("auto-denied", str(cm.exception))
+
+        # Only non-agent_response step_update events without a result event
+        self.stdout = (
+            json.dumps({"event": "init", "session_id": "s1"}) + "\n"
+            + json.dumps({"event": "step_update", "step_update": {"step_type": "tool", "state": "ERROR"}}) + "\n"
+        )
+        self.stderr = ""
+        with self.assertRaises(agy_runner.AgyError):
+            agy_runner.run("hi", cwd="/tmp/wt")
+
+        # Non-event plain JSON fallback still works when no stream events were seen
+        self.stdout = '{"lgtm": true}'
+        self.assertEqual(agy_runner.run("hi", cwd="/tmp/wt"), '{"lgtm": true}')
 
     def test_model_and_effort_options(self):
         agy_runner.run("hi", cwd="/tmp/wt", model="gemini-4-neon-high", effort="xhigh")
