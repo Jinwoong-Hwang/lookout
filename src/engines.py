@@ -1,11 +1,8 @@
 """Review-engine dispatcher. A card's `engine` selects which LLM CLI runs the
 review/verify stages: 'claude' (Claude Code), 'codex' (OpenAI Codex),
 or 'agy' (Google Antigravity CLI)."""
-from functools import reduce
 import json
-import math
 import os
-import random
 import re
 import subprocess
 import time
@@ -155,71 +152,15 @@ def is_ready(engine: str) -> bool:
     return availability().get(engine, {}).get("ready", False)
 
 
-def _weighted_schedule(candidates: list[tuple[str, int]]) -> list[str]:
-    """Build an interleaved deterministic schedule matching integer weights."""
-    divisor = reduce(math.gcd, (w for _, w in candidates))
-    counts = [(e, max(1, w // divisor)) for e, w in candidates]
-    total = sum(w for _, w in counts)
-    current = {e: 0 for e, _ in counts}
-    weights = dict(counts)
-    schedule = []
-    for _ in range(total):
-        for e in current:
-            current[e] += weights[e]
-        best = max(current, key=current.get)
-        current[best] -= total
-        schedule.append(best)
-    return schedule
-
-
-def _pick_weighted(candidates: list[tuple[str, int]], c=None) -> str:
-    if len(candidates) == 1:
-        return candidates[0][0]
-    if c is not None:
-        schedule = _weighted_schedule(candidates)
-        try:
-            row = c.execute("SELECT v FROM meta WHERE k='default_engine_rr'").fetchone()
-            idx = int(row["v"]) if row and row["v"] is not None else 0
-            chosen = schedule[idx % len(schedule)]
-            c.execute(
-                "INSERT INTO meta(k,v) VALUES('default_engine_rr',?) "
-                "ON CONFLICT(k) DO UPDATE SET v=excluded.v",
-                (str(idx + 1),),
-            )
-            return chosen
-        except Exception:  # noqa: BLE001 - fall back to weighted random
-            pass
-    return random.choices(
-        [e for e, _ in candidates],
-        weights=[w for _, w in candidates],
-        k=1,
-    )[0]
-
-
-def default_engine(c=None) -> str:
+def default_engine() -> str:
     """Engine for automatic review cards.
 
-    Supports optional `default_review_engine_weights` (e.g. {"codex": 50, "agy": 50})
-    using a DB-persisted balanced round-robin when `c` is given (so short-lived
-    tick processes maintain the exact ratio), falling back to weighted random.
-    Otherwise prefers a ready configured `default_review_engine`.
+    Prefer a ready configured engine. If only one engine is usable, pick it so
+    Codex-only or Claude-only installs do not create cards for the unavailable
+    runner.
     """
-    avail = availability()
-    weights_cfg = config.CFG.get("default_review_engine_weights")
-    if isinstance(weights_cfg, dict) and weights_cfg:
-        candidates = []
-        for e, w in weights_cfg.items():
-            if e in ENGINES and avail.get(e, {}).get("ready"):
-                try:
-                    wi = int(w)
-                except (TypeError, ValueError):
-                    wi = 0
-                if wi > 0:
-                    candidates.append((e, wi))
-        if candidates:
-            return _pick_weighted(candidates, c=c)
-
     configured = config.CFG.get("default_review_engine")
+    avail = availability()
     if configured in ENGINES and avail.get(configured, {}).get("ready"):
         return configured
     ready = [e for e in ENGINES if avail.get(e, {}).get("ready")]

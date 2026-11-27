@@ -70,14 +70,21 @@ class AgyRunnerTest(unittest.TestCase):
         args, _ = self.calls[-1]
         self.assertIn("--mode", args)
         self.assertEqual(args[args.index("--mode") + 1], "plan")
+        self.assertIn("--sandbox", args)
         self.assertIn("--settings", args)
         settings = json.loads(args[args.index("--settings") + 1])
         perms = settings["permissions"]
-        for allowed in ("read_file(*)", "command(rg)", "command(grep)", "command(find)",
-                        "command(head)", "command(ls)", "command(git diff)"):
+        for allowed in ("read_file(*)", "command(grep)", "command(ls)",
+                        "command(git ls-files)", "command(head)", "command(tail)",
+                        "command(wc)", "command(cat)"):
             self.assertIn(allowed, perms["allow"])
-        for denied in ("write_file(*)", "mcp(*)", "read_url(*)", "execute_url(*)", "download_url(*)",
-                       "command(regex:find .*-(?:exec|execdir|delete|ok|okdir).*)"):
+        # 위험 옵션(임의 실행·파일 쓰기)이 있는 명령은 allow에 들어가면 안 된다
+        for unsafe in ("command(rg)", "command(find)", "command(git grep)",
+                       "command(git diff)", "command(git log)", "command(git show)"):
+            self.assertNotIn(unsafe, perms["allow"])
+            self.assertIn(unsafe, perms["deny"])
+        for denied in ("write_file(*)", "unsandboxed(*)", "mcp(*)",
+                       "read_url(*)", "execute_url(*)", "download_url(*)"):
             self.assertIn(denied, perms["deny"])
 
     def test_empty_response_after_stream_events_fails_closed(self):
@@ -202,44 +209,6 @@ class AgyEngineIntegrationTest(unittest.TestCase):
             c2 = conn.execute("SELECT engine, status FROM cards WHERE id=?", (cid2,)).fetchone()
             self.assertEqual((c1["engine"], c1["status"]), ("agy", "intake"))
             self.assertEqual((c2["engine"], c2["status"]), ("agy", "intake"))
-        finally:
-            conn.close()
-
-    def test_default_engine_weights_round_robin_and_fallback(self):
-        import sqlite3
-
-        conn = sqlite3.connect(":memory:", isolation_level=None)
-        conn.row_factory = sqlite3.Row
-        conn.executescript(db.SCHEMA)
-        avail_both = {
-            "claude": {"installed": False, "logged_in": False, "ready": False},
-            "codex": {"installed": True, "logged_in": True, "ready": True},
-            "agy": {"installed": True, "logged_in": True, "ready": True},
-        }
-        try:
-            with (mock.patch.dict(config.CFG, {"default_review_engine_weights": {"codex": 50, "agy": 50}}),
-                  mock.patch.object(engines, "availability", return_value=avail_both)):
-                picks = [engines.default_engine(conn) for _ in range(6)]
-            self.assertEqual(picks, ["codex", "agy", "codex", "agy", "codex", "agy"])
-
-            # Custom ratio (70:30 -> 7 codex, 3 agy per 10)
-            conn.execute("DELETE FROM meta WHERE k='default_engine_rr'")
-            with (mock.patch.dict(config.CFG, {"default_review_engine_weights": {"codex": 70, "agy": 30}}),
-                  mock.patch.object(engines, "availability", return_value=avail_both)):
-                picks10 = [engines.default_engine(conn) for _ in range(10)]
-            self.assertEqual(picks10.count("codex"), 7)
-            self.assertEqual(picks10.count("agy"), 3)
-
-            # Unready engine is skipped automatically
-            avail_codex_only = dict(avail_both, agy={"installed": True, "logged_in": False, "ready": False})
-            with (mock.patch.dict(config.CFG, {"default_review_engine_weights": {"codex": 50, "agy": 50}}),
-                  mock.patch.object(engines, "availability", return_value=avail_codex_only)):
-                self.assertEqual(engines.default_engine(conn), "codex")
-
-            # Empty weights falls back to default_review_engine
-            with (mock.patch.dict(config.CFG, {"default_review_engine": "agy", "default_review_engine_weights": {}}),
-                  mock.patch.object(engines, "availability", return_value=avail_both)):
-                self.assertEqual(engines.default_engine(conn), "agy")
         finally:
             conn.close()
 

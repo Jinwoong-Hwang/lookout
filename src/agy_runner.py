@@ -1,12 +1,14 @@
 """Headless `agy` (Google Antigravity CLI) invocations for LLM review stages.
 
-Read-only by construction: `--mode plan` disables auto-approval of arbitrary
-shell commands in headless mode (non-allowlisted commands are auto-denied),
-while session-only `--settings` allows `read_file(*)` plus read-only search
-commands (`rg`/`grep`/`ls`/`git ...`) and explicitly denies `write_file(*)`,
-MCP, and network URL tools. `--disable-slash-commands` prevents PR diff text
-from triggering slash-command or skill expansion, and the target worktree is
-detached and never pushed (ADR-001, ADR-009).
+Read-only by construction: `--sandbox` + `unsandboxed(*)` deny keeps every
+shell command inside the OS sandbox (no network, no access outside the
+worktree/temp dirs), `--mode plan` disables auto-approval of arbitrary shell
+commands (non-allowlisted commands and shell redirections `>` are auto-denied),
+and session-only `--settings` restricts `allow` to `read_file(*)` plus pure
+stdout commands that have no arbitrary-exec or file-write flags.
+`--disable-slash-commands` prevents PR diff text from triggering slash-command
+or skill expansion, and the target worktree is detached and never pushed
+(ADR-001, ADR-009).
 
 Prompts are sent over stdin as NDJSON (`--input-format stream-json`) so large
 120KB+ PR diffs never hit OS `ARG_MAX` limits or non-TTY stdin hangs.
@@ -23,45 +25,34 @@ EFFORT = CFG.get("agy_effort")  # low|medium|high|xhigh|max, None -> agy default
 RUN_TIMEOUT = int(CFG.get("agy_timeout", 1800))
 
 # agy는 모델에 별도 Grep/Glob 도구 대신 read_file + run_command를 노출하고,
-# command(...) 규칙은 토큰 프리픽스 매칭을 사용한다(파이프된 각 명령도 개별 검사).
-# --mode plan과 함께 읽기 전용 탐색·파이프 명령만 allow하고 find 변경 플래그는
-# deny하면 검색·열람은 통과하고 쓰기·복합 변경 명령은 즉시 차단된다.
+# command(...) 규칙은 토큰 프리픽스 매칭을 사용한다(파이프된 각 명령도 개별 검사,
+# `>` 리다이렉션은 별도 차단). 임의 실행·파일 쓰기 옵션이 없는 순수 stdout 명령만
+# allow하고, 모델이 자주 시도하지만 위험 옵션이 있는 명령(rg --pre, git grep -O,
+# git diff/log --output, find -exec/-fprint 등)은 명시적 deny로 두어 턴 중단 대신
+# TOOL_ERROR를 받고 grep/git ls-files로 즉시 폴백하게 한다.
 READONLY_ALLOW = (
     "read_file(*)",
-    "command(rg)",
     "command(grep)",
-    "command(find)",
     "command(ls)",
-    "command(tree)",
-    "command(cat)",
+    "command(git ls-files)",
     "command(head)",
     "command(tail)",
     "command(wc)",
-    "command(sort)",
-    "command(uniq)",
-    "command(cut)",
-    "command(tr)",
-    "command(nl)",
-    "command(file)",
-    "command(stat)",
-    "command(git status)",
-    "command(git diff)",
-    "command(git log)",
-    "command(git show)",
-    "command(git ls-files)",
-    "command(git grep)",
-    "command(git blame)",
-    "command(git branch)",
-    "command(git rev-parse)",
-    "command(git merge-base)",
+    "command(cat)",
 )
 READONLY_DENY = (
     "write_file(*)",
+    "unsandboxed(*)",
     "mcp(*)",
     "read_url(*)",
     "execute_url(*)",
     "download_url(*)",
-    "command(regex:find .*-(?:exec|execdir|delete|ok|okdir).*)",
+    "command(rg)",
+    "command(find)",
+    "command(git grep)",
+    "command(git diff)",
+    "command(git log)",
+    "command(git show)",
 )
 READONLY_SETTINGS = json.dumps(
     {"permissions": {"allow": list(READONLY_ALLOW), "deny": list(READONLY_DENY)}},
@@ -156,6 +147,7 @@ def run(prompt: str, cwd: str = None, add_dir: str = None, timeout: int = None,
     args = [
         AGY,
         "--mode", "plan",
+        "--sandbox",
         "--input-format", "stream-json",
         "--output-format", "stream-json",
         "--disable-slash-commands",
