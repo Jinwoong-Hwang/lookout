@@ -5,12 +5,14 @@ by dry-run flags in the workers, not here.
 """
 import hashlib
 import json
+import logging
 import re
 import subprocess
 
 from . import config
 
 GH = config.resolve_bin(config.CFG["gh_bin"])
+LOG = logging.getLogger(__name__)
 FP_MARKER = "<!-- hermes:fp="
 # PR 본문이 길면(설계 문서째 붙는 PR이 있다) 대화 예산을 혼자 다 먹는다.
 PR_BODY_CHARS = 8000
@@ -54,6 +56,63 @@ def pr_list_open(repo: str) -> list:
     fields = "number,headRefOid,author,isDraft,state,title,url"
     proc = _run(["pr", "list", "--repo", repo, "--state", "open", "--limit", "100", "--json", fields])
     return json.loads(proc.stdout)
+
+
+def pr_states(refs: list[tuple[str, int]], batch_size: int = 75) -> dict:
+    """Fetch state/head for tracked PRs with one GraphQL call per bounded batch."""
+    unique = list(dict.fromkeys((repo, int(pr)) for repo, pr in refs))
+    out, errors = {}, []
+    for start in range(0, len(unique), batch_size):
+        batch = unique[start:start + batch_size]
+        grouped = {}
+        for repo, pr in batch:
+            if repo.count("/") != 1 or not all(repo.split("/", 1)):
+                exc = GhError(f"invalid GitHub repository: {repo!r}")
+                errors.append(exc)
+                LOG.warning("Skipping malformed PR ref %r#%s: %s", repo, pr, exc)
+                continue
+            grouped.setdefault(repo, []).append(pr)
+        if not grouped:
+            continue
+        fields, aliases = [], {}
+        for repo_idx, (repo, prs) in enumerate(grouped.items()):
+            owner, name = repo.split("/", 1)
+            pr_fields = []
+            for pr_idx, pr in enumerate(prs):
+                alias = f"p{pr_idx}"
+                aliases[(f"r{repo_idx}", alias)] = (repo, pr)
+                pr_fields.append(
+                    f"{alias}: pullRequest(number: {pr}) "
+                    "{ number state headRefOid author { login } }"
+                )
+            fields.append(
+                f"r{repo_idx}: repository(owner: {json.dumps(owner)}, "
+                f"name: {json.dumps(name)}) {{ {' '.join(pr_fields)} }}"
+            )
+        query = "query { " + " ".join(fields) + " }"
+        try:
+            proc = _run(["api", "graphql", "-f", f"query={query}"], check=False)
+            payload = json.loads(proc.stdout)
+            if not payload.get("data"):
+                detail = proc.stderr.strip() or repr(payload.get("errors") or payload)
+                raise GhError(f"GitHub GraphQL failed: {detail}")
+            if proc.returncode != 0 or payload.get("errors"):
+                LOG.warning(
+                    "GitHub GraphQL batch returned partial data: returncode=%s errors=%r stderr=%s",
+                    proc.returncode, payload.get("errors"), proc.stderr.strip(),
+                )
+        except (GhError, json.JSONDecodeError) as exc:
+            errors.append(exc)
+            LOG.warning("GitHub GraphQL batch failed: %s", exc)
+            continue
+        data = payload.get("data") or {}
+        for (repo_alias, pr_alias), ref in aliases.items():
+            info = (data.get(repo_alias) or {}).get(pr_alias)
+            if info is not None:
+                out[ref] = info
+    if errors and not out:
+        raise errors[0]
+    return out
 
 
 def issue_list(repo: str, assignee: str = None, title_prefixes=None,

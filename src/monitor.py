@@ -7,8 +7,8 @@ closed/merged PRs are archived, stale commented cards are superseded.
 from . import db, feedback, ghclient
 
 
-def process_root(c, card):
-    info = ghclient.pr_view(card["repo"], card["pr_number"])
+def process_root(c, card, info=None):
+    info = info or ghclient.pr_view(card["repo"], card["pr_number"])
     if info.get("state") != "OPEN":
         feedback.snapshot_pr(c, card["repo"], card["pr_number"], "pr_closed", pr_info=info)
         # PR 머지/닫힘 → 그 PR의 모든 카드 archive (done 포함 — 머지됐으니 목록서 제거)
@@ -25,8 +25,8 @@ def process_root(c, card):
                    status="monitoring", head_sha=info["headRefOid"])
 
 
-def process_commented(c, card):
-    info = ghclient.pr_view(card["repo"], card["pr_number"])
+def process_commented(c, card, info=None):
+    info = info or ghclient.pr_view(card["repo"], card["pr_number"])
     if info.get("state") != "OPEN":
         feedback.snapshot_pr(c, card["repo"], card["pr_number"], "pr_closed", pr_info=info)
         db.set_status(c, card["id"], "archived")
@@ -40,9 +40,9 @@ def process_commented(c, card):
                      {"old": card["head_sha"], "new": info.get("headRefOid")})
 
 
-def process_active_stale(c, card):
+def process_active_stale(c, card, info=None):
     """Archive in-flight review cards that belong to an older PR head."""
-    info = ghclient.pr_view(card["repo"], card["pr_number"])
+    info = info or ghclient.pr_view(card["repo"], card["pr_number"])
     if info.get("state") != "OPEN":
         feedback.snapshot_pr(c, card["repo"], card["pr_number"], "pr_closed", pr_info=info)
         db.set_status(c, card["id"], "archived")
@@ -57,10 +57,10 @@ def process_active_stale(c, card):
                       "state": info.get("state"), "status": card["status"]})
 
 
-def process_approve_stale(c, card):
+def process_approve_stale(c, card, info=None):
     """승인대기(approve_blocked) 카드가 옛 head면 정리 — 그 사이 새 head로 재리뷰
     중인 카드가 따로 있으므로 유령 게이트를 archive. (현재 head 게이트는 그대로 둠)"""
-    info = ghclient.pr_view(card["repo"], card["pr_number"])
+    info = info or ghclient.pr_view(card["repo"], card["pr_number"])
     if info.get("state") != "OPEN" or info["headRefOid"] != card["head_sha"]:
         db.set_status(c, card["id"], "archived")
         db.log_event(c, "approve_superseded", card["key"],
@@ -68,9 +68,9 @@ def process_approve_stale(c, card):
                       "state": info.get("state")})
 
 
-def process_triage(c, card):
+def process_triage(c, card, info=None):
     """Drop a waiting (un-started) card if its head is no longer current."""
-    info = ghclient.pr_view(card["repo"], card["pr_number"])
+    info = info or ghclient.pr_view(card["repo"], card["pr_number"])
     if info.get("state") != "OPEN" or info["headRefOid"] != card["head_sha"]:
         db.set_status(c, card["id"], "archived")
         db.log_event(c, "triage_superseded", card["key"],
