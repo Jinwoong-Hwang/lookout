@@ -23,19 +23,37 @@ EFFORT = CFG.get("agy_effort")  # low|medium|high|xhigh|max, None -> agy default
 RUN_TIMEOUT = int(CFG.get("agy_timeout", 1800))
 
 # agy는 모델에 별도 Grep/Glob 도구 대신 read_file + run_command를 노출하고,
-# command(...) 규칙은 토큰 프리픽스 매칭을 사용한다. --mode plan과 함께
-# 읽기 전용 검색 명령만 allow하면 검색은 통과하고 쓰기·복합 명령은 즉시 차단된다.
+# command(...) 규칙은 토큰 프리픽스 매칭을 사용한다(파이프된 각 명령도 개별 검사).
+# --mode plan과 함께 읽기 전용 탐색·파이프 명령만 allow하고 find 변경 플래그는
+# deny하면 검색·열람은 통과하고 쓰기·복합 변경 명령은 즉시 차단된다.
 READONLY_ALLOW = (
     "read_file(*)",
     "command(rg)",
     "command(grep)",
+    "command(find)",
     "command(ls)",
+    "command(tree)",
+    "command(cat)",
+    "command(head)",
+    "command(tail)",
+    "command(wc)",
+    "command(sort)",
+    "command(uniq)",
+    "command(cut)",
+    "command(tr)",
+    "command(nl)",
+    "command(file)",
+    "command(stat)",
     "command(git status)",
     "command(git diff)",
     "command(git log)",
     "command(git show)",
     "command(git ls-files)",
     "command(git grep)",
+    "command(git blame)",
+    "command(git branch)",
+    "command(git rev-parse)",
+    "command(git merge-base)",
 )
 READONLY_DENY = (
     "write_file(*)",
@@ -43,6 +61,7 @@ READONLY_DENY = (
     "read_url(*)",
     "execute_url(*)",
     "download_url(*)",
+    "command(regex:find .*-(?:exec|execdir|delete|ok|okdir).*)",
 )
 READONLY_SETTINGS = json.dumps(
     {"permissions": {"allow": list(READONLY_ALLOW), "deny": list(READONLY_DENY)}},

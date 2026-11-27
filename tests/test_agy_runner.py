@@ -73,9 +73,11 @@ class AgyRunnerTest(unittest.TestCase):
         self.assertIn("--settings", args)
         settings = json.loads(args[args.index("--settings") + 1])
         perms = settings["permissions"]
-        for allowed in ("read_file(*)", "command(rg)", "command(grep)", "command(ls)", "command(git diff)"):
+        for allowed in ("read_file(*)", "command(rg)", "command(grep)", "command(find)",
+                        "command(head)", "command(ls)", "command(git diff)"):
             self.assertIn(allowed, perms["allow"])
-        for denied in ("write_file(*)", "mcp(*)", "read_url(*)", "execute_url(*)", "download_url(*)"):
+        for denied in ("write_file(*)", "mcp(*)", "read_url(*)", "execute_url(*)", "download_url(*)",
+                       "command(regex:find .*-(?:exec|execdir|delete|ok|okdir).*)"):
             self.assertIn(denied, perms["deny"])
 
     def test_empty_response_after_stream_events_fails_closed(self):
