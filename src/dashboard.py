@@ -154,7 +154,7 @@ ACTIVE_REVIEW = ("intake", "reviewing", "verifying", "commenting")
 
 
 def do_action(action, card_id, engine="claude"):
-    if engine not in ("claude", "codex"):
+    if engine not in engines.ENGINES:
         engine = "claude"
     kick = False
     stop_target = None
@@ -526,12 +526,14 @@ document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
 --muted:#9fabbe;--dim:#6b7688;--accent:#2dd4bf;--purple:#a78bfa;--good:#4ade80;--warn:#fbbf24;--bad:#fb7185;
 --header-bg:rgba(17,21,28,.86);--shadow:rgba(0,0,0,.28);
 --btn-accent-bg:#2dd4bf;--btn-accent-fg:#06101f;--btn-accent-bd:#2dd4bf;
---btn-purple-bg:#a78bfa;--btn-purple-fg:#0a0612;--btn-purple-bd:#a78bfa;}
+--btn-purple-bg:#a78bfa;--btn-purple-fg:#0a0612;--btn-purple-bd:#a78bfa;
+--btn-blue-bg:#60a5fa;--btn-blue-fg:#06101f;--btn-blue-bd:#60a5fa;}
 :root[data-theme="light"]{--bg:#eceef3;--panel:#f5f6f9;--panel2:#ffffff;--line:#e0e3ea;--ink:#243040;
 --muted:#677488;--dim:#a3abb8;--accent:#3aa99c;--purple:#9a7ee8;--good:#56b87f;--warn:#d99a3e;--bad:#ec7a8f;
 --header-bg:rgba(245,246,249,.9);--shadow:rgba(40,55,80,.08);
 --btn-accent-bg:#d6f2ed;--btn-accent-fg:#137a6d;--btn-accent-bd:#aee3da;
---btn-purple-bg:#ebe3fc;--btn-purple-fg:#6f4cc4;--btn-purple-bd:#d6c8f5;}
+--btn-purple-bg:#ebe3fc;--btn-purple-fg:#6f4cc4;--btn-purple-bd:#d6c8f5;
+--btn-blue-bg:#dbeafe;--btn-blue-fg:#1d4ed8;--btn-blue-bd:#bfdbfe;}
 :root[data-theme="light"] .card{box-shadow:0 1px 2px var(--shadow)}
 *{box-sizing:border-box}
 html,body{height:100%}
@@ -594,8 +596,8 @@ display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hi
 .dot{width:9px;height:9px;border-radius:50%;display:inline-block}
 .high{background:var(--bad)}.medium{background:var(--warn)}.low{background:var(--accent)}
 .btns{display:flex;gap:7px;margin-top:11px}
-.rev{display:flex;gap:7px;margin-top:11px}
-.rev button{flex:1}
+.rev{display:flex;flex-wrap:wrap;gap:7px;margin-top:11px}
+.rev button{flex:1 1 auto}
 .rev button:disabled{background:var(--panel);border-color:var(--line);color:var(--dim);filter:none;cursor:not-allowed}
 .engnote{margin-top:11px;font-size:11.5px;color:var(--warn);line-height:1.45;
   background:rgba(251,191,36,.08);border:1px solid rgba(251,191,36,.32);border-radius:9px;padding:8px 10px}
@@ -608,6 +610,7 @@ button:disabled{opacity:.6;cursor:default}
 button.go{background:var(--btn-accent-bg);border-color:var(--btn-accent-bd);color:var(--btn-accent-fg);font-weight:700}
 button.claude{background:var(--btn-accent-bg);border-color:var(--btn-accent-bd);color:var(--btn-accent-fg);font-weight:700}
 button.codex{background:var(--btn-purple-bg);border-color:var(--btn-purple-bd);color:var(--btn-purple-fg);font-weight:700}
+button.agy{background:var(--btn-blue-bg);border-color:var(--btn-blue-bd);color:var(--btn-blue-fg);font-weight:700}
 button.stop{background:transparent;border-color:var(--bad);color:var(--bad)}
 button.stop:hover{background:var(--bad);color:#1a0608}
 .filterbar{display:flex;gap:7px;flex-wrap:wrap;padding:11px 22px;border-bottom:1px solid var(--line);
@@ -795,7 +798,7 @@ applyTheme();
 let DATA=[];let FEEDBACK=[];let ISSUES=[];let AUTHORS=[];let VIEW='lane';let REPO='all';
 let LANE_SCROLL={};
 // 엔진 가용성 — 초기엔 낙관적(true)으로 두고 /api/engines 응답으로 갱신
-let ENGINES={claude:{installed:true,logged_in:true,ready:true},codex:{installed:true,logged_in:true,ready:true}};
+let ENGINES={claude:{installed:true,logged_in:true,ready:true},codex:{installed:true,logged_in:true,ready:true},agy:{installed:true,logged_in:true,ready:true}};
 function engReady(e){return !!(ENGINES&&ENGINES[e]&&ENGINES[e].ready);}
 function engReason(e){const s=ENGINES&&ENGINES[e];
   if(!s)return '상태 확인 중';
@@ -867,16 +870,16 @@ async function load(){
 }
 function renderEngStat(){
   const el=document.getElementById('engStat');if(!el)return;
-  const parts=[['claude','Claude'],['codex','Codex']].map(([e,n])=>{
+  const parts=[['claude','Claude'],['codex','Codex'],['agy','Agy']].map(([e,n])=>{
     const r=engReady(e);
     return `<span title="${r?(n+' 사용 가능'):engReason(e)}" style="color:${r?'var(--good)':'var(--dim)'}">${n} ${r?'✓':'✗'}</span>`;
   });
   el.innerHTML='⚙️ '+parts.join(' · ');
 }
 function reviewButtons(id){
-  const defs=[['claude','리뷰 (Claude)'],['codex','리뷰 (Codex)']];
+  const defs=[['claude','리뷰 (Claude)'],['codex','리뷰 (Codex)'],['agy','리뷰 (Agy)']];
   if(!defs.some(([e])=>engReady(e)))
-    return `<div class="engnote">⚠️ 리뷰 엔진 미설정 — <code>claude</code> 또는 <code>codex</code> CLI 로그인이 필요합니다.</div>`;
+    return `<div class="engnote">⚠️ 리뷰 엔진 미설정 — <code>claude</code>, <code>codex</code> 또는 <code>agy</code> CLI 로그인이 필요합니다.</div>`;
   let h='<div class="rev">';
   defs.forEach(([e,label])=>{
     h+= engReady(e)

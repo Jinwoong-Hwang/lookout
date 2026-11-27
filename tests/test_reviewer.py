@@ -312,7 +312,11 @@ class ReviewerClosureTest(unittest.TestCase):
             "title": "same finding", "problem": "still relevant",
             "severity": "medium", "confidence": "high",
         }]
-        for engine, expected in (("codex", "review.codex.md"), ("claude", "review.claude.md")):
+        for engine, expected in (
+            ("codex", "review.codex.md"),
+            ("claude", "review.claude.md"),
+            ("agy", "review.codex.md"),
+        ):
             with self.subTest(engine=engine):
                 self.c.execute("UPDATE cards SET engine=? WHERE id=?", (engine, self.new_id))
                 self.c.execute("UPDATE cards SET status='intake' WHERE id=?", (self.new_id,))
@@ -327,7 +331,11 @@ class ReviewerClosureTest(unittest.TestCase):
     def test_legacy_snapshotted_policy_still_resolves_to_a_real_prompt(self):
         """A card whose payload predates the engine split must not crash."""
         legacy = {"profile_type": "code", "prompt_set": {"review": "review.md"}}
-        for engine, expected in (("codex", "review.codex.md"), ("claude", "review.claude.md")):
+        for engine, expected in (
+            ("codex", "review.codex.md"),
+            ("claude", "review.claude.md"),
+            ("agy", "review.codex.md"),
+        ):
             name = reviewer.profiles.prompt_name(
                 reviewer.profiles._normalize(legacy), "review", engine)
             self.assertEqual(name, expected)

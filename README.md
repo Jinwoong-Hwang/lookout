@@ -1,6 +1,6 @@
 # 👁 Lookout — 개인용 PR 리뷰 자동화
 
-**개인용 macOS 도구.** watch한 작성자의 PR을 Claude/Codex가 읽고 → **한국어 댓글 게시** → 사람이 최종 승인.
+**개인용 macOS 도구.** watch한 작성자의 PR을 Claude/Codex/Agy가 읽고 → **한국어 댓글 게시** → 사람이 최종 승인.
 
 댓글·승인은 전부 **본인 GitHub 계정**으로 나갑니다 (1인 1인스턴스, self-host).
 바깥으로 나가는 행동 중 approve 에는 **사람 게이트**가 있습니다.
@@ -9,8 +9,8 @@
 
 ## 사전 준비 (macOS)
 - `gh` 로그인 — `gh auth login`
-- `claude` 그리고/또는 `codex` CLI 로그인
-  (한쪽만 있어도 됩니다)
+- `claude`, `codex`, `agy` CLI 중 하나 이상 로그인
+  (하나만 있어도 됩니다)
 - `python3`, `git`, Xcode Command Line Tools (`xcode-select --install` — 앱 빌드용)
 
 ## 설치 (한 줄)
@@ -37,7 +37,7 @@ git clone https://github.com/Jinwoong-Hwang/lookout ~/lookout && cd ~/lookout &&
 
 ## PR 리뷰
 1. 📥 **Triage**에 watch한 사람들의 새 PR이 5분마다 자동으로 쌓임
-2. 카드에서 **[리뷰 (Claude)] / [리뷰 (Codex)]** 클릭 → 몇 초 내 시작
+2. 카드에서 **[리뷰 (Claude)] / [리뷰 (Codex)] / [리뷰 (Agy)]** 클릭 → 몇 초 내 시작
 3. 봇이 PR을 읽고 — 문제 있으면 **한국어 댓글 게시**, 없으면 통과
 4. **남의 PR** → 🔒 승인 대기 → **[🔓 승인]** = 내 계정으로 approve
    **내 PR** → 🏁 완료·머지대기 (self-approve 불가라 게이트 없이 통과 표시)
@@ -86,7 +86,7 @@ poller(5분) ─ PR ──→ SQLite kanban → tick(flock, 5분) ─┬ reviewe
 대시보드 :8788 ── 클릭(start/gate/stop) ────────────────┤ commenter(한국어 묶음댓글)
 Lookout.app(메뉴바+창) ─────────────────────────────────┘ approver(사람 unblock 시 approve)
 ```
-- 엔진: Claude `claude-opus-5`(effort 조절) / Codex(기본 `~/.codex/config.toml`, 현재 `gpt-6-astra`) — 카드별 선택
+- 엔진: Claude `claude-opus-5`(effort 조절) / Codex(기본 `~/.codex/config.toml`, 현재 `gpt-6-astra`) / Agy(Google Antigravity CLI, 기본 `agy` 설정) — 카드별 선택
 - tick은 프로세스 flock 하나로 직렬화되고, 리뷰는 `max_concurrent_reviews`까지 병렬
 - 엔진 토큰이 소진되면 카드를 대기열로 되돌리고 macOS 알림을 띄웁니다(같은 엔진은 15분에 한 번만)
 - 세션 요약은 tick 과 따로 도는 launchd 잡(`io.hermes.recap`, 1분 주기)이 슬롯 차례일 때만 codex 를 부릅니다 — tick 은 리뷰로 30분씩 붙잡혀 있을 수 있어서
@@ -110,7 +110,7 @@ Lookout.app(메뉴바+창) ─────────────────�
 | `repo_profiles` | repo별 리뷰 정책(문서 repo는 comment-only·dry-run 등) |
 | `max_findings_per_review` / `min_confidence` | 지적 개수·최소 확신도 |
 | `max_diff_chars` | 프롬프트 diff 예산. 초과분은 파일 목록으로 알려 워크트리에서 직접 열게 함 |
-| `claude_timeout` / `codex_timeout` | 엔진별 리뷰 상한(초, 기본 1800 / 1200). 큰 PR에서 잘리면 올립니다 |
+| `claude_timeout` / `codex_timeout` / `agy_timeout` | 엔진별 리뷰 상한(초, 기본 1800 / 1200 / 1800). 큰 PR에서 잘리면 올립니다 |
 
 **에픽별 뷰** (`issue_repos`가 비면 꺼짐)
 
@@ -135,6 +135,7 @@ Lookout.app(메뉴바+창) ─────────────────�
 |---|---|
 | `claude_model` / `claude_effort` | Claude 모델·추론강도(low~max) |
 | `codex_model` | Codex 모델(null=codex 기본) |
+| `agy_model` / `agy_effort` | Agy 모델·추론강도(null=agy 기본, effort는 low~max) |
 | `dry_run_comments` / `dry_run_approve` | 실게시·실승인 차단(검증용) |
 | `max_concurrent_reviews` | 동시 리뷰 수 |
 | `dashboard_host` / `dashboard_port` | 대시보드 바인딩(기본 `127.0.0.1:8788`) |
@@ -167,7 +168,7 @@ Lookout.app(메뉴바+창) ─────────────────�
 ## 운영
 ```bash
 ./hermes status | list [상태] | findings <id> | logs [n]     # 조회
-./hermes start <id> [claude|codex] | stop <id> | ignore <id> # 리뷰 카드 조작
+./hermes start <id> [claude|codex|agy] | stop <id> | ignore <id> # 리뷰 카드 조작
 ./hermes unblock <id> | publish-dryrun <id>                  # 승인 게이트 · dry-run 댓글 실게시
 ./hermes tick                                                # 파이프라인 1회 수동 실행
 ./hermes feedback-snapshot <id> | feedback-weekly            # 리뷰 피드백 수집

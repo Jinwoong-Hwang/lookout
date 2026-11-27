@@ -1,14 +1,15 @@
 """Review-engine dispatcher. A card's `engine` selects which LLM CLI runs the
-review/verify stages: 'claude' (Claude Code) or 'codex' (OpenAI Codex)."""
+review/verify stages: 'claude' (Claude Code), 'codex' (OpenAI Codex),
+or 'agy' (Google Antigravity CLI)."""
 import json
 import os
 import re
 import subprocess
 import time
 
-from . import claude_runner, codex_runner, config
+from . import agy_runner, claude_runner, codex_runner, config
 
-ENGINES = ("claude", "codex")
+ENGINES = ("claude", "codex", "agy")
 
 
 class EngineError(RuntimeError):
@@ -27,6 +28,8 @@ _QUOTA_MARKERS = (
     "rate_limit",
     "too many requests",
     "quota",
+    "resource_exhausted",   # agy/gemini: RESOURCE_EXHAUSTED
+    "resource exhausted",
     "credit balance",
     "out of credits",
 )
@@ -46,6 +49,8 @@ def quota_retry_hint(text: str) -> str:
 def run(prompt: str, engine: str = "claude", **kw) -> str:
     if engine == "codex":
         return codex_runner.run(prompt, **kw)
+    if engine == "agy":
+        return agy_runner.run(prompt, **kw)
     return claude_runner.run(prompt, **kw)
 
 
@@ -99,7 +104,31 @@ def _codex_logged_in() -> bool:
         return False
 
 
-_LOGIN_FN = {"claude": _claude_logged_in, "codex": _codex_logged_in}
+def _agy_logged_in() -> bool:
+    # 1) Gemini API key 모드 (env 또는 env_file)
+    if config.subprocess_env().get("GEMINI_API_KEY"):
+        return True
+    # 2) 온보딩 완료 상태 파일 (~/.gemini/antigravity-cli/jetski_state.pbtxt)
+    state_path = os.path.expanduser("~/.gemini/antigravity-cli/jetski_state.pbtxt")
+    try:
+        with open(state_path, encoding="utf-8", errors="replace") as f:
+            if "post_onboarding" in f.read():
+                return True
+    except OSError:
+        pass
+    # 3) macOS Keychain 항목 존재 — -w 없이 메타만 조회하므로 프롬프트/시크릿 노출 없음
+    try:
+        r = subprocess.run(
+            ["security", "find-generic-password", "-s", "gemini"],
+            capture_output=True, timeout=4)
+        if r.returncode == 0:
+            return True
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return False
+
+
+_LOGIN_FN = {"claude": _claude_logged_in, "codex": _codex_logged_in, "agy": _agy_logged_in}
 
 
 def _status(engine: str) -> dict:
