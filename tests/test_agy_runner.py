@@ -78,9 +78,10 @@ class AgyRunnerTest(unittest.TestCase):
                         "command(git ls-files)", "command(head)", "command(tail)",
                         "command(wc)", "command(cat)"):
             self.assertIn(allowed, perms["allow"])
-        # 위험 옵션(임의 실행·파일 쓰기)이 있는 명령은 allow에 들어가면 안 된다
+        # 위험 옵션(임의 실행·파일 쓰기) 및 인터프리터·쉘 명령은 allow에 없고 deny에 있어야 한다
         for unsafe in ("command(rg)", "command(find)", "command(git grep)",
-                       "command(git diff)", "command(git log)", "command(git show)"):
+                       "command(git diff)", "command(git log)", "command(git show)",
+                       "command(python3)", "command(sh)", "command(bash)", "command(node)"):
             self.assertNotIn(unsafe, perms["allow"])
             self.assertIn(unsafe, perms["deny"])
         for denied in ("write_file(*)", "unsandboxed(*)", "mcp(*)",
