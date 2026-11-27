@@ -4,7 +4,7 @@
   python -m src.cli list [status]     list cards (optionally by lane)
   python -m src.cli findings <card>   findings for a review card
   python -m src.cli logs [n]          recent events
-  python -m src.cli start <card> [claude|codex]   start review on a triaged PR
+  python -m src.cli start <card> [claude|codex|agy]   start review on a triaged PR
   python -m src.cli ignore <card>     dismiss a triaged PR from the list
   python -m src.cli unblock <card>    approve a blocked approve-gate card
   python -m src.cli publish-dryrun <card>  post a dry-run comment to GitHub
@@ -17,7 +17,7 @@
 import json
 import sys
 
-from . import commenter, db, feedback, tick
+from . import commenter, db, engines, feedback, tick
 
 
 def _fmt_ts(ts):
@@ -71,8 +71,8 @@ def cmd_logs(n=30):
 
 
 def cmd_start(card_id, engine="claude"):
-    if engine not in ("claude", "codex"):
-        print("engine must be claude or codex")
+    if engine not in engines.ENGINES:
+        print(f"engine must be one of: {', '.join(engines.ENGINES)}")
         return
     db.init()
     with db.connect() as c:

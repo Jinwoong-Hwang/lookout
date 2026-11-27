@@ -30,7 +30,7 @@ def _slug(repo: str) -> str:
 
 
 def kill_review_process(repo: str, pr: int):
-    """이 PR의 진행 중 리뷰(claude/codex) 프로세스를 강제 종료.
+    """이 PR의 진행 중 리뷰(claude/codex/agy) 프로세스를 강제 종료.
     워커는 worktree(`<slug>__pr<pr>__…`)를 --add-dir/-C 로 넘기므로 그 경로로 매칭."""
     pattern = f"{_slug(repo)}__pr{pr}__"
     subprocess.run(["pkill", "-f", pattern], capture_output=True)

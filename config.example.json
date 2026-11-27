@@ -81,6 +81,12 @@
   "codex_bin": "codex",
   "codex_model": null,
   "_codex_model_note": "null 이면 ~/.codex/config.toml 의 기본 모델을 따른다(현재 gpt-6-astra). 특정 모델로 고정할 때만 값을 넣는다.",
+  "agy_bin": "agy",
+  "agy_model": null,
+  "_agy_model_note": "null 이면 agy 기본 모델을 따른다. 특정 모델로 고정할 때만 값을 넣는다.",
+  "agy_effort": null,
+  "_agy_timeout": "agy 리뷰 1회 상한(초).",
+  "agy_timeout": 1800,
   "default_review_engine": "codex",
 
   "worktree_dir": "worktrees",

@@ -101,10 +101,11 @@ def main():
     # 기본값은 운영 설정을 따른다 — 검증은 실제로 도는 엔진으로 해야 의미가 있다.
     # claude 로만 확인하면 closure 계약(reply_comment_id + 정확한 연속 인용)을
     # 그 엔진이 지켰다는 증거일 뿐이고, 리뷰 프롬프트도 엔진별로 갈린다.
+    valid_engines = ("claude", "codex", "agy")
     default_engine = config.CFG.get("default_review_engine") or "codex"
-    if default_engine not in ("claude", "codex"):
+    if default_engine not in valid_engines:
         default_engine = "codex"
-    ap.add_argument("--engine", default=default_engine, choices=("claude", "codex"),
+    ap.add_argument("--engine", default=default_engine, choices=valid_engines,
                     help=f"기본값은 config.default_review_engine (현재 {default_engine})")
     ap.add_argument("--workdir", default=os.path.join(HOME, ".replay"))
     ap.add_argument("--second-pass", action="store_true",

@@ -30,7 +30,11 @@ CODE_POLICY = {
         # (UI/반응형·환경분기·mock 잔존 등 항목 나열), Claude는 좁고 확실한
         # 머지블로커(보고 전 게이트 통과분만). 한쪽 항목을 다른 쪽에 맞추려
         # 하기 전에 이 결정을 먼저 확인할 것.
-        "review": {"claude": "review.claude.md", "codex": "review.codex.md"},
+        "review": {
+            "claude": "review.claude.md",
+            "codex": "review.codex.md",
+            "agy": "review.codex.md",
+        },
         "verify": "verify.md",
         "closure": "closure.md",
     },
