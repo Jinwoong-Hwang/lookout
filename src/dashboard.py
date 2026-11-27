@@ -194,7 +194,7 @@ def do_action(action, card_id, engine="claude"):
                        ORDER BY id DESC LIMIT 1""",
                     (card["repo"], card["pr_number"], card["head_sha"]),
                 ).fetchone()
-                chosen_engine = prior["engine"] if prior and prior["engine"] else engines.default_engine()
+                chosen_engine = prior["engine"] if prior and prior["engine"] else engines.default_engine(c)
             if not engines.is_ready(chosen_engine):
                 db.log_event(c, "operator_rereview_blocked", card["key"],
                              {"engine": chosen_engine})

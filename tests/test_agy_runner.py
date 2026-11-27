@@ -174,6 +174,44 @@ class AgyEngineIntegrationTest(unittest.TestCase):
         finally:
             conn.close()
 
+    def test_default_engine_weights_round_robin_and_fallback(self):
+        import sqlite3
+
+        conn = sqlite3.connect(":memory:", isolation_level=None)
+        conn.row_factory = sqlite3.Row
+        conn.executescript(db.SCHEMA)
+        avail_both = {
+            "claude": {"installed": False, "logged_in": False, "ready": False},
+            "codex": {"installed": True, "logged_in": True, "ready": True},
+            "agy": {"installed": True, "logged_in": True, "ready": True},
+        }
+        try:
+            with (mock.patch.dict(config.CFG, {"default_review_engine_weights": {"codex": 50, "agy": 50}}),
+                  mock.patch.object(engines, "availability", return_value=avail_both)):
+                picks = [engines.default_engine(conn) for _ in range(6)]
+            self.assertEqual(picks, ["codex", "agy", "codex", "agy", "codex", "agy"])
+
+            # Custom ratio (70:30 -> 7 codex, 3 agy per 10)
+            conn.execute("DELETE FROM meta WHERE k='default_engine_rr'")
+            with (mock.patch.dict(config.CFG, {"default_review_engine_weights": {"codex": 70, "agy": 30}}),
+                  mock.patch.object(engines, "availability", return_value=avail_both)):
+                picks10 = [engines.default_engine(conn) for _ in range(10)]
+            self.assertEqual(picks10.count("codex"), 7)
+            self.assertEqual(picks10.count("agy"), 3)
+
+            # Unready engine is skipped automatically
+            avail_codex_only = dict(avail_both, agy={"installed": True, "logged_in": False, "ready": False})
+            with (mock.patch.dict(config.CFG, {"default_review_engine_weights": {"codex": 50, "agy": 50}}),
+                  mock.patch.object(engines, "availability", return_value=avail_codex_only)):
+                self.assertEqual(engines.default_engine(conn), "codex")
+
+            # Empty weights falls back to default_review_engine
+            with (mock.patch.dict(config.CFG, {"default_review_engine": "agy", "default_review_engine_weights": {}}),
+                  mock.patch.object(engines, "availability", return_value=avail_both)):
+                self.assertEqual(engines.default_engine(conn), "agy")
+        finally:
+            conn.close()
+
 
 if __name__ == "__main__":
     unittest.main()

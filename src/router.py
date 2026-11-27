@@ -59,7 +59,7 @@ def ensure_pr_cards(c, repo: str, pr: int, source: str = "webhook"):
     vkey = keys.review_key(repo, pr, head)
     if db.get_card(c, vkey) is None:
         status = _initial_status(repo, db.get_auto_review(c, author))
-        engine = engines.default_engine()
+        engine = engines.default_engine(c)
         review_id = db.upsert_card(
             c, vkey, "review", repo, pr, status=status, head_sha=head,
             base_sha=info.get("baseRefName"),

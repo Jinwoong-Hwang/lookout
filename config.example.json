@@ -88,6 +88,8 @@
   "_agy_timeout": "agy 리뷰 1회 상한(초).",
   "agy_timeout": 1800,
   "default_review_engine": "codex",
+  "_default_review_engine_weights": "(선택) 엔진별 자동 리뷰 비율 가중치(예: {\"codex\": 50, \"agy\": 50}). 비우면 default_review_engine 단일 엔진 사용.",
+  "default_review_engine_weights": {},
 
   "worktree_dir": "worktrees",
   "repo_cache_dir": "repos",

@@ -107,6 +107,7 @@ Lookout.app(메뉴바+창) ─────────────────�
 | `allowlist` | 리뷰 대상 `owner/repo` |
 | `watch_authors` | 추적할 PR 작성자(비우면 전체) |
 | `default_review_engine` | 자동 생성 카드의 기본 엔진 |
+| `default_review_engine_weights` | (선택) 자동 생성 카드의 엔진별 분배 가중치(예: `{"codex": 50, "agy": 50}`). 비우면 단일 기본 엔진 사용 |
 | `repo_profiles` | repo별 리뷰 정책(문서 repo는 comment-only·dry-run 등) |
 | `max_findings_per_review` / `min_confidence` | 지적 개수·최소 확신도 |
 | `max_diff_chars` | 프롬프트 diff 예산. 초과분은 파일 목록으로 알려 워크트리에서 직접 열게 함 |
