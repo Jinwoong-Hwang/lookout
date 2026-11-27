@@ -338,6 +338,7 @@ def process(c, card):
             )
         result = engines.run_json(prompt, engine=engine, cwd=wt, add_dir=wt)
         audit_result = {"findings": []}
+        meta.pop("pathway_audit_invalid", None)
         if (not is_doc and CFG.get("pathway_audit_enabled", True)
                 and pathway_auditor.should_run(raw_diff)):
             audit_prompt = prompt_tpl.render(
@@ -345,17 +346,24 @@ def process(c, card):
                 REPO=repo, PR=pr, TITLE=meta.get("title", ""),
                 AUTHOR=meta.get("author", ""), HEAD=head, DIFF=diff, FILES=manifest,
                 PRIOR_FINDINGS=prior_findings, AUTHOR_NOTES=author_notes,
+                CURRENT_FINDINGS=_json.dumps(result.get("findings") or [], ensure_ascii=False),
                 MAX_FINDINGS=min(3, int(policy["max_findings"])),
             )
             db.log_event(c, "pathway_audit_started", card["key"], {"engine": engine})
-            audit_result = pathway_auditor.validate_result(
-                engines.run_json(audit_prompt, engine=engine, cwd=wt, add_dir=wt)
-            )
-            db.log_event(c, "pathway_audit_completed", card["key"], {
-                "engine": engine,
-                "coverage": len(audit_result.get("coverage") or []),
-                "findings": len(audit_result.get("findings") or []),
-            })
+            try:
+                audit_result = pathway_auditor.validate_result(
+                    engines.run_json(audit_prompt, engine=engine, cwd=wt, add_dir=wt)
+                )
+            except Exception as e:  # Audit failure must preserve the primary review and block LGTM.
+                meta["pathway_audit_invalid"] = True
+                db.log_event(c, "pathway_audit_invalid", card["key"], {"error": str(e)})
+            else:
+                db.log_event(c, "pathway_audit_completed", card["key"], {
+                    "engine": engine,
+                    "coverage": len(audit_result.get("coverage") or []),
+                    "findings": len(audit_result.get("findings") or []),
+                })
+        _save_payload(c, card["id"], meta)
     finally:
         if wt:
             worktree.remove_worktree(repo, wt)
@@ -472,6 +480,8 @@ def process(c, card):
         db.set_status(c, card["id"], "commented")
         db.log_event(c, "review_open_findings_block_lgtm", card["key"],
                      {"count": db.open_findings_count(c, repo, pr)})
+    elif meta.get("pathway_audit_invalid"):
+        db.set_status(c, card["id"], "commented")
     elif pending:
         db.set_status(c, card["id"], "commented")
         db.log_event(c, "review_author_decision_pending", card["key"],

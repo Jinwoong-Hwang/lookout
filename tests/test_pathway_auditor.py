@@ -2,7 +2,7 @@ import sqlite3
 import unittest
 from unittest import mock
 
-from src import db, ghclient, ledger, pathway_auditor, prdiff, prompt_tpl, reviewer, worktree
+from src import db, ghclient, ledger, pathway_auditor, prdiff, prompt_tpl, reviewer, verifier, worktree
 
 
 class PathwayAuditorTriggerTest(unittest.TestCase):
@@ -176,12 +176,26 @@ rename to src/worker.py
 """
         self.assertTrue(pathway_auditor.should_run(diff))
 
+    def test_generic_tokens_and_comment_lines_do_not_trigger_audit(self):
+        for line in (
+            "r = requests.get(url, timeout=30)", "// send analytics later",
+            "# retry later", "/* send later */", " * retry later",
+            "const label = useCallback(() => fmt(x), [x])",
+            "import { ErrorHandler } from './x'", "except ValueError:", "finally:",
+        ):
+            with self.subTest(line=line):
+                diff = "diff --git a/src/app.ts b/src/app.ts\n+" + line
+                self.assertFalse(pathway_auditor.should_run(diff))
+
 
 class PathwayAuditorPromptTest(unittest.TestCase):
     def test_sdk_owned_paths_search_repository_evidence_before_being_excluded(self):
         with open("prompts/pathway_review.md", encoding="utf-8") as f:
             prompt = f.read()
         self.assertIn("repository patches, vendored sources, and exact handler excerpts", prompt)
+        rendered = prompt_tpl.render("pathway_review.md", CURRENT_FINDINGS='[{"rule": "known-bug"}]')
+        self.assertIn('known-bug', rendered)
+        self.assertIn("Do not report these same defects again", rendered)
 
 
 class PathwayAuditorMergeTest(unittest.TestCase):
@@ -305,6 +319,42 @@ class PathwayAuditorIntegrationTest(unittest.TestCase):
         )
         event = self.c.execute("SELECT detail FROM events WHERE type='pathway_audit_completed'").fetchone()
         self.assertIsNotNone(event)
+
+    def _run_failed_audit(self, primary, audit):
+        card = self.c.execute("SELECT * FROM cards WHERE id=?", (self.card_id,)).fetchone()
+        with mock.patch.object(ghclient, "pr_view", return_value={"state": "OPEN", "headRefOid": "head"}), \
+                mock.patch.object(ghclient, "pr_author_identity", return_value={"login": "author"}), \
+                mock.patch.object(ghclient, "collect_author_replies", return_value=[]), \
+                mock.patch.object(ledger, "build", return_value=("", "")), \
+                mock.patch.object(prdiff, "fetch", return_value="diff --git a/src/app.ts b/src/app.ts\n+onClick={send}"), \
+                mock.patch.object(prdiff, "pack_logged", return_value=("DIFF", "MANIFEST")), \
+                mock.patch.object(worktree, "make_worktree", return_value="/tmp/wt"), \
+                mock.patch.object(worktree, "remove_worktree"), \
+                mock.patch.object(prompt_tpl, "render", side_effect=lambda name, **_kw: name), \
+                mock.patch.object(reviewer.engines, "run_json", side_effect=[primary, audit]), \
+                mock.patch.dict(reviewer.CFG, {"pathway_audit_enabled": True}):
+            reviewer.process(self.c, card)
+
+        return self.c.execute("SELECT * FROM cards WHERE id=?", (self.card_id,)).fetchone()
+
+    def test_invalid_audit_preserves_primary_findings_and_blocks_lgtm_after_rejection(self):
+        primary = {"findings": [{
+            "file": "src/app.ts", "line": "1", "rule": "bug",
+            "severity": "high", "confidence": "high", "title": "primary bug",
+        }]}
+        card = self._run_failed_audit(primary, {"coverage": [], "findings": []})
+        self.assertEqual(card["status"], "verifying")
+        finding = self.c.execute("SELECT * FROM findings").fetchone()
+        self.assertEqual(finding["title"], "primary bug")
+        db.set_finding_status(self.c, finding["id"], "rejected")
+        verifier.process(self.c, card)
+        self.assertEqual(self.c.execute("SELECT status FROM cards").fetchone()[0], "commented")
+        self.assertIsNotNone(self.c.execute(
+            "SELECT 1 FROM events WHERE type='pathway_audit_invalid'").fetchone())
+
+    def test_engine_failure_without_primary_findings_blocks_lgtm(self):
+        card = self._run_failed_audit({"findings": []}, RuntimeError("audit failed"))
+        self.assertEqual(card["status"], "commented")
 
 
 if __name__ == "__main__":

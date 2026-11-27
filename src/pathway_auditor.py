@@ -14,9 +14,9 @@ _DIFF_HEADER = re.compile(r"^diff --git a/(.+) b/(.+)$")
 _PATHWAY_SIGNAL = re.compile(
     r"\b(?:onPress|onClick|onSubmit|onRetry|onClose|onFocus|onBlur|"
     r"onMount|onUnmount|useEffect|useLayoutEffect|retry|resend|refresh|reconnect|"
-    r"onFailure|onFailed|onError|catch|reject|throw|except|finally|timeout|"
+    r"onFailure|onFailed|onError|catch|reject|throw|"
     r"navigate|router\.(?:push|replace)|addListener|removeListener|queue|flush|"
-    r"enqueue|dequeue|worker|consume|\w*Callback|\w*Handler)\b",
+    r"enqueue|dequeue|worker|consume|setCallback|completionHandler)\b",
     re.IGNORECASE,
 )
 _ACTION_SIGNAL = re.compile(
@@ -49,6 +49,8 @@ def should_run(diff: str) -> bool:
         if line.startswith(("+++", "---")):
             continue
         changed = line[1:]
+        if changed.lstrip().startswith(("//", "#", "/*", "*", "<!--")):
+            continue
         if (_PATHWAY_SIGNAL.search(changed) or _ACTION_SIGNAL.search(changed)
                 or _HANDLER_ACTION_SIGNAL.search(changed)):
             return True

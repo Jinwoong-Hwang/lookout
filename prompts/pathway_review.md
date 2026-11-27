@@ -16,6 +16,12 @@ Your only job is to find behavior paths that the change intended to cover but le
 ## Existing finding ledger
 {PRIOR_FINDINGS}
 
+## Findings already identified by the general reviewer this round
+{CURRENT_FINDINGS}
+
+Do not report these same defects again, even with a different title, rule, or location.
+Only add distinct defects missed by the general reviewer.
+
 ## Author notes
 {AUTHOR_NOTES}
 
