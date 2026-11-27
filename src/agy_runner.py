@@ -4,8 +4,8 @@ Read-only by construction: `--sandbox` + `unsandboxed(*)` deny keeps every
 shell command inside the OS sandbox (no network, no access outside the
 worktree/temp dirs), `--mode plan` disables auto-approval of arbitrary shell
 commands (non-allowlisted commands and shell redirections `>` are auto-denied),
-and session-only `--settings` restricts `allow` to `read_file(*)` plus pure
-stdout commands that have no arbitrary-exec or file-write flags.
+and session-only `--settings` scopes `read_file` to the target worktree plus
+pure stdout commands that have no arbitrary-exec or file-write flags.
 `--disable-slash-commands` prevents PR diff text from triggering slash-command
 or skill expansion, and the target worktree is detached and never pushed
 (ADR-001, ADR-009).
@@ -14,6 +14,7 @@ Prompts are sent over stdin as NDJSON (`--input-format stream-json`) so large
 120KB+ PR diffs never hit OS `ARG_MAX` limits or non-TTY stdin hangs.
 """
 import json
+import os
 import subprocess
 
 from . import config
@@ -27,11 +28,9 @@ RUN_TIMEOUT = int(CFG.get("agy_timeout", 1800))
 # agy는 모델에 별도 Grep/Glob 도구 대신 read_file + run_command를 노출하고,
 # command(...) 규칙은 토큰 프리픽스 매칭을 사용한다(파이프된 각 명령도 개별 검사,
 # `>` 리다이렉션은 별도 차단). 임의 실행·파일 쓰기 옵션이 없는 순수 stdout 명령만
-# allow하고, 모델이 자주 시도하지만 위험 옵션이 있는 명령(rg --pre, git grep -O,
-# git diff/log --output, find -exec/-fprint 등)은 명시적 deny로 두어 턴 중단 대신
-# TOOL_ERROR를 받고 grep/git ls-files로 즉시 폴백하게 한다.
-READONLY_ALLOW = (
-    "read_file(*)",
+# allow하고, 위험 옵션이 있거나 모델이 검증용으로 시도할 수 있는 명령은 명시적
+# deny로 두어 ask에 의한 턴 중단 대신 TOOL_ERROR를 받고 폴백하게 한다.
+READONLY_COMMAND_ALLOW = (
     "command(grep)",
     "command(ls)",
     "command(git ls-files)",
@@ -39,6 +38,14 @@ READONLY_ALLOW = (
     "command(tail)",
     "command(wc)",
     "command(cat)",
+    "command(cut)",
+    "command(tr)",
+    "command(nl)",
+    "command(stat)",
+    "command(file)",
+    "command(pwd)",
+    "command(basename)",
+    "command(dirname)",
 )
 READONLY_DENY = (
     "write_file(*)",
@@ -62,8 +69,8 @@ READONLY_DENY = (
     "command(git status)",
     "command(git blame)",
     "command(git branch)",
-    # 인터프리터·쉘·테스트 러너·변경/네트워크 명령 (ask로 빠지면 헤드리스 턴이 중단되므로
-    # 명시적 deny로 돌려 정적 코드 리뷰로 계속 진행하게 한다)
+    # 인터프리터·쉘·테스트 러너·변경/네트워크/기타 명령 (ask로 빠지면 헤드리스 턴이
+    # 중단되므로 명시적 deny로 돌려 정적 코드 리뷰로 계속 진행하게 한다)
     "command(sh)",
     "command(bash)",
     "command(zsh)",
@@ -87,6 +94,22 @@ READONLY_DENY = (
     "command(go)",
     "command(cargo)",
     "command(swift)",
+    "command(cd)",
+    "command(echo)",
+    "command(printf)",
+    "command(jq)",
+    "command(xargs)",
+    "command(diff)",
+    "command(env)",
+    "command(which)",
+    "command(test)",
+    "command([)",
+    "command(tee)",
+    "command(dd)",
+    "command(chmod)",
+    "command(chown)",
+    "command(ln)",
+    "command(rmdir)",
     "command(curl)",
     "command(wget)",
     "command(gh)",
@@ -95,11 +118,27 @@ READONLY_DENY = (
     "command(cp)",
     "command(touch)",
     "command(mkdir)",
+    "command(open)",
+    "command(osascript)",
+    "command(pbcopy)",
+    "command(pbpaste)",
 )
-READONLY_SETTINGS = json.dumps(
-    {"permissions": {"allow": list(READONLY_ALLOW), "deny": list(READONLY_DENY)}},
-    separators=(",", ":"),
-)
+
+
+def _readonly_settings(target_dir: str | None) -> str:
+    """Build session-only `--settings` JSON with `read_file` scoped to target_dir."""
+    if target_dir:
+        real = os.path.realpath(target_dir)
+        read_rules = [f"read_file({real}/**)"]
+        norm = os.path.abspath(target_dir)
+        if norm != real:
+            read_rules.append(f"read_file({norm}/**)")
+    else:
+        read_rules = ["read_file(*)"]
+    return json.dumps(
+        {"permissions": {"allow": [*read_rules, *READONLY_COMMAND_ALLOW], "deny": list(READONLY_DENY)}},
+        separators=(",", ":"),
+    )
 
 
 class AgyError(RuntimeError):
@@ -186,6 +225,9 @@ def _extract_result(stdout: str, stderr: str = "") -> str:
 def run(prompt: str, cwd: str = None, add_dir: str = None, timeout: int = None,
         model: str = None, effort: str = None) -> str:
     """Run agy headless in read-only mode, returning the assistant's final text."""
+    # worktree.kill_review_process()는 argv의 worktree 경로(`<slug>__pr<pr>__`)로
+    # 프로세스를 찾으므로 --add-dir에 작업 디렉토리를 항상 실어준다.
+    target_dir = add_dir or cwd
     args = [
         AGY,
         "--mode", "plan",
@@ -193,7 +235,7 @@ def run(prompt: str, cwd: str = None, add_dir: str = None, timeout: int = None,
         "--input-format", "stream-json",
         "--output-format", "stream-json",
         "--disable-slash-commands",
-        "--settings", READONLY_SETTINGS,
+        "--settings", _readonly_settings(target_dir),
     ]
     mdl = MODEL if model is None else model
     if mdl:
@@ -201,9 +243,6 @@ def run(prompt: str, cwd: str = None, add_dir: str = None, timeout: int = None,
     eff = EFFORT if effort is None else effort
     if eff:
         args += ["--effort", eff]
-    # worktree.kill_review_process()는 argv의 worktree 경로(`<slug>__pr<pr>__`)로
-    # 프로세스를 찾으므로 --add-dir에 작업 디렉토리를 항상 실어준다.
-    target_dir = add_dir or cwd
     if target_dir:
         args += ["--add-dir", target_dir]
 

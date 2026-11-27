@@ -74,19 +74,24 @@ class AgyRunnerTest(unittest.TestCase):
         self.assertIn("--settings", args)
         settings = json.loads(args[args.index("--settings") + 1])
         perms = settings["permissions"]
-        for allowed in ("read_file(*)", "command(grep)", "command(ls)",
-                        "command(git ls-files)", "command(head)", "command(tail)",
-                        "command(wc)", "command(cat)"):
+        real_wt = os.path.realpath("/tmp/wt")
+        self.assertIn(f"read_file({real_wt}/**)", perms["allow"])
+        self.assertNotIn("read_file(*)", perms["allow"])
+        for allowed in ("command(grep)", "command(ls)", "command(git ls-files)",
+                        "command(head)", "command(tail)", "command(wc)", "command(cat)",
+                        "command(cut)", "command(tr)", "command(nl)", "command(stat)"):
             self.assertIn(allowed, perms["allow"])
-        # 위험 옵션(임의 실행·파일 쓰기) 및 인터프리터·쉘 명령은 allow에 없고 deny에 있어야 한다
+        # 위험 옵션(임의 실행·파일 쓰기) 및 인터프리터·쉘·ask 유발 명령은 allow에 없고 deny에 있어야 한다
         for unsafe in ("command(rg)", "command(find)", "command(git grep)",
                        "command(git diff)", "command(git log)", "command(git show)",
-                       "command(python3)", "command(sh)", "command(bash)", "command(node)"):
+                       "command(python3)", "command(sh)", "command(bash)", "command(node)",
+                       "command(cd)", "command(jq)", "command(xargs)", "command(echo)"):
             self.assertNotIn(unsafe, perms["allow"])
             self.assertIn(unsafe, perms["deny"])
         for denied in ("write_file(*)", "unsandboxed(*)", "mcp(*)",
                        "read_url(*)", "execute_url(*)", "download_url(*)"):
             self.assertIn(denied, perms["deny"])
+        self.assertFalse(set(perms["allow"]) & set(perms["deny"]))
 
     def test_empty_response_after_stream_events_fails_closed(self):
         """Regression: empty response must not fall back to raw NDJSON and turn
